@@ -1,6 +1,6 @@
-#include <chrono>
 #include <cmath>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <string>
 
@@ -12,12 +12,12 @@
 #include <linux/can/raw.h>
 
 #include "rclcpp/rclcpp.hpp"
-#include "std_msgs/msg/float32.hpp"
+#include "motor_interfaces/msg/motor_command.hpp"
 
 class MotorNode : public rclcpp::Node
 {
 public:
-  MotorNode() : Node("motor_node"), last_position_(std::numeric_limits<float>::quiet_NaN())
+  MotorNode() : Node("motor_node")
   {
     can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (can_socket_ < 0) {
@@ -48,10 +48,8 @@ public:
       return;
     }
 
-    RCLCPP_INFO(this->get_logger(), "Bound to can0.");
-
-    subscription_ = this->create_subscription<std_msgs::msg::Float32>(
-      "/motor_command",
+    subscription_ = this->create_subscription<motor_interfaces::msg::MotorCommand>(
+      "motor_command",
       10,
       std::bind(&MotorNode::motor_command_callback, this, std::placeholders::_1));
 
@@ -85,11 +83,7 @@ private:
     frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
     frame.data[4] = 0xFF; frame.data[5] = 0xFF; frame.data[6] = 0xFF; frame.data[7] = 0xFC;
 
-    if (write(can_socket_, &frame, sizeof(frame)) == sizeof(frame)) {
-      RCLCPP_INFO(this->get_logger(), "ENABLE command sent.");
-    } else {
-      RCLCPP_ERROR(this->get_logger(), "Failed to send ENABLE command.");
-    }
+    write(can_socket_, &frame, sizeof(frame));
   }
 
   void disable_motor()
@@ -102,9 +96,7 @@ private:
     frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
     frame.data[4] = 0xFF; frame.data[5] = 0xFF; frame.data[6] = 0xFF; frame.data[7] = 0xFD;
 
-    if (write(can_socket_, &frame, sizeof(frame)) == sizeof(frame)) {
-      RCLCPP_INFO(this->get_logger(), "DISABLE command sent.");
-    }
+    write(can_socket_, &frame, sizeof(frame));
   }
 
   void send_mit_command(float p_des, float v_des, float kp, float kd, float t_ff)
@@ -134,26 +126,37 @@ private:
     frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
     frame.data[7] = t_int & 0xFF;
 
-    if (write(can_socket_, &frame, sizeof(frame)) != sizeof(frame)) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to send MIT command.");
+    if (write(can_socket_, &frame, sizeof(frame)) == sizeof(frame)) {
+      RCLCPP_INFO(this->get_logger(), "Sent MIT cmd: P=%.3f V=%.3f KP=%.3f KD=%.3f T=%.3f",
+                  p_des, v_des, kp, kd, t_ff);
     } else {
-      RCLCPP_INFO(this->get_logger(), "Sent MIT Cmd | P: %.3f", p_des);
+      RCLCPP_ERROR(this->get_logger(), "Failed to send MIT command.");
     }
   }
 
-  void motor_command_callback(const std_msgs::msg::Float32::SharedPtr msg)
+  bool changed(const motor_interfaces::msg::MotorCommand & msg)
   {
-    float pos = msg->data;
+    if (!has_last_) return true;
+    return msg.position != last_msg_.position ||
+           msg.velocity != last_msg_.velocity ||
+           msg.kp != last_msg_.kp ||
+           msg.kd != last_msg_.kd ||
+           msg.torque != last_msg_.torque;
+  }
 
-    if (std::isnan(last_position_) || pos != last_position_) {
-      last_position_ = pos;
-      send_mit_command(pos, 0.0f, 1.5f, 0.1f, 0.0f);
+  void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
+  {
+    if (changed(*msg)) {
+      last_msg_ = *msg;
+      has_last_ = true;
+      send_mit_command(msg->position, msg->velocity, msg->kp, msg->kd, msg->torque);
     }
   }
 
-  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr subscription_;
+  rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
   int can_socket_{-1};
-  float last_position_;
+  motor_interfaces::msg::MotorCommand last_msg_{};
+  bool has_last_{false};
 };
 
 int main(int argc, char ** argv)
