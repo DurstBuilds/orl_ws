@@ -17,7 +17,7 @@ int float_to_uint(float x, float x_min, float x_max, int bits) {
     if(x < x_min) x = x_min;
     else if(x > x_max) x = x_max;
     
-    return (int) ((x - x_min) * ((float)((1 << bits) - 1) / span)); [cite: 153, 161]
+    return (int) ((x - x_min) * ((float)((1 << bits) - 1) / span)); // [cite: 153, 161]
 }
 
 class CanTestNode : public rclcpp::Node {
@@ -51,7 +51,7 @@ public:
 
       // === [NEW] ENABLE MOTOR COMMAND ===
       struct can_frame frame;
-      frame.can_id = 0x01; // Default ID for AK70-10. Verify on your motor label!
+      frame.can_id = 0x00; // Default ID for AK70-10. Verify on your motor label!
       frame.can_dlc = 8;
       // Payload to enter MIT Mode (8 bytes)
       frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
@@ -70,7 +70,7 @@ public:
       // === [NEW] DISABLE MOTOR COMMAND ===
       // Sending 0xFD exits MIT mode and relaxes the motor
       struct can_frame frame;
-      frame.can_id = 0x01;
+      frame.can_id = 0x00;
       frame.can_dlc = 8;
       frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
       frame.data[4] = 0xFF; frame.data[5] = 0xFF; frame.data[6] = 0xFF; frame.data[7] = 0xFD;
@@ -94,15 +94,15 @@ public:
 
     // 2. Compress the floats into integers [cite: 153]
     // Position gets 16 bits of resolution; everything else gets 12 bits [cite: 153]
-    int p_int = float_to_uint(p_des, P_MIN, P_MAX, 16); [cite: 153]
-    int v_int = float_to_uint(v_des, V_MIN, V_MAX, 12); [cite: 154]
-    int kp_int = float_to_uint(kp, Kp_MIN, Kp_MAX, 12); [cite: 154]
-    int kd_int = float_to_uint(kd, Kd_MIN, Kd_MAX, 12); [cite: 154]
-    int t_int = float_to_uint(t_ff, T_MIN, T_MAX, 12); [cite: 154]
+    int p_int = float_to_uint(p_des, P_MIN, P_MAX, 16); //[cite: 153]
+    int v_int = float_to_uint(v_des, V_MIN, V_MAX, 12); //[cite: 154]
+    int kp_int = float_to_uint(kp, Kp_MIN, Kp_MAX, 12); //[cite: 154]
+    int kd_int = float_to_uint(kd, Kd_MIN, Kd_MAX, 12); //[cite: 154]
+    int t_int = float_to_uint(t_ff, T_MIN, T_MAX, 12); //[cite: 154]
 
     // 3. Bit-shifting magic to pack the 8-byte CAN frame [cite: 155]
     struct can_frame frame;
-    frame.can_id = 0x01; // Your Motor's CAN ID
+    frame.can_id = 0x00; // Your Motor's CAN ID
     frame.can_dlc = 8;
     
     frame.data[0] = p_int >> 8;                                 // Position high 8 bits [cite: 155]
