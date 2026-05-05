@@ -25,11 +25,21 @@ endif()
 # required for can_test_node
 add_executable(can_test_node src/can_test_node.cpp)
 ament_target_dependencies(can_test_node rclcpp std_msgs)
+
+# required for motor_node
+add_executable(motor_node src/motor_node.cpp)
+ament_target_dependencies(motor_node rclpp std_msgs)
+
+# required for terminal_position_publisher
+add_executable(terminal_position_publisher src/terminal_position_publisher.cpp)
+ament_target_dependencies(terminal_position_publisher rclcpp std_msgs)
+
 install(TARGETS
   can_test_node
+  motor_node
+  terminal_position_publisher
   DESTINATION lib/${PROJECT_NAME}
 )
 
-# next node here
 
 ament_package()

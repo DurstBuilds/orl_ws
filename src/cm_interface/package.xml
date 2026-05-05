@@ -4,7 +4,7 @@
   <name>cm_interface</name>
   <version>0.0.0</version>
   <description>TODO: Package description</description>
-  <maintainer email="jdurs@todo.todo">jdurs</maintainer>
+  <maintainer email="jdurst2000@gmail.com">jdurst</maintainer>
   <license>TODO: License declaration</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
