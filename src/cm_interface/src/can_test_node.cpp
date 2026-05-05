@@ -93,7 +93,7 @@ public:
     float Kd_MIN = 0.0f;    float Kd_MAX = 5.0f;   // Damping [cite: 153]
 
     // 2. Compress the floats into integers [cite: 153]
-    // Position gets 16 bits of resolution; everything else gets 12 bits [cite: 153]
+    // Position gets 16 bits of resolution; everything else gets 12 bits
     int p_int = float_to_uint(p_des, P_MIN, P_MAX, 16); //[cite: 153]
     int v_int = float_to_uint(v_des, V_MIN, V_MAX, 12); //[cite: 154]
     int kp_int = float_to_uint(kp, Kp_MIN, Kp_MAX, 12); //[cite: 154]
