@@ -62,6 +62,7 @@ public:
       } else {
           RCLCPP_INFO(this->get_logger(), "ENABLE command sent. Motor should be energized.");
       }
+      this->send_mit_command(0.0f, 0.0f, 1.5f,0.1f,0.0f);
     }
   }
 
@@ -81,7 +82,6 @@ public:
       close(can_socket_);
       RCLCPP_INFO(this->get_logger(), "CAN Socket closed safely.");
     }
-    this->send_mit_command(0.0f, 0.0f, 1.5f,0.1f,0.0f);
   }
 
   void send_mit_command(float p_des, float v_des, float kp, float kd, float t_ff) {
