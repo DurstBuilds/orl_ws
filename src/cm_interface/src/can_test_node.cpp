@@ -1,13 +1,15 @@
-#include <iostream>
+#include <cerrno>
+#include <cmath>
 #include <cstring>
-#include <sys/socket.h>
-#include <sys/ioctl.h>
+
 #include <net/if.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <linux/can.h>
 #include <linux/can/raw.h>
-#include <unistd.h>
+
 #include "rclcpp/rclcpp.hpp"
-#include <cmath>
 
 // Converts a float to an unsigned int, given range and number of bits [cite: 153]
 int float_to_uint(float x, float x_min, float x_max, int bits) {
@@ -22,48 +24,62 @@ int float_to_uint(float x, float x_min, float x_max, int bits) {
 
 class CanTestNode : public rclcpp::Node {
 public:
-  CanTestNode() : Node("can_test_node") {
-    
-    // 1. Create Socket
+  CanTestNode() : Node("can_test_node"), can_socket_(-1) {
     can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (can_socket_ < 0) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to create socket.");
+      RCLCPP_ERROR(this->get_logger(), "Failed to create socket: %s", std::strerror(errno));
       return;
     }
 
-    // 2. Find can0
     struct ifreq ifr;
-    std::strcpy(ifr.ifr_name, "can0");
+    std::memset(&ifr, 0, sizeof(ifr));
+    std::strncpy(ifr.ifr_name, "can0", IFNAMSIZ - 1);
     if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) {
-      RCLCPP_ERROR(this->get_logger(), "can0 not found.");
+      RCLCPP_ERROR(this->get_logger(), "can0 not found: %s", std::strerror(errno));
+      close(can_socket_);
+      can_socket_ = -1;
       return;
     }
 
-    // 3. Bind to Hardware
+    if (!is_can0_up()) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "can0 exists but is DOWN. Bring it up, e.g.: "
+        "sudo ip link set can0 down && "
+        "sudo ip link set can0 type can bitrate 1000000 && "
+        "sudo ip link set can0 up");
+      close(can_socket_);
+      can_socket_ = -1;
+      return;
+    }
+
     struct sockaddr_can addr;
+    std::memset(&addr, 0, sizeof(addr));
     addr.can_family = AF_CAN;
     addr.can_ifindex = ifr.ifr_ifindex;
 
-    if (bind(can_socket_, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-      RCLCPP_ERROR(this->get_logger(), "Bind failed.");
-    } else {
-      RCLCPP_INFO(this->get_logger(), "SUCCESS: Bound to can0. Attempting to Enable Motor...");
-
-      // === [NEW] ENABLE MOTOR COMMAND ===
-      struct can_frame frame;
-      frame.can_id = 0x00; // Default ID for AK70-10. Verify on your motor label!
-      frame.can_dlc = 8;
-      // Payload to enter MIT Mode (8 bytes)
-      frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
-      frame.data[4] = 0xFF; frame.data[5] = 0xFF; frame.data[6] = 0xFF; frame.data[7] = 0xFC;
-
-      if (write(can_socket_, &frame, sizeof(struct can_frame)) != sizeof(struct can_frame)) {
-          RCLCPP_ERROR(this->get_logger(), "Failed to send Enable command!");
-      } else {
-          RCLCPP_INFO(this->get_logger(), "ENABLE command sent. Motor should be energized.");
-      }
-      this->send_mit_command(0.0f, 0.0f, 1.5f,0.1f,0.0f);
+    if (bind(can_socket_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+      RCLCPP_ERROR(this->get_logger(), "Bind failed: %s", std::strerror(errno));
+      close(can_socket_);
+      can_socket_ = -1;
+      return;
     }
+
+    RCLCPP_INFO(this->get_logger(), "SUCCESS: Bound to can0. Attempting to Enable Motor...");
+
+    struct can_frame frame{};
+    frame.can_id = 0x00;  // Default ID for AK70-10. Verify on your motor label!
+    frame.can_dlc = 8;
+    frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
+    frame.data[4] = 0xFF; frame.data[5] = 0xFF; frame.data[6] = 0xFF; frame.data[7] = 0xFC;
+
+    if (!write_can_frame(frame, "Enable")) {
+      log_can_troubleshooting();
+      return;
+    }
+    RCLCPP_INFO(this->get_logger(), "ENABLE command sent. Motor should be energized.");
+
+    send_mit_command(0.0f, 0.0f, 1.5f, 0.1f, 0.0f);
   }
 
   ~CanTestNode() {
@@ -114,15 +130,63 @@ public:
     frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);       // Kd low 4 bits, torque high 4 bits [cite: 156]
     frame.data[7] = t_int & 0xFF;                               // Torque low 8 bits [cite: 156]
 
-    // 4. Send to the Linux Socket
-    if (write(can_socket_, &frame, sizeof(struct can_frame)) != sizeof(struct can_frame)) {
-        RCLCPP_ERROR(this->get_logger(), "Failed to send MIT command!");
-    } else {
-        RCLCPP_INFO(this->get_logger(), "Sent MIT Cmd | P: %.2f | V: %.2f", p_des, v_des);
+    if (write_can_frame(frame, "MIT")) {
+      RCLCPP_INFO(this->get_logger(), "Sent MIT Cmd | P: %.2f | V: %.2f", p_des, v_des);
     }
-}
+  }
 
 private:
+  bool is_can0_up()
+  {
+    int fd = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    if (fd < 0) {
+      return false;
+    }
+
+    struct ifreq ifr;
+    std::memset(&ifr, 0, sizeof(ifr));
+    std::strncpy(ifr.ifr_name, "can0", IFNAMSIZ - 1);
+
+    const bool up = ioctl(fd, SIOCGIFFLAGS, &ifr) == 0 &&
+                    (ifr.ifr_flags & IFF_UP) != 0;
+    close(fd);
+    return up;
+  }
+
+  bool write_can_frame(const struct can_frame & frame, const char * label)
+  {
+    if (can_socket_ < 0) {
+      return false;
+    }
+
+    const ssize_t nbytes = write(can_socket_, &frame, sizeof(frame));
+    if (nbytes == static_cast<ssize_t>(sizeof(frame))) {
+      return true;
+    }
+
+    RCLCPP_ERROR(
+      this->get_logger(), "Failed to send %s command (wrote %zd/%zu bytes): %s",
+      label, nbytes, sizeof(frame), std::strerror(errno));
+    return false;
+  }
+
+  void log_can_troubleshooting()
+  {
+    if (errno == ENETDOWN) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "can0 is not running (ENETDOWN). Run: "
+        "sudo ip link set can0 type can bitrate 1000000 && sudo ip link set can0 up");
+    } else if (errno == ENOBUFS || errno == EAGAIN) {
+      RCLCPP_ERROR(
+        this->get_logger(),
+        "TX queue full / no bus ACK (%s). Check: motor powered, CAN_H/CAN_L wired, "
+        "120 ohm termination, bitrate matches motor (usually 1 Mbps), and "
+        "'ip -details -statistics link show can0' for TX errors / bus-off.",
+        std::strerror(errno));
+    }
+  }
+
   int can_socket_;
 };
 
