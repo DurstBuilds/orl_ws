@@ -39,9 +39,14 @@ ament_target_dependencies(terminal_position_publisher rclcpp std_msgs)
 add_executable(terminal_motor_command src/terminal_motor_command.cpp)
 ament_target_dependencies(terminal_motor_command rclcpp std_msgs motor_interfaces)
 
+# AK70-10 CAN feedback listener
+add_executable(motor_feedback_node src/motor_feedback_node.cpp)
+ament_target_dependencies(motor_feedback_node rclcpp std_msgs)
+
 install(TARGETS
   can_test_node
   motor_node
+  motor_feedback_node
   terminal_position_publisher
   terminal_motor_command
   DESTINATION lib/${PROJECT_NAME}
