@@ -1,9 +1,15 @@
+// motor_node: sends AK70-10 MIT commands on CAN and reads the MIT feedback
+// reply on the same socket immediately after each command (drive ID 0).
+
+#include <chrono>
 #include <cmath>
+#include <cerrno>
 #include <cstring>
-#include <limits>
-#include <memory>
+#include <iomanip>
+#include <sstream>
 #include <string>
 
+#include <poll.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <sys/socket.h>
@@ -13,6 +19,103 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "motor_interfaces/msg/motor_command.hpp"
+
+namespace
+{
+
+// AK70-10 MIT mode limits (manual section 5.3)
+constexpr float kPMin = -12.5f;
+constexpr float kPMax = 12.5f;
+constexpr float kVMin = -50.0f;
+constexpr float kVMax = 50.0f;
+constexpr float kTMin = -25.0f;
+constexpr float kTMax = 25.0f;
+constexpr float kKpMin = 0.0f;
+constexpr float kKpMax = 500.0f;
+constexpr float kKdMin = 0.0f;
+constexpr float kKdMax = 5.0f;
+
+// MIT CAN ID equals drive ID (0x00 for drive 0)
+constexpr int kDriveId = 0;
+
+const char * mit_error_string(int code)
+{
+  switch (code) {
+    case 0: return "No fault";
+    case 1: return "Motor over-temperature";
+    case 2: return "Over-current";
+    case 3: return "Over-voltage";
+    case 4: return "Under-voltage";
+    case 5: return "Encoder fault";
+    case 6: return "MOSFET over-temperature";
+    case 7: return "Motor stall";
+    default: return "Unknown fault";
+  }
+}
+
+int float_to_uint(float x, float x_min, float x_max, int bits)
+{
+  if (x < x_min) {
+    x = x_min;
+  }
+  if (x > x_max) {
+    x = x_max;
+  }
+  const float span = x_max - x_min;
+  return static_cast<int>((x - x_min) * static_cast<float>((1 << bits) - 1) / span);
+}
+
+// Manual p.67: uint_to_float — inverse of pack for feedback decode
+float uint_to_float(int x_int, float x_min, float x_max, int bits)
+{
+  const float span = x_max - x_min;
+  return static_cast<float>(x_int) * span / static_cast<float>((1 << bits) - 1) + x_min;
+}
+
+// MIT feedback frame (manual p.66-67, unpack_reply)
+struct Ak70MitFeedback
+{
+  int drive_id{0};
+  uint32_t can_id{0};
+  float position_rad{0.0f};
+  float velocity_rad_s{0.0f};
+  float torque_nm{0.0f};
+  float temperature_c{0.0f};
+  int error_code{0};
+
+  bool unpack_reply(const struct can_frame & frame, int expected_drive_id)
+  {
+    if (frame.can_dlc < 7) {
+      return false;
+    }
+
+    can_id = frame.can_id & CAN_SFF_MASK;
+    drive_id = frame.data[0];
+
+    // Feedback CAN ID and first data byte both equal drive ID
+    if (static_cast<int>(can_id) != expected_drive_id ||
+        drive_id != expected_drive_id)
+    {
+      return false;
+    }
+
+    // Bytes 1-2: position (16-bit), 3-4: velocity (12-bit), 4-5: torque (12-bit), 6: temp
+    const int p_int = (frame.data[1] << 8) | frame.data[2];
+    const int v_int = (frame.data[3] << 4) | (frame.data[4] >> 4);
+    const int i_int = ((frame.data[4] & 0x0F) << 8) | frame.data[5];
+    const int t_int = frame.data[6];
+
+    position_rad = uint_to_float(p_int, kPMin, kPMax, 16);
+    velocity_rad_s = uint_to_float(v_int, kVMin, kVMax, 12);
+    torque_nm = uint_to_float(i_int, kTMin, kTMax, 12);
+    temperature_c = static_cast<float>(t_int) - 40.0f;
+    error_code = frame.can_dlc >= 8 ? static_cast<int>(frame.data[7]) : 0;
+
+    return true;
+  }
+};
+
+}  // namespace
 
 class MotorNode : public rclcpp::Node
 {
@@ -65,56 +168,59 @@ public:
   }
 
 private:
-  int float_to_uint(float x, float x_min, float x_max, int bits)
-  {
-    if (x < x_min) x = x_min;
-    if (x > x_max) x = x_max;
-    float span = x_max - x_min;
-    return static_cast<int>((x - x_min) * (((1 << bits) - 1) / span));
-  }
-
   void enable_motor()
   {
-    if (can_socket_ < 0) return;
+    if (can_socket_ < 0) {
+      return;
+    }
 
-    struct can_frame frame;
-    frame.can_id = 0x00;
+    struct can_frame frame{};
+    frame.can_id = kDriveId;
     frame.can_dlc = 8;
-    frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
-    frame.data[4] = 0xFF; frame.data[5] = 0xFF; frame.data[6] = 0xFF; frame.data[7] = 0xFC;
+    frame.data[0] = 0xFF;
+    frame.data[1] = 0xFF;
+    frame.data[2] = 0xFF;
+    frame.data[3] = 0xFF;
+    frame.data[4] = 0xFF;
+    frame.data[5] = 0xFF;
+    frame.data[6] = 0xFF;
+    frame.data[7] = 0xFC;
 
     write(can_socket_, &frame, sizeof(frame));
   }
 
   void disable_motor()
   {
-    if (can_socket_ < 0) return;
+    if (can_socket_ < 0) {
+      return;
+    }
 
-    struct can_frame frame;
-    frame.can_id = 0x00;
+    struct can_frame frame{};
+    frame.can_id = kDriveId;
     frame.can_dlc = 8;
-    frame.data[0] = 0xFF; frame.data[1] = 0xFF; frame.data[2] = 0xFF; frame.data[3] = 0xFF;
-    frame.data[4] = 0xFF; frame.data[5] = 0xFF; frame.data[6] = 0xFF; frame.data[7] = 0xFD;
+    frame.data[0] = 0xFF;
+    frame.data[1] = 0xFF;
+    frame.data[2] = 0xFF;
+    frame.data[3] = 0xFF;
+    frame.data[4] = 0xFF;
+    frame.data[5] = 0xFF;
+    frame.data[6] = 0xFF;
+    frame.data[7] = 0xFD;
 
     write(can_socket_, &frame, sizeof(frame));
   }
 
+  // Pack and send MIT command frame (manual p.65-66), then read feedback reply.
   void send_mit_command(float p_des, float v_des, float kp, float kd, float t_ff)
   {
-    float P_MIN = -12.5f, P_MAX = 12.5f;
-    float V_MIN = -50.0f, V_MAX = 50.0f;
-    float T_MIN = -25.0f, T_MAX = 25.0f;
-    float Kp_MIN = 0.0f, Kp_MAX = 500.0f;
-    float Kd_MIN = 0.0f, Kd_MAX = 5.0f;
+    const int p_int = float_to_uint(p_des, kPMin, kPMax, 16);
+    const int v_int = float_to_uint(v_des, kVMin, kVMax, 12);
+    const int kp_int = float_to_uint(kp, kKpMin, kKpMax, 12);
+    const int kd_int = float_to_uint(kd, kKdMin, kKdMax, 12);
+    const int t_int = float_to_uint(t_ff, kTMin, kTMax, 12);
 
-    int p_int  = float_to_uint(p_des, P_MIN, P_MAX, 16);
-    int v_int  = float_to_uint(v_des, V_MIN, V_MAX, 12);
-    int kp_int = float_to_uint(kp, Kp_MIN, Kp_MAX, 12);
-    int kd_int = float_to_uint(kd, Kd_MIN, Kd_MAX, 12);
-    int t_int  = float_to_uint(t_ff, T_MIN, T_MAX, 12);
-
-    struct can_frame frame;
-    frame.can_id = 0x00;
+    struct can_frame frame{};
+    frame.can_id = kDriveId;
     frame.can_dlc = 8;
 
     frame.data[0] = p_int >> 8;
@@ -126,17 +232,94 @@ private:
     frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
     frame.data[7] = t_int & 0xFF;
 
-    if (write(can_socket_, &frame, sizeof(frame)) == sizeof(frame)) {
-      RCLCPP_INFO(this->get_logger(), "Sent MIT cmd: P=%.3f V=%.3f KP=%.3f KD=%.3f T=%.3f",
-                  p_des, v_des, kp, kd, t_ff);
-    } else {
+    if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
       RCLCPP_ERROR(this->get_logger(), "Failed to send MIT command.");
+      return;
     }
+
+    RCLCPP_INFO(
+      this->get_logger(), "Sent MIT cmd: P=%.3f V=%.3f KP=%.3f KD=%.3f T=%.3f",
+      p_des, v_des, kp, kd, t_ff);
+
+    // Motor echoes state on the same CAN ID immediately after each MIT command.
+    read_mit_feedback();
+  }
+
+  // Poll for MIT feedback after a command; discard unrelated frames on the bus.
+  void read_mit_feedback()
+  {
+    constexpr int kPollTimeoutMs = 50;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kPollTimeoutMs);
+
+    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
+      const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - std::chrono::steady_clock::now()).count();
+
+      if (remaining_ms <= 0) {
+        break;
+      }
+
+      struct pollfd pfd{};
+      pfd.fd = can_socket_;
+      pfd.events = POLLIN;
+
+      const int poll_result = poll(&pfd, 1, static_cast<int>(remaining_ms));
+      if (poll_result < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        RCLCPP_WARN(this->get_logger(), "poll() while waiting for MIT feedback: %s",
+          std::strerror(errno));
+        return;
+      }
+      if (poll_result == 0) {
+        break;
+      }
+
+      struct can_frame frame{};
+      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
+      if (nbytes < 0) {
+        RCLCPP_WARN(this->get_logger(), "read() while waiting for MIT feedback: %s",
+          std::strerror(errno));
+        return;
+      }
+      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+        continue;
+      }
+
+      Ak70MitFeedback fb;
+      if (fb.unpack_reply(frame, kDriveId)) {
+        log_mit_feedback(fb);
+        return;
+      }
+    }
+
+    RCLCPP_WARN(this->get_logger(), "No MIT feedback received within %d ms.", kPollTimeoutMs);
+  }
+
+  void log_mit_feedback(const Ak70MitFeedback & fb)
+  {
+    const double position_deg = fb.position_rad * 180.0 / M_PI;
+
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(4);
+    out << "\n========== AK70-10 MIT Feedback ==========\n";
+    out << "Drive ID:      " << fb.drive_id << '\n';
+    out << "Position:      " << fb.position_rad << " rad  (" << position_deg << " deg)\n";
+    out << "Velocity:      " << fb.velocity_rad_s << " rad/s\n";
+    out << "Torque:        " << fb.torque_nm << " Nm\n";
+    out << "Temperature:   " << fb.temperature_c << " C\n";
+    out << "Error code:    " << fb.error_code << " (" << mit_error_string(fb.error_code) << ")\n";
+    out << "==========================================";
+
+    RCLCPP_INFO(this->get_logger(), "%s", out.str().c_str());
   }
 
   bool changed(const motor_interfaces::msg::MotorCommand & msg)
   {
-    if (!has_last_) return true;
+    if (!has_last_) {
+      return true;
+    }
     return msg.position != last_msg_.position ||
            msg.velocity != last_msg_.velocity ||
            msg.kp != last_msg_.kp ||
