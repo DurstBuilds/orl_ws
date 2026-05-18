@@ -31,6 +31,10 @@ ament_target_dependencies(can_test_node rclcpp std_msgs)
 add_executable(motor_node src/motor_node.cpp)
 ament_target_dependencies(motor_node rclcpp std_msgs motor_interfaces)
 
+# continuous delta-position MIT firmware
+add_executable(motor_node_continuous src/motor_node_continuous.cpp)
+ament_target_dependencies(motor_node_continuous rclcpp std_msgs motor_interfaces)
+
 # required for terminal_position_publisher
 add_executable(terminal_position_publisher src/terminal_position_publisher.cpp)
 ament_target_dependencies(terminal_position_publisher rclcpp std_msgs)
@@ -42,6 +46,7 @@ ament_target_dependencies(terminal_motor_command rclcpp std_msgs motor_interface
 install(TARGETS
   can_test_node
   motor_node
+  motor_node_continuous
   terminal_position_publisher
   terminal_motor_command
   DESTINATION lib/${PROJECT_NAME}
