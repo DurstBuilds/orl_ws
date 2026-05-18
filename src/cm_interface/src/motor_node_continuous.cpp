@@ -1,6 +1,6 @@
 // motor_node_continuous: MIT commands for continuous (delta position) firmware.
-// Position field MSB (bit 15) enables applying a new command; lower 15 bits encode
-// position change. Sends every motor_command message (no deduplication).
+// Position field MSB (bit 15): 0 = drive (apply delta), 1 = hold. Lower 15 bits encode
+// position change magnitude. Sends every motor_command message (no deduplication).
 
 #include <chrono>
 #include <cmath>
@@ -37,8 +37,8 @@ constexpr float kKdMax = 5.0f;
 
 constexpr int kDriveId = 0;
 
-// Bit 15 of the 16-bit position field: 1 = apply new delta command, 0 = hold
-constexpr int kPositionEnableBit = 0x8000;
+// Bit 15 of the 16-bit position field: 0 = drive (apply delta), 1 = hold
+constexpr int kPositionHoldBit = 0x8000;
 
 const char * mit_error_string(int code)
 {
@@ -73,15 +73,13 @@ float uint_to_float(int x_int, float x_min, float x_max, int bits)
   return static_cast<float>(x_int) * span / static_cast<float>((1 << bits) - 1) + x_min;
 }
 
-// Pack position for continuous firmware: MSB = apply enable, bits 14:0 = delta magnitude.
+// Pack position for continuous firmware: MSB 0 = drive, MSB 1 = hold; bits 14:0 = delta.
 int pack_position_continuous(float p_delta)
 {
   if (p_delta == 0.0f) {
-    return 0;
+    return kPositionHoldBit;
   }
-  int p_int = float_to_uint(p_delta, kPMin, kPMax, 15) & 0x7FFF;
-  p_int |= kPositionEnableBit;
-  return p_int;
+  return float_to_uint(p_delta, kPMin, kPMax, 15) & 0x7FFF;
 }
 
 struct Ak70MitFeedback
@@ -245,11 +243,11 @@ private:
       return;
     }
 
-    const int apply_bit = (p_int & kPositionEnableBit) ? 1 : 0;
+    const int hold_bit = (p_int & kPositionHoldBit) ? 1 : 0;
     RCLCPP_INFO(
       this->get_logger(),
-      "Sent MIT cmd: dP=%.3f apply=%d p_packed=0x%04X V=%.3f KP=%.3f KD=%.3f T=%.3f",
-      p_delta, apply_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
+      "Sent MIT cmd: dP=%.3f hold=%d p_packed=0x%04X V=%.3f KP=%.3f KD=%.3f T=%.3f",
+      p_delta, hold_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
 
     read_mit_feedback();
   }
