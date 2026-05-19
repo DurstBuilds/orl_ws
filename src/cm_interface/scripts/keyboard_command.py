@@ -61,6 +61,8 @@ class KeyState:
         self._last_left_time = 0.0
         self._last_up_time = 0.0
         self._last_down_time = 0.0
+        self._was_up_held = False
+        self._was_down_held = False
 
     def update_motor_state(self, position: float) -> None:
         with self._lock:
@@ -107,17 +109,28 @@ class KeyState:
             self._last_down_time = time.monotonic()
             self._last_up_time = 0.0
 
-    def adjust_arrow_delta_if_held(self) -> None:
+    def adjust_arrow_delta_if_held(self, log_fn: Callable[[str], None]) -> None:
         now = time.monotonic()
         with self._lock:
-            if (now - self._last_up_time) < ARROW_HOLD_TIMEOUT_S:
+            up_held = (now - self._last_up_time) < ARROW_HOLD_TIMEOUT_S
+            down_held = (now - self._last_down_time) < ARROW_HOLD_TIMEOUT_S
+
+            if up_held:
                 self._arrow_delta = clamp(
                     self._arrow_delta + ARROW_DELTA_STEP,
                     ARROW_DELTA_MIN, ARROW_DELTA_MAX)
-            elif (now - self._last_down_time) < ARROW_HOLD_TIMEOUT_S:
+            elif down_held:
                 self._arrow_delta = clamp(
                     self._arrow_delta - ARROW_DELTA_STEP,
                     ARROW_DELTA_MIN, ARROW_DELTA_MAX)
+
+            if self._was_up_held and not up_held:
+                log_fn(f'arrow_delta = {self._arrow_delta:.4f}')
+            if self._was_down_held and not down_held:
+                log_fn(f'arrow_delta = {self._arrow_delta:.4f}')
+
+            self._was_up_held = up_held
+            self._was_down_held = down_held
 
     def get_position(self) -> float:
         with self._lock:
@@ -222,7 +235,7 @@ class KeyboardCommand(Node):
         return None
 
     def _on_timer(self) -> None:
-        self._state.adjust_arrow_delta_if_held()
+        self._state.adjust_arrow_delta_if_held(self.get_logger().info)
         msg = MotorCommand()
         msg.position = float(self._state.get_position())
         msg.velocity = 0.0
