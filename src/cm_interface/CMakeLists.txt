@@ -52,5 +52,11 @@ install(TARGETS
   DESTINATION lib/${PROJECT_NAME}
 )
 
+install(PROGRAMS
+  scripts/keyboard_command.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME keyboard_command
+)
+
 
 ament_package()
