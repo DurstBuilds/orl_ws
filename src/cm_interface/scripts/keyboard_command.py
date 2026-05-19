@@ -18,9 +18,12 @@ from motor_interfaces.msg import MotorCommand, MotorState
 
 KP = 2.0
 KD = 0.02
-ARROW_DELTA = 0.1
+DEFAULT_ARROW_DELTA = 0.1
+ARROW_DELTA_MIN = 0.001
+ARROW_DELTA_MAX = 0.5
+ARROW_DELTA_STEP = 0.001
 PUBLISH_HZ = 100.0
-ARROW_HOLD_TIMEOUT_S = 0.1
+ARROW_HOLD_TIMEOUT_S = 0.2
 MAX_DELTA = math.pi
 
 NUMPAD_TARGETS = {
@@ -53,8 +56,11 @@ class KeyState:
         self._current_position = 0.0
         self._state_received = False
         self._pending_delta: Optional[float] = None
+        self._arrow_delta = DEFAULT_ARROW_DELTA
         self._last_right_time = 0.0
         self._last_left_time = 0.0
+        self._last_up_time = 0.0
+        self._last_down_time = 0.0
 
     def update_motor_state(self, position: float) -> None:
         with self._lock:
@@ -91,6 +97,28 @@ class KeyState:
             self._last_left_time = time.monotonic()
             self._last_right_time = 0.0
 
+    def touch_up(self) -> None:
+        with self._lock:
+            self._last_up_time = time.monotonic()
+            self._last_down_time = 0.0
+
+    def touch_down(self) -> None:
+        with self._lock:
+            self._last_down_time = time.monotonic()
+            self._last_up_time = 0.0
+
+    def adjust_arrow_delta_if_held(self) -> None:
+        now = time.monotonic()
+        with self._lock:
+            if (now - self._last_up_time) < ARROW_HOLD_TIMEOUT_S:
+                self._arrow_delta = clamp(
+                    self._arrow_delta + ARROW_DELTA_STEP,
+                    ARROW_DELTA_MIN, ARROW_DELTA_MAX)
+            elif (now - self._last_down_time) < ARROW_HOLD_TIMEOUT_S:
+                self._arrow_delta = clamp(
+                    self._arrow_delta - ARROW_DELTA_STEP,
+                    ARROW_DELTA_MIN, ARROW_DELTA_MAX)
+
     def get_position(self) -> float:
         with self._lock:
             if self._pending_delta is not None:
@@ -103,9 +131,9 @@ class KeyState:
             left = (now - self._last_left_time) < ARROW_HOLD_TIMEOUT_S
 
             if right and not left:
-                return ARROW_DELTA
+                return self._arrow_delta
             if left and not right:
-                return -ARROW_DELTA
+                return -self._arrow_delta
             return 0.0
 
 
@@ -130,9 +158,10 @@ class KeyboardCommand(Node):
 
         self.get_logger().info(
             f'Publishing motor_command at {PUBLISH_HZ:.0f} Hz. Focus this terminal.\n'
-            f'  Right/Left arrow: +{ARROW_DELTA:.1f} / -{ARROW_DELTA:.1f} rad delta (hold)\n'
+            f'  Right/Left: +/- arrow_delta rad (hold); Up/Down: adjust delta '
+            f'[{ARROW_DELTA_MIN}, {ARROW_DELTA_MAX}]\n'
             f'  Keys 2/4/6/8: one-shot dP to absolute 0, pi/2, -pi/2, pi (via motor_state)\n'
-            f'  Kp={KP:.1f}  Kd={KD:.2f}  (no keys -> position=0)')
+            f'  Kp={KP:.1f}  Kd={KD:.2f}  arrow_delta={DEFAULT_ARROW_DELTA:.3f}')
 
     def _motor_state_callback(self, msg: MotorState) -> None:
         self._state.update_motor_state(msg.position)
@@ -153,6 +182,10 @@ class KeyboardCommand(Node):
                     self._state.touch_right()
                 elif key == 'LEFT':
                     self._state.touch_left()
+                elif key == 'UP':
+                    self._state.touch_up()
+                elif key == 'DOWN':
+                    self._state.touch_down()
                 elif key in NUMPAD_TARGETS:
                     if not self._state.set_numpad_target(
                             key, NUMPAD_TARGETS[key], self.get_logger().info):
@@ -182,9 +215,14 @@ class KeyboardCommand(Node):
             return 'RIGHT'
         if seq[-1] == 'D':
             return 'LEFT'
+        if seq[-1] == 'A':
+            return 'UP'
+        if seq[-1] == 'B':
+            return 'DOWN'
         return None
 
     def _on_timer(self) -> None:
+        self._state.adjust_arrow_delta_if_held()
         msg = MotorCommand()
         msg.position = float(self._state.get_position())
         msg.velocity = 0.0
