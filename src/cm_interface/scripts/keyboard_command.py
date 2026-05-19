@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # Publishes motor_command at 100 Hz from keyboard input over SSH (stdin/termios).
+# Numpad keys command absolute positions using feedback from motor_state.
 
 import math
 import select
@@ -13,15 +14,17 @@ from typing import Callable, Optional
 import rclpy
 from rclpy.node import Node
 
-from motor_interfaces.msg import MotorCommand
+from motor_interfaces.msg import MotorCommand, MotorState
 
 KP = 5.0
 KD = 0.02
 ARROW_DELTA = 0.1
 PUBLISH_HZ = 100.0
 ARROW_HOLD_TIMEOUT_S = 0.4
+POSITION_TOLERANCE = 0.05
+MAX_DELTA = math.pi
 
-NUMPAD_POSITIONS = {
+NUMPAD_TARGETS = {
     '2': 0.0,
     '4': math.pi / 2.0,
     '6': -math.pi / 2.0,
@@ -29,12 +32,33 @@ NUMPAD_POSITIONS = {
 }
 
 
+def clamp(value: float, low: float, high: float) -> float:
+    return max(low, min(high, value))
+
+
 class KeyState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._pending_position: Optional[float] = None
+        self._current_position = 0.0
+        self._state_received = False
+        self._absolute_target: Optional[float] = None
         self._last_right_time = 0.0
         self._last_left_time = 0.0
+
+    def update_motor_state(self, position: float) -> None:
+        with self._lock:
+            self._current_position = position
+            self._state_received = True
+
+    def set_absolute_target(self, target: float, log_fn: Callable[[str], None]) -> bool:
+        with self._lock:
+            if not self._state_received:
+                return False
+            self._absolute_target = target
+            current = self._current_position
+        log_fn(
+            f'Absolute target {target:.4f} rad (current {current:.4f} rad)')
+        return True
 
     def touch_right(self) -> None:
         with self._lock:
@@ -46,17 +70,14 @@ class KeyState:
             self._last_left_time = time.monotonic()
             self._last_right_time = 0.0
 
-    def set_pending(self, position: float, label: str, log_fn: Callable[[str], None]) -> None:
-        with self._lock:
-            self._pending_position = position
-        log_fn(f'Key {label} -> position {position:.4f} rad (one shot)')
-
     def get_position(self) -> float:
         with self._lock:
-            if self._pending_position is not None:
-                position = self._pending_position
-                self._pending_position = None
-                return position
+            if self._absolute_target is not None:
+                error = self._absolute_target - self._current_position
+                if abs(error) < POSITION_TOLERANCE:
+                    self._absolute_target = None
+                    return 0.0
+                return clamp(error, -MAX_DELTA, MAX_DELTA)
 
             now = time.monotonic()
             right = (now - self._last_right_time) < ARROW_HOLD_TIMEOUT_S
@@ -79,6 +100,7 @@ class KeyboardCommand(Node):
             raise RuntimeError('stdin is not a TTY')
 
         self._publisher = self.create_publisher(MotorCommand, 'motor_command', 10)
+        self.create_subscription(MotorState, 'motor_state', self._motor_state_callback, 10)
         self._state = KeyState()
         self._stdin_running = True
         self._stdin_term_attrs = None
@@ -89,9 +111,12 @@ class KeyboardCommand(Node):
 
         self.get_logger().info(
             f'Publishing motor_command at {PUBLISH_HZ:.0f} Hz. Focus this terminal.\n'
-            f'  Right/Left arrow: +{ARROW_DELTA:.1f} / -{ARROW_DELTA:.1f} rad (hold)\n'
-            f'  Keys 2/4/6/8: 0, pi/2, -pi/2, pi (single delta on press)\n'
+            f'  Right/Left arrow: +{ARROW_DELTA:.1f} / -{ARROW_DELTA:.1f} rad delta (hold)\n'
+            f'  Keys 2/4/6/8: absolute 0, pi/2, -pi/2, pi (via motor_state)\n'
             f'  Kp={KP:.1f}  Kd={KD:.2f}  (no keys -> position=0)')
+
+    def _motor_state_callback(self, msg: MotorState) -> None:
+        self._state.update_motor_state(msg.position)
 
     def _stdin_loop(self) -> None:
         fd = sys.stdin.fileno()
@@ -109,9 +134,12 @@ class KeyboardCommand(Node):
                     self._state.touch_right()
                 elif key == 'LEFT':
                     self._state.touch_left()
-                elif key in NUMPAD_POSITIONS:
-                    self._state.set_pending(
-                        NUMPAD_POSITIONS[key], key, self.get_logger().info)
+                elif key in NUMPAD_TARGETS:
+                    if not self._state.set_absolute_target(
+                            NUMPAD_TARGETS[key], self.get_logger().info):
+                        self.get_logger().warn(
+                            'No motor_state yet; wait for motor_node_continuous.')
+
         finally:
             if self._stdin_term_attrs is not None:
                 termios.tcsetattr(fd, termios.TCSADRAIN, self._stdin_term_attrs)

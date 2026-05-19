@@ -20,6 +20,7 @@
 
 #include "rclcpp/rclcpp.hpp"
 #include "motor_interfaces/msg/motor_command.hpp"
+#include "motor_interfaces/msg/motor_state.hpp"
 
 namespace
 {
@@ -160,6 +161,8 @@ public:
       10,
       std::bind(&MotorNodeContinuous::motor_command_callback, this, std::placeholders::_1));
 
+    state_publisher_ = this->create_publisher<motor_interfaces::msg::MotorState>("motor_state", 10);
+
     enable_motor();
     set_motor_origin();
   }
@@ -236,6 +239,7 @@ private:
 
     if (write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame))) {
       RCLCPP_INFO(this->get_logger(), "Set motor origin (current position = 0).");
+      read_mit_feedback();
     } else {
       RCLCPP_ERROR(this->get_logger(), "Failed to set motor origin.");
     }
@@ -318,12 +322,25 @@ private:
 
       Ak70MitFeedback fb;
       if (fb.unpack_reply(frame, kDriveId)) {
+        publish_motor_state(fb);
         log_mit_feedback(fb);
         return;
       }
     }
 
     RCLCPP_WARN(this->get_logger(), "No MIT feedback received within %d ms.", kPollTimeoutMs);
+  }
+
+  void publish_motor_state(const Ak70MitFeedback & fb)
+  {
+    motor_interfaces::msg::MotorState msg;
+    msg.position = fb.position_rad;
+    msg.velocity = fb.velocity_rad_s;
+    msg.torque = fb.torque_nm;
+    msg.temperature = fb.temperature_c;
+    msg.error_code = fb.error_code;
+    msg.drive_id = static_cast<uint8_t>(fb.drive_id);
+    state_publisher_->publish(msg);
   }
 
   void log_mit_feedback(const Ak70MitFeedback & fb)
@@ -350,6 +367,7 @@ private:
   }
 
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
+  rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_publisher_;
   int can_socket_{-1};
 };
 
