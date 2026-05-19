@@ -40,6 +40,9 @@ constexpr int kDriveId = 0;
 // Bit 15 of the 16-bit position field: 0 = drive (apply delta), 1 = hold
 constexpr int kPositionHoldBit = 0x8000;
 
+// Debug: always set bit 7 of frame.data[0] on the wire (independent of p_delta)
+constexpr uint8_t kData0Bit7Debug = 0x80;
+
 const char * mit_error_string(int code)
 {
   switch (code) {
@@ -229,7 +232,7 @@ private:
     frame.can_id = kDriveId;
     frame.can_dlc = 8;
 
-    frame.data[0] = p_int >> 8;
+    frame.data[0] = static_cast<uint8_t>((p_int >> 8) | kData0Bit7Debug);
     frame.data[1] = p_int & 0xFF;
     frame.data[2] = v_int >> 4;
     frame.data[3] = ((v_int & 0xF) << 4) | (kp_int >> 8);
@@ -243,11 +246,10 @@ private:
       return;
     }
 
-    const int hold_bit = (p_int & kPositionHoldBit) ? 1 : 0;
     RCLCPP_INFO(
       this->get_logger(),
-      "Sent MIT cmd: dP=%.3f hold=%d p_packed=0x%04X V=%.3f KP=%.3f KD=%.3f T=%.3f",
-      p_delta, hold_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
+      "Sent MIT cmd: dP=%.3f p_packed=0x%04X data0=0x%02X V=%.3f KP=%.3f KD=%.3f T=%.3f",
+      p_delta, p_int & 0xFFFF, frame.data[0], v_des, kp, kd, t_ff);
 
     read_mit_feedback();
   }
