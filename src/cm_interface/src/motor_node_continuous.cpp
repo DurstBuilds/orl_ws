@@ -37,9 +37,6 @@ constexpr float kKdMax = 5.0f;
 
 constexpr int kDriveId = 0;
 
-// Bit 15 of the 16-bit position field: 0 = drive (apply delta), 1 = hold
-constexpr int kPositionHoldBit = 0x8000;
-
 // Debug: always set bit 7 of frame.data[0] on the wire (independent of p_delta)
 constexpr uint8_t kData0Bit7Debug = 0x80;
 
@@ -79,9 +76,6 @@ float uint_to_float(int x_int, float x_min, float x_max, int bits)
 // Pack position for continuous firmware: MSB 0 = drive, MSB 1 = hold; bits 14:0 = delta.
 int pack_position_continuous(float p_delta)
 {
-  if (p_delta == 0.0f) {
-    return kPositionHoldBit;
-  }
   return float_to_uint(p_delta, kPMin, kPMax, 15) & 0x7FFF;
 }
 
