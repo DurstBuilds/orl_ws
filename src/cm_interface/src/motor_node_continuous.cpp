@@ -161,6 +161,7 @@ public:
       std::bind(&MotorNodeContinuous::motor_command_callback, this, std::placeholders::_1));
 
     enable_motor();
+    set_motor_origin();
   }
 
   ~MotorNodeContinuous() override
@@ -212,6 +213,32 @@ private:
     frame.data[7] = 0xFD;
 
     write(can_socket_, &frame, sizeof(frame));
+  }
+
+  // Set current shaft position as MIT zero (0xFF..0xFE command byte).
+  void set_motor_origin()
+  {
+    if (can_socket_ < 0) {
+      return;
+    }
+
+    struct can_frame frame{};
+    frame.can_id = kDriveId;
+    frame.can_dlc = 8;
+    frame.data[0] = 0xFF;
+    frame.data[1] = 0xFF;
+    frame.data[2] = 0xFF;
+    frame.data[3] = 0xFF;
+    frame.data[4] = 0xFF;
+    frame.data[5] = 0xFF;
+    frame.data[6] = 0xFF;
+    frame.data[7] = 0xFE;
+
+    if (write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame))) {
+      RCLCPP_INFO(this->get_logger(), "Set motor origin (current position = 0).");
+    } else {
+      RCLCPP_ERROR(this->get_logger(), "Failed to set motor origin.");
+    }
   }
 
   void send_mit_command(float p_delta, float v_des, float kp, float kd, float t_ff)
