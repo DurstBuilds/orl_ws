@@ -24,8 +24,8 @@
 namespace
 {
 
-constexpr float kPMin = -12.5f;
-constexpr float kPMax = 12.5f;
+constexpr float kPMin = -static_cast<float>(M_PI);
+constexpr float kPMax = static_cast<float>(M_PI);
 constexpr float kVMin = -50.0f;
 constexpr float kVMax = 50.0f;
 constexpr float kTMin = -25.0f;
