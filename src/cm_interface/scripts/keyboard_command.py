@@ -16,11 +16,11 @@ from rclpy.node import Node
 
 from motor_interfaces.msg import MotorCommand, MotorState
 
-KP = 5.0
+KP = 2.0
 KD = 0.02
 ARROW_DELTA = 0.1
 PUBLISH_HZ = 100.0
-ARROW_HOLD_TIMEOUT_S = 0.2
+ARROW_HOLD_TIMEOUT_S = 0.1
 MAX_DELTA = math.pi
 
 NUMPAD_TARGETS = {
@@ -33,6 +33,18 @@ NUMPAD_TARGETS = {
 
 def clamp(value: float, low: float, high: float) -> float:
     return max(low, min(high, value))
+
+
+def shortest_delta(current: float, target: float) -> float:
+    """Shortest angular delta from current to target, in [-pi, pi]."""
+    return math.atan2(math.sin(target - current), math.cos(target - current))
+
+
+def delta_to_pm_pi(current: float) -> float:
+    """Shortest delta to pi; -pi is the same physical angle on the motor."""
+    d_to_pi = shortest_delta(current, math.pi)
+    d_to_neg_pi = shortest_delta(current, -math.pi)
+    return d_to_pi if abs(d_to_pi) <= abs(d_to_neg_pi) else d_to_neg_pi
 
 
 class KeyState:
@@ -49,16 +61,24 @@ class KeyState:
             self._current_position = position
             self._state_received = True
 
-    def set_numpad_target(self, target: float, log_fn: Callable[[str], None]) -> bool:
+    def set_numpad_target(
+        self, key: str, target: float, log_fn: Callable[[str], None]
+    ) -> bool:
         with self._lock:
             if not self._state_received:
                 return False
             current = self._current_position
-            delta = target - current
+            if key == '8':
+                delta = delta_to_pm_pi(current)
+                des_label = 'pi'
+            else:
+                delta = shortest_delta(current, target)
+                des_label = f'{target:.4f}'
             delta = clamp(delta, -MAX_DELTA, MAX_DELTA)
             self._pending_delta = delta
         log_fn(
-            f'Numpad -> des {target:.4f} rad, cur {current:.4f} rad, dP {delta:.4f} rad (one shot)')
+            f'Numpad {key} -> des {des_label} rad, cur {current:.4f} rad, '
+            f'dP {delta:.4f} rad (one shot)')
         return True
 
     def touch_right(self) -> None:
@@ -135,7 +155,7 @@ class KeyboardCommand(Node):
                     self._state.touch_left()
                 elif key in NUMPAD_TARGETS:
                     if not self._state.set_numpad_target(
-                            NUMPAD_TARGETS[key], self.get_logger().info):
+                            key, NUMPAD_TARGETS[key], self.get_logger().info):
                         self.get_logger().warn(
                             'No motor_state yet; wait for motor_node_continuous.')
 
