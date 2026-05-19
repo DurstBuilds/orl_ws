@@ -20,8 +20,7 @@ KP = 5.0
 KD = 0.02
 ARROW_DELTA = 0.1
 PUBLISH_HZ = 100.0
-ARROW_HOLD_TIMEOUT_S = 0.4
-POSITION_TOLERANCE = 0.05
+ARROW_HOLD_TIMEOUT_S = 0.2
 MAX_DELTA = math.pi
 
 NUMPAD_TARGETS = {
@@ -41,7 +40,7 @@ class KeyState:
         self._lock = threading.Lock()
         self._current_position = 0.0
         self._state_received = False
-        self._absolute_target: Optional[float] = None
+        self._pending_delta: Optional[float] = None
         self._last_right_time = 0.0
         self._last_left_time = 0.0
 
@@ -50,14 +49,16 @@ class KeyState:
             self._current_position = position
             self._state_received = True
 
-    def set_absolute_target(self, target: float, log_fn: Callable[[str], None]) -> bool:
+    def set_numpad_target(self, target: float, log_fn: Callable[[str], None]) -> bool:
         with self._lock:
             if not self._state_received:
                 return False
-            self._absolute_target = target
             current = self._current_position
+            delta = target - current
+            delta = clamp(delta, -MAX_DELTA, MAX_DELTA)
+            self._pending_delta = delta
         log_fn(
-            f'Absolute target {target:.4f} rad (current {current:.4f} rad)')
+            f'Numpad -> des {target:.4f} rad, cur {current:.4f} rad, dP {delta:.4f} rad (one shot)')
         return True
 
     def touch_right(self) -> None:
@@ -72,12 +73,10 @@ class KeyState:
 
     def get_position(self) -> float:
         with self._lock:
-            if self._absolute_target is not None:
-                error = self._absolute_target - self._current_position
-                if abs(error) < POSITION_TOLERANCE:
-                    self._absolute_target = None
-                    return 0.0
-                return clamp(error, -MAX_DELTA, MAX_DELTA)
+            if self._pending_delta is not None:
+                delta = self._pending_delta
+                self._pending_delta = None
+                return delta
 
             now = time.monotonic()
             right = (now - self._last_right_time) < ARROW_HOLD_TIMEOUT_S
@@ -112,7 +111,7 @@ class KeyboardCommand(Node):
         self.get_logger().info(
             f'Publishing motor_command at {PUBLISH_HZ:.0f} Hz. Focus this terminal.\n'
             f'  Right/Left arrow: +{ARROW_DELTA:.1f} / -{ARROW_DELTA:.1f} rad delta (hold)\n'
-            f'  Keys 2/4/6/8: absolute 0, pi/2, -pi/2, pi (via motor_state)\n'
+            f'  Keys 2/4/6/8: one-shot dP to absolute 0, pi/2, -pi/2, pi (via motor_state)\n'
             f'  Kp={KP:.1f}  Kd={KD:.2f}  (no keys -> position=0)')
 
     def _motor_state_callback(self, msg: MotorState) -> None:
@@ -135,7 +134,7 @@ class KeyboardCommand(Node):
                 elif key == 'LEFT':
                     self._state.touch_left()
                 elif key in NUMPAD_TARGETS:
-                    if not self._state.set_absolute_target(
+                    if not self._state.set_numpad_target(
                             NUMPAD_TARGETS[key], self.get_logger().info):
                         self.get_logger().warn(
                             'No motor_state yet; wait for motor_node_continuous.')
