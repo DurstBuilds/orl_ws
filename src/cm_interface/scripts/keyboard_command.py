@@ -22,7 +22,7 @@ KP = 5.0
 KD = 0.02
 ARROW_DELTA = 0.1
 PUBLISH_HZ = 100.0
-ARROW_HOLD_TIMEOUT_S = 0.15
+ARROW_HOLD_TIMEOUT_S = 0.4
 
 NUMPAD_POSITIONS = {
     '2': 0.0,
@@ -63,10 +63,12 @@ class KeyState:
     def touch_right(self) -> None:
         with self._lock:
             self._last_right_time = time.monotonic()
+            self._last_left_time = 0.0
 
     def touch_left(self) -> None:
         with self._lock:
             self._last_left_time = time.monotonic()
+            self._last_right_time = 0.0
 
     def set_pending(self, position: float, label: str, log_fn: Callable[[str], None]) -> None:
         with self._lock:
@@ -107,10 +109,12 @@ class KeyboardCommand(Node):
         self._stdin_running = False
         self._stdin_term_attrs = None
 
-        if pynput_keyboard is not None:
-            self._start_pynput()
-        elif sys.stdin.isatty():
+        # Prefer stdin in an interactive terminal (SSH / local console).
+        # pynput reads Pi hardware input, not keys typed into an SSH session.
+        if sys.stdin.isatty():
             self._start_stdin()
+        elif pynput_keyboard is not None:
+            self._start_pynput()
         else:
             self._log_pynput_failure(fatal=True)
             raise RuntimeError('No keyboard backend available')
@@ -186,18 +190,24 @@ class KeyboardCommand(Node):
     def _read_stdin_key(self) -> Optional[str]:
         ch = sys.stdin.read(1)
         if ch != '\x1b':
-            return ch
-        if not select.select([sys.stdin], [], [], 0.01)[0]:
-            return ch
-        ch2 = sys.stdin.read(1)
-        if ch2 != '[':
-            return ch
-        if not select.select([sys.stdin], [], [], 0.01)[0]:
-            return ch
-        ch3 = sys.stdin.read(1)
-        if ch3 == 'C':
+            return ch if len(ch) == 1 else None
+
+        # Read the rest of the escape sequence (e.g. [C, [1;5C, OC).
+        seq = ''
+        for _ in range(16):
+            if not select.select([sys.stdin], [], [], 0.03)[0]:
+                break
+            seq += sys.stdin.read(1)
+            if seq and seq[-1] in 'ABCD':
+                break
+
+        if not seq:
+            return None
+
+        final = seq[-1]
+        if final == 'C':
             return 'RIGHT'
-        if ch3 == 'D':
+        if final == 'D':
             return 'LEFT'
         return None
 
