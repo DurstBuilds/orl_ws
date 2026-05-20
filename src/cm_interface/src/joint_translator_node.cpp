@@ -26,6 +26,8 @@ constexpr float kDefaultMotorErrorCoarseThreshold =
   0.25f * static_cast<float>(M_PI);
 constexpr float kDefaultKp = 2.0f;
 constexpr float kDefaultKd = 0.02f;
+constexpr float kLockinKdScale = 2.0f;
+constexpr float kKdMax = 5.0f;
 constexpr int kDefaultLockinSettleHoldCount = 10;
 constexpr float kMaxMotorDelta = static_cast<float>(M_PI);
 
@@ -176,14 +178,15 @@ private:
     return clamp(motor_error, -kMaxMotorDelta, kMaxMotorDelta);
   }
 
-  void publish_motor_command(float motor_delta)
+  void publish_motor_command(float motor_delta, float kd_scale = 1.0f)
   {
     motor_interfaces::msg::MotorCommand cmd;
     cmd.position = motor_delta;
     cmd.velocity = 0.0f;
     cmd.torque = 0.0f;
     cmd.kp = static_cast<float>(kp_);
-    cmd.kd = static_cast<float>(kd_);
+    cmd.kd = clamp(
+      static_cast<float>(kd_) * kd_scale, 0.0f, kKdMax);
     motor_command_pub_->publish(cmd);
   }
 
@@ -255,7 +258,7 @@ private:
       return;
     }
 
-    publish_motor_command(compute_snap_motor_delta(joint_error));
+    publish_motor_command(compute_snap_motor_delta(joint_error), kLockinKdScale);
   }
 
   void warn_no_total_position()
