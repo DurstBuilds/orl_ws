@@ -1,26 +1,18 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch_ros.actions import Node
+from launch.actions import IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 
 
 def generate_launch_description():
-    joy_node = Node(
-        package='joy',
-        executable='joy_node',
-        name='joy_node',
-        parameters=[{
-            'dev': 0,
-            'deadzone': 0.05,
-            'autorepeat_rate': 20.0,
-        }],
-    )
-
-    joystick_control_node = Node(
-        package='cm_interface',
-        executable='joystick_control_node',
-        name='joystick_control_node',
-    )
+    pkg_share = get_package_share_directory('cm_interface')
 
     return LaunchDescription([
-        joy_node,
-        joystick_control_node,
+        IncludeLaunchDescription(
+            PythonLaunchDescriptionSource(
+                os.path.join(pkg_share, 'launch', 'joystick_teleop.launch.py'),
+            ),
+        ),
     ])

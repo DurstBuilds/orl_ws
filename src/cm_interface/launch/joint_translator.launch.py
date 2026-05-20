@@ -7,6 +7,7 @@ from launch_ros.actions import Node
 def generate_launch_description():
     gear_ratio_arg = DeclareLaunchArgument(
         'gear_ratio',
+        default_value='10.0',
         description='Motor-to-joint reduction (motor_rad / joint_rad).',
     )
 

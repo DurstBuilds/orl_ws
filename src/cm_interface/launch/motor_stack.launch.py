@@ -1,13 +1,26 @@
+import os
+
+from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 
 def generate_launch_description():
+    pkg_share = get_package_share_directory('cm_interface')
+
     gear_ratio_arg = DeclareLaunchArgument(
         'gear_ratio',
+        default_value='10.0',
         description='Motor-to-joint reduction (motor_rad / joint_rad) for joint_translator_node.',
+    )
+
+    joy_dev_arg = DeclareLaunchArgument(
+        'joy_dev',
+        default_value='0',
+        description='Joystick device index for joy_node.',
     )
 
     motor_node_continuous = Node(
@@ -31,21 +44,20 @@ def generate_launch_description():
         }],
     )
 
-    joy_node = Node(
-        package='joy',
-        executable='joy_node',
-        name='joy_node',
-    )
-
-    joystick_control_node = Node(
-        package='cm_interface',
-        executable='joystick_control_node',
-        name='joystick_control_node',
+    joystick_teleop = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_share, 'launch', 'joystick_teleop.launch.py'),
+        ),
+        launch_arguments={
+            'joy_dev': LaunchConfiguration('joy_dev'),
+        }.items(),
     )
 
     return LaunchDescription([
         gear_ratio_arg,
+        joy_dev_arg,
         motor_node_continuous,
         motor_unwrapper_node,
         joint_translator_node,
+        joystick_teleop,
     ])
