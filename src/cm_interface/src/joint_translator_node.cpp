@@ -23,7 +23,7 @@ constexpr float kDefaultLockinHz = 5.0f;
 constexpr float kDefaultMotorStepMax = 0.1f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kDefaultMotorErrorCoarseThreshold =
-  0.25f * static_cast<float>(M_PI);
+  0.5f * static_cast<float>(M_PI);
 constexpr float kDefaultKp = 2.0f;
 constexpr float kDefaultKd = 0.02f;
 constexpr int kDefaultLockinSettleHoldCount = 10;
