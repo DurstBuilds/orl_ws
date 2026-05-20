@@ -1,10 +1,11 @@
 // joint_translator_node: maps motor total position to joint space and commands
 // motor deltas until joint_despos is reached.
 //
-// When |motor_error| < coarse threshold: 100 Hz hold (0 delta) keeps feedback
-// flowing. Lock-in snap commands send the exact motor error; the next snap is
-// sent only after the previous commanded delta has actuated within a threshold.
+// When |motor_error| < coarse threshold (default 0.25*pi): 100 Hz hold (0 delta)
+// keeps feedback flowing. After lockin_settle_hold_count holds, 5 Hz lock-in sends
+// the exact motor error to snap to despos.
 
+#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
@@ -18,14 +19,14 @@ namespace
 {
 
 constexpr float kDefaultControlHz = 100.0f;
+constexpr float kDefaultLockinHz = 5.0f;
 constexpr float kDefaultMotorStepMax = 0.1f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kDefaultMotorErrorCoarseThreshold =
   0.25f * static_cast<float>(M_PI);
-constexpr float kDefaultLockinActuationThreshold = 0.01f;
 constexpr float kDefaultKp = 2.0f;
 constexpr float kDefaultKd = 0.02f;
-constexpr float kCmdZeroEps = 1e-6f;
+constexpr int kDefaultLockinSettleHoldCount = 10;
 constexpr float kMaxMotorDelta = static_cast<float>(M_PI);
 
 float clamp(float value, float low, float high)
@@ -59,13 +60,14 @@ public:
   {
     gear_ratio_ = declare_parameter<double>("gear_ratio", 0.0);
     control_hz_ = declare_parameter<double>("control_hz", kDefaultControlHz);
+    lockin_hz_ = declare_parameter<double>("lockin_hz", kDefaultLockinHz);
     motor_step_max_ = declare_parameter<double>("motor_step_max", kDefaultMotorStepMax);
     joint_error_tolerance_ = declare_parameter<double>(
       "joint_error_tolerance", kDefaultJointErrorTolerance);
     motor_error_coarse_threshold_ = declare_parameter<double>(
       "motor_error_coarse_threshold", kDefaultMotorErrorCoarseThreshold);
-    lockin_actuation_threshold_ = declare_parameter<double>(
-      "lockin_actuation_threshold", kDefaultLockinActuationThreshold);
+    lockin_settle_hold_count_ = declare_parameter<int>(
+      "lockin_settle_hold_count", kDefaultLockinSettleHoldCount);
     kp_ = declare_parameter<double>("kp", kDefaultKp);
     kd_ = declare_parameter<double>("kd", kDefaultKd);
 
@@ -75,8 +77,11 @@ public:
     if (control_hz_ <= 0.0) {
       throw std::invalid_argument("control_hz must be > 0");
     }
-    if (lockin_actuation_threshold_ < 0.0) {
-      throw std::invalid_argument("lockin_actuation_threshold must be >= 0");
+    if (lockin_hz_ <= 0.0) {
+      throw std::invalid_argument("lockin_hz must be > 0");
+    }
+    if (lockin_settle_hold_count_ < 0) {
+      throw std::invalid_argument("lockin_settle_hold_count must be >= 0");
     }
 
     motor_total_sub_ = create_subscription<motor_interfaces::msg::MotorTotalPosition>(
@@ -97,13 +102,18 @@ public:
       std::chrono::duration_cast<std::chrono::nanoseconds>(control_period),
       std::bind(&JointTranslatorNode::control_timer_callback, this));
 
+    const auto lockin_period = std::chrono::duration<double>(1.0 / lockin_hz_);
+    lockin_timer_ = create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(lockin_period),
+      std::bind(&JointTranslatorNode::lockin_timer_callback, this));
+
     RCLCPP_INFO(
       get_logger(),
-      "gear_ratio=%.4f control_hz=%.1f motor_step_max=%.4f "
+      "gear_ratio=%.4f control_hz=%.1f lockin_hz=%.1f motor_step_max=%.4f "
       "joint_error_tolerance=%.4f motor_error_coarse_threshold=%.4f "
-      "lockin_actuation_threshold=%.4f kp=%.2f kd=%.3f",
-      gear_ratio_, control_hz_, motor_step_max_, joint_error_tolerance_,
-      motor_error_coarse_threshold_, lockin_actuation_threshold_, kp_, kd_);
+      "lockin_settle_hold_count=%d kp=%.2f kd=%.3f",
+      gear_ratio_, control_hz_, lockin_hz_, motor_step_max_, joint_error_tolerance_,
+      motor_error_coarse_threshold_, lockin_settle_hold_count_, kp_, kd_);
   }
 
 private:
@@ -113,36 +123,13 @@ private:
     float joint_despos{0.0f};
     bool has_total{false};
     bool has_despos{false};
-    bool pending_snap{false};
-    float pending_start_total{0.0f};
-    float pending_commanded_delta{0.0f};
   };
 
   ControlState read_state()
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return ControlState{
-      total_position_, joint_despos_, has_total_position_, has_joint_despos_,
-      pending_snap_, pending_start_total_, pending_commanded_delta_};
-  }
-
-  void reset_pending_snap()
-  {
-    pending_snap_ = false;
-    pending_start_total_ = 0.0f;
-    pending_commanded_delta_ = 0.0f;
-  }
-
-  void check_actuation_complete(float total_position)
-  {
-    if (!pending_snap_) {
-      return;
-    }
-    const float actuation_error = std::fabs(
-      total_position - (pending_start_total_ + pending_commanded_delta_));
-    if (actuation_error < static_cast<float>(lockin_actuation_threshold_)) {
-      pending_snap_ = false;
-    }
+      total_position_, joint_despos_, has_total_position_, has_joint_despos_};
   }
 
   void motor_total_position_callback(
@@ -154,7 +141,6 @@ private:
       std::lock_guard<std::mutex> lock(state_mutex_);
       total_position_ = msg->total_position;
       has_total_position_ = true;
-      check_actuation_complete(msg->total_position);
     }
 
     std_msgs::msg::Float32 out;
@@ -167,7 +153,12 @@ private:
     std::lock_guard<std::mutex> lock(state_mutex_);
     joint_despos_ = msg->data;
     has_joint_despos_ = true;
-    reset_pending_snap();
+    settle_hold_count_.store(0);
+  }
+
+  void reset_settle_hold_count()
+  {
+    settle_hold_count_.store(0);
   }
 
   float compute_approach_motor_delta(float joint_error) const
@@ -196,9 +187,10 @@ private:
     motor_command_pub_->publish(cmd);
   }
 
+  // 100 Hz: approach with scaled deltas, or hold (0) once within coarse threshold.
   void control_timer_callback()
   {
-    ControlState state = read_state();
+    const auto state = read_state();
 
     if (!state.has_total) {
       publish_motor_command(0.0f);
@@ -217,43 +209,53 @@ private:
     const float tol = static_cast<float>(joint_error_tolerance_);
     const float coarse = static_cast<float>(motor_error_coarse_threshold_);
 
+    float motor_delta = 0.0f;
+
+    if (std::fabs(joint_error) >= tol) {
+      if (std::fabs(motor_error) >= coarse) {
+        motor_delta = compute_approach_motor_delta(joint_error);
+      } else if (motor_delta == 0.0f &&
+        settle_hold_count_.load() < lockin_settle_hold_count_)
+      {
+        settle_hold_count_.fetch_add(1);
+      }
+    } else {
+      reset_settle_hold_count();
+    }
+
+    if (motor_delta != 0.0f) {
+      reset_settle_hold_count();
+    }
+
+    publish_motor_command(motor_delta);
+  }
+
+  // 5 Hz: exact snap deltas when within coarse threshold but not yet at goal.
+  void lockin_timer_callback()
+  {
+    const auto state = read_state();
+
+    if (!state.has_total || !state.has_despos) {
+      return;
+    }
+
+    const float joint_curpos = state.total_position / static_cast<float>(gear_ratio_);
+    const float joint_error = state.joint_despos - joint_curpos;
+    const float motor_error = joint_error * static_cast<float>(gear_ratio_);
+    const float tol = static_cast<float>(joint_error_tolerance_);
+    const float coarse = static_cast<float>(motor_error_coarse_threshold_);
+
     if (std::fabs(joint_error) < tol) {
-      {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        reset_pending_snap();
-      }
-      publish_motor_command(0.0f);
       return;
     }
-
     if (std::fabs(motor_error) >= coarse) {
-      {
-        std::lock_guard<std::mutex> lock(state_mutex_);
-        reset_pending_snap();
-      }
-      publish_motor_command(compute_approach_motor_delta(joint_error));
+      return;
+    }
+    if (settle_hold_count_.load() < lockin_settle_hold_count_) {
       return;
     }
 
-    // Within coarse threshold: hold while a snap is actuating.
-    if (state.pending_snap) {
-      publish_motor_command(0.0f);
-      return;
-    }
-
-    const float snap_delta = compute_snap_motor_delta(joint_error);
-    if (std::fabs(snap_delta) < kCmdZeroEps) {
-      publish_motor_command(0.0f);
-      return;
-    }
-
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      pending_snap_ = true;
-      pending_start_total_ = state.total_position;
-      pending_commanded_delta_ = snap_delta;
-    }
-    publish_motor_command(snap_delta);
+    publish_motor_command(compute_snap_motor_delta(joint_error));
   }
 
   void warn_no_total_position()
@@ -273,24 +275,25 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr control_timer_;
+  rclcpp::TimerBase::SharedPtr lockin_timer_;
 
   std::mutex state_mutex_;
   float total_position_{0.0f};
   float joint_despos_{0.0f};
   bool has_total_position_{false};
   bool has_joint_despos_{false};
-  bool pending_snap_{false};
-  float pending_start_total_{0.0f};
-  float pending_commanded_delta_{0.0f};
 
   double gear_ratio_{0.0};
   double control_hz_{kDefaultControlHz};
+  double lockin_hz_{kDefaultLockinHz};
   double motor_step_max_{kDefaultMotorStepMax};
   double joint_error_tolerance_{kDefaultJointErrorTolerance};
   double motor_error_coarse_threshold_{kDefaultMotorErrorCoarseThreshold};
-  double lockin_actuation_threshold_{kDefaultLockinActuationThreshold};
+  int lockin_settle_hold_count_{kDefaultLockinSettleHoldCount};
   double kp_{kDefaultKp};
   double kd_{kDefaultKd};
+
+  std::atomic<int> settle_hold_count_{0};
 
   bool warned_no_total_{false};
   rclcpp::Time last_warn_time_{0, 0, RCL_ROS_TIME};
