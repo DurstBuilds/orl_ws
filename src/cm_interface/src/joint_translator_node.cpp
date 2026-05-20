@@ -1,8 +1,8 @@
 // joint_translator_node: maps motor total position to joint space and commands
 // motor deltas until joint_despos is reached.
 //
-// When |total_position_error| < pi: 100 Hz hold (0 delta) keeps feedback flowing;
-// 5 Hz lock-in commands nudge the motor toward the goal until within tolerance.
+// When |motor_error| < coarse threshold (default 0.25*pi): 100 Hz hold (0 delta)
+// keeps feedback flowing; 5 Hz lock-in sends the exact motor error to snap to despos.
 
 #include <cmath>
 #include <mutex>
@@ -20,7 +20,8 @@ constexpr float kDefaultControlHz = 100.0f;
 constexpr float kDefaultLockinHz = 5.0f;
 constexpr float kDefaultMotorStepMax = 0.1f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
-constexpr float kDefaultMotorErrorCoarseThreshold = static_cast<float>(M_PI);
+constexpr float kDefaultMotorErrorCoarseThreshold =
+  0.25f * static_cast<float>(M_PI);
 constexpr float kDefaultKp = 2.0f;
 constexpr float kDefaultKd = 0.02f;
 constexpr float kMaxMotorDelta = static_cast<float>(M_PI);
@@ -145,13 +146,19 @@ private:
     has_joint_despos_ = true;
   }
 
-  float compute_motor_delta(float joint_error) const
+  float compute_approach_motor_delta(float joint_error) const
   {
     const float motor_step = std::min(
       static_cast<float>(motor_step_max_),
       std::fabs(joint_error) * static_cast<float>(gear_ratio_));
-    float motor_delta = sign(joint_error) * motor_step;
+    const float motor_delta = sign(joint_error) * motor_step;
     return clamp(motor_delta, -kMaxMotorDelta, kMaxMotorDelta);
+  }
+
+  float compute_snap_motor_delta(float joint_error) const
+  {
+    const float motor_error = joint_error * static_cast<float>(gear_ratio_);
+    return clamp(motor_error, -kMaxMotorDelta, kMaxMotorDelta);
   }
 
   void publish_motor_command(float motor_delta)
@@ -165,7 +172,7 @@ private:
     motor_command_pub_->publish(cmd);
   }
 
-  // 100 Hz: approach with scaled deltas, or hold (0) once within pi motor error.
+  // 100 Hz: approach with scaled deltas, or hold (0) once within coarse threshold.
   void control_timer_callback()
   {
     const auto state = read_state();
@@ -192,15 +199,15 @@ private:
     if (std::fabs(joint_error) >= tol) {
       if (std::fabs(motor_error) >= coarse) {
         // Far: drive toward goal at full control rate.
-        motor_delta = compute_motor_delta(joint_error);
+        motor_delta = compute_approach_motor_delta(joint_error);
       }
-      // Within pi motor error: hold at 100 Hz for continuous feedback.
+      // Within coarse threshold: hold at 100 Hz for continuous feedback.
     }
 
     publish_motor_command(motor_delta);
   }
 
-  // 5 Hz: lock-in deltas only when within pi motor error but not yet at goal.
+  // 5 Hz: exact snap deltas when within coarse threshold but not yet at goal.
   void lockin_timer_callback()
   {
     const auto state = read_state();
@@ -222,7 +229,7 @@ private:
       return;
     }
 
-    publish_motor_command(compute_motor_delta(joint_error));
+    publish_motor_command(compute_snap_motor_delta(joint_error));
   }
 
   void warn_no_total_position()
