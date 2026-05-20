@@ -11,6 +11,11 @@ from sensor_msgs.msg import Joy
 from std_msgs.msg import Float32
 
 
+def stick_to_joint_angle(x: float, y: float) -> float:
+    """Map right-stick deflection to joint angle (rad): down=0, right=pi/2, up=pi, left=-pi/2."""
+    return math.atan2(-x, -y)
+
+
 class JoyState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -25,10 +30,13 @@ class JoyState:
         stick_angle: Optional[float] = None
 
         if deadman and x_axis < len(msg.axes) and y_axis < len(msg.axes):
-            x = -float(msg.axes[x_axis])
+            x = float(msg.axes[x_axis])
             y = float(msg.axes[y_axis])
+            if invert_stick:
+                x = -x
+                y = -y
             if math.hypot(x, y) > stick_deadzone:
-                stick_angle = math.atan2(y, x)
+                stick_angle = stick_to_joint_angle(x, y)
 
         with self._lock:
             self._deadman_active = deadman
@@ -80,7 +88,8 @@ class JoystickControl(Node):
         self.get_logger().info(
             f'Subscribed to {joy_topic}; publishing joint_despos at {publish_hz:.0f} Hz '
             f'when button[{self._deadman_index}] held. '
-            f'Stick axes [{self._x_axis}, {self._y_axis}], invert={self._invert_stick}')
+            f'Stick axes [{self._x_axis}, {self._y_axis}], invert={self._invert_stick}, '
+            f'map: down=0, right=pi/2, up=pi')
 
     def _joy_callback(self, msg: Joy) -> None:
         self._state.update(
