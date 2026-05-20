@@ -38,6 +38,9 @@ ament_target_dependencies(motor_node_continuous rclcpp std_msgs motor_interfaces
 add_executable(motor_unwrapper_node src/motor_unwrapper_node.cpp)
 ament_target_dependencies(motor_unwrapper_node rclcpp std_msgs motor_interfaces)
 
+add_executable(joint_translator_node src/joint_translator_node.cpp)
+ament_target_dependencies(joint_translator_node rclcpp std_msgs motor_interfaces)
+
 # required for terminal_position_publisher
 add_executable(terminal_position_publisher src/terminal_position_publisher.cpp)
 ament_target_dependencies(terminal_position_publisher rclcpp std_msgs)
@@ -51,6 +54,7 @@ install(TARGETS
   motor_node
   motor_node_continuous
   motor_unwrapper_node
+  joint_translator_node
   terminal_position_publisher
   terminal_motor_command
   DESTINATION lib/${PROJECT_NAME}
@@ -62,5 +66,8 @@ install(PROGRAMS
   RENAME keyboard_command
 )
 
+install(DIRECTORY launch
+  DESTINATION share/${PROJECT_NAME}
+)
 
 ament_package()
