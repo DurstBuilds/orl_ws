@@ -1,6 +1,6 @@
 // motor_node_continuous: MIT commands for continuous (delta position) firmware.
-// Position field MSB (bit 15): 0 = drive (apply delta), 1 = hold. Lower 15 bits encode
-// position change magnitude. Sends every motor_command message (no deduplication).
+// Position field bit 15: 0 = hold, 1 = apply new command. Lower 15 bits encode delta.
+// Hold when p_delta, v_des, and t_ff are all zero. Sends every motor_command (no dedup).
 
 #include <chrono>
 #include <cmath>
@@ -38,8 +38,10 @@ constexpr float kKdMax = 5.0f;
 
 constexpr int kDriveId = 0;
 
-// Debug: always set bit 7 of frame.data[0] on the wire (independent of p_delta)
-constexpr uint8_t kData0Bit7Debug = 0x80;
+constexpr float kCmdZeroEps = 1e-6f;
+
+// Bit 15 of the 16-bit position field in the MIT command
+constexpr int kPositionApplyBit = 0x8000;
 
 const char * mit_error_string(int code)
 {
@@ -74,10 +76,18 @@ float uint_to_float(int x_int, float x_min, float x_max, int bits)
   return static_cast<float>(x_int) * span / static_cast<float>((1 << bits) - 1) + x_min;
 }
 
-// Pack position for continuous firmware: MSB 0 = drive, MSB 1 = hold; bits 14:0 = delta.
-int pack_position_continuous(float p_delta)
+// Pack position: bit 15 = apply enable; bits 14:0 = delta magnitude.
+int pack_position_continuous(float p_delta, float v_des, float t_ff)
 {
-  return float_to_uint(p_delta, kPMin, kPMax, 15) & 0x7FFF;
+  const bool hold = std::fabs(p_delta) < kCmdZeroEps &&
+                    std::fabs(v_des) < kCmdZeroEps &&
+                    std::fabs(t_ff) < kCmdZeroEps;
+
+  int p_int = float_to_uint(p_delta, kPMin, kPMax, 15) & 0x7FFF;
+  if (!hold) {
+    p_int |= kPositionApplyBit;
+  }
+  return p_int;
 }
 
 struct Ak70MitFeedback
@@ -247,7 +257,7 @@ private:
 
   void send_mit_command(float p_delta, float v_des, float kp, float kd, float t_ff)
   {
-    const int p_int = pack_position_continuous(p_delta);
+    const int p_int = pack_position_continuous(p_delta, v_des, t_ff);
     const int v_int = float_to_uint(v_des, kVMin, kVMax, 12);
     const int kp_int = float_to_uint(kp, kKpMin, kKpMax, 12);
     const int kd_int = float_to_uint(kd, kKdMin, kKdMax, 12);
@@ -257,7 +267,7 @@ private:
     frame.can_id = kDriveId;
     frame.can_dlc = 8;
 
-    frame.data[0] = static_cast<uint8_t>((p_int >> 8) | kData0Bit7Debug);
+    frame.data[0] = static_cast<uint8_t>(p_int >> 8);
     frame.data[1] = p_int & 0xFF;
     frame.data[2] = v_int >> 4;
     frame.data[3] = ((v_int & 0xF) << 4) | (kp_int >> 8);
@@ -271,10 +281,11 @@ private:
       return;
     }
 
+    const int apply_bit = (p_int & kPositionApplyBit) ? 1 : 0;
     RCLCPP_INFO(
       this->get_logger(),
-      "Sent MIT cmd: dP=%.3f p_packed=0x%04X data0=0x%02X V=%.3f KP=%.3f KD=%.3f T=%.3f",
-      p_delta, p_int & 0xFFFF, frame.data[0], v_des, kp, kd, t_ff);
+      "Sent MIT cmd: dP=%.3f apply=%d p_packed=0x%04X V=%.3f KP=%.3f KD=%.3f T=%.3f",
+      p_delta, apply_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
 
     read_mit_feedback();
   }
