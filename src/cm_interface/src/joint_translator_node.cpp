@@ -19,14 +19,14 @@ namespace
 {
 
 constexpr float kDefaultControlHz = 100.0f;
-constexpr float kDefaultLockinHz = 5.0f;
+constexpr float kDefaultLockinHz = 2.0f;
 constexpr float kDefaultMotorStepMax = 0.1f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kDefaultMotorErrorCoarseThreshold =
-  0.25f * static_cast<float>(M_PI);
+  0.5f * static_cast<float>(M_PI);
 constexpr float kDefaultKp = 2.0f;
 constexpr float kDefaultKd = 0.02f;
-constexpr float kLockinKdScale = 2.0f;
+constexpr float kLockinKdScale = 5.0f;
 constexpr float kKdMax = 5.0f;
 constexpr int kDefaultLockinSettleHoldCount = 10;
 constexpr float kMaxMotorDelta = static_cast<float>(M_PI);
