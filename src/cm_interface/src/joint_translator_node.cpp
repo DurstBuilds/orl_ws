@@ -22,11 +22,10 @@ constexpr float kDefaultControlHz = 100.0f;
 constexpr float kDefaultLockinHz = 5.0f;
 constexpr float kDefaultMotorStepMax = 0.1f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
-constexpr float kDefaultMotorErrorCoarseThreshold =
-  0.5f * static_cast<float>(M_PI);
+constexpr float kDefaultMotorErrorCoarseThreshold = static_cast<float>(M_PI);
 constexpr float kDefaultKp = 2.0f;
 constexpr float kDefaultKd = 0.02f;
-constexpr int kDefaultLockinSettleHoldCount = 10;
+constexpr int kDefaultLockinSettleHoldCount = 20;
 constexpr float kMaxMotorDelta = static_cast<float>(M_PI);
 
 float clamp(float value, float low, float high)
