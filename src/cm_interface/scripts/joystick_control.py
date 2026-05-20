@@ -13,7 +13,7 @@ from std_msgs.msg import Float32
 
 def stick_to_joint_angle(x: float, y: float) -> float:
     """Map right-stick deflection to joint angle (rad): down=0, right=pi/2, up=pi, left=-pi/2."""
-    return math.atan2(-x, -y)
+    return math.atan2(y, x)-math.pi/2
 
 
 class JoyState:
@@ -23,18 +23,15 @@ class JoyState:
         self._stick_angle: Optional[float] = None
 
     def update(self, msg: Joy, deadman_index: int, x_axis: int, y_axis: int,
-               stick_deadzone: float, invert_stick: bool) -> None:
+               stick_deadzone: float) -> None:
         deadman = (
             deadman_index < len(msg.buttons) and msg.buttons[deadman_index] == 1
         )
         stick_angle: Optional[float] = None
 
         if deadman and x_axis < len(msg.axes) and y_axis < len(msg.axes):
-            x = float(msg.axes[x_axis])
+            x = -float(msg.axes[x_axis])
             y = float(msg.axes[y_axis])
-            if invert_stick:
-                x = -x
-                y = -y
             if math.hypot(x, y) > stick_deadzone:
                 stick_angle = stick_to_joint_angle(x, y)
 
@@ -60,7 +57,6 @@ class JoystickControl(Node):
         self.declare_parameter('right_stick_x_axis', 4)
         self.declare_parameter('right_stick_y_axis', 5)
         self.declare_parameter('stick_deadzone', 0.15)
-        self.declare_parameter('invert_stick', True)
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
         publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
@@ -76,9 +72,6 @@ class JoystickControl(Node):
         self._stick_deadzone = (
             self.get_parameter('stick_deadzone').get_parameter_value().double_value
         )
-        self._invert_stick = (
-            self.get_parameter('invert_stick').get_parameter_value().bool_value
-        )
 
         self._state = JoyState()
         self._publisher = self.create_publisher(Float32, 'joint_despos', 10)
@@ -88,7 +81,7 @@ class JoystickControl(Node):
         self.get_logger().info(
             f'Subscribed to {joy_topic}; publishing joint_despos at {publish_hz:.0f} Hz '
             f'when button[{self._deadman_index}] held. '
-            f'Stick axes [{self._x_axis}, {self._y_axis}], invert={self._invert_stick}, '
+            f'Stick axes [{self._x_axis}, {self._y_axis}] (x inverted), '
             f'map: down=0, right=pi/2, up=pi')
 
     def _joy_callback(self, msg: Joy) -> None:
@@ -98,7 +91,6 @@ class JoystickControl(Node):
             self._x_axis,
             self._y_axis,
             self._stick_deadzone,
-            self._invert_stick,
         )
 
     def _publish_timer_callback(self) -> None:
