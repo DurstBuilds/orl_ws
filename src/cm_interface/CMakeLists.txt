@@ -35,6 +35,9 @@ ament_target_dependencies(motor_node rclcpp std_msgs motor_interfaces)
 add_executable(motor_node_continuous src/motor_node_continuous.cpp)
 ament_target_dependencies(motor_node_continuous rclcpp std_msgs motor_interfaces)
 
+add_executable(motor_unwrapper_node src/motor_unwrapper_node.cpp)
+ament_target_dependencies(motor_unwrapper_node rclcpp std_msgs motor_interfaces)
+
 # required for terminal_position_publisher
 add_executable(terminal_position_publisher src/terminal_position_publisher.cpp)
 ament_target_dependencies(terminal_position_publisher rclcpp std_msgs)
@@ -47,6 +50,7 @@ install(TARGETS
   can_test_node
   motor_node
   motor_node_continuous
+  motor_unwrapper_node
   terminal_position_publisher
   terminal_motor_command
   DESTINATION lib/${PROJECT_NAME}

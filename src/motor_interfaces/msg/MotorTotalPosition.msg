@@ -1,0 +1,2 @@
+float32 wrapped_position
+float32 total_position
