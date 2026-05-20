@@ -31,6 +31,18 @@ def generate_launch_description():
         }],
     )
 
+    joy_node = Node(
+        package='joy',
+        executable='joy_node',
+        name='joy_node',
+    )
+
+    joystick_control_node = Node(
+        package='cm_interface',
+        executable='joystick_control_node',
+        name='joystick_control_node',
+    )
+
     return LaunchDescription([
         gear_ratio_arg,
         motor_node_continuous,

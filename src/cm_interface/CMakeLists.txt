@@ -66,6 +66,12 @@ install(PROGRAMS
   RENAME keyboard_command
 )
 
+install(PROGRAMS
+  scripts/joystick_control.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME joystick_control_node
+)
+
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
