@@ -10,19 +10,15 @@
 namespace
 {
 
-constexpr float kWrapPeriod = 2.0f * static_cast<float>(M_PI);
 constexpr float kPositionEps = 1e-6f;
+// Single-step unwrapped delta above this is treated as set-origin / telemetry reset.
+constexpr float kOriginJumpThreshold = 2.0f;
 
+// Shortest signed delta in (-pi, pi], handles pi <-> -pi boundary crossings.
 float unwrap_delta(float prev_wrapped, float new_wrapped)
 {
-  float delta = new_wrapped - prev_wrapped;
-  while (delta > static_cast<float>(M_PI)) {
-    delta -= kWrapPeriod;
-  }
-  while (delta < -static_cast<float>(M_PI)) {
-    delta += kWrapPeriod;
-  }
-  return delta;
+  const float diff = new_wrapped - prev_wrapped;
+  return std::atan2(std::sin(diff), std::cos(diff));
 }
 
 }  // namespace
@@ -61,15 +57,14 @@ private:
       has_last_ = true;
     } else {
       const float delta = unwrap_delta(last_wrapped_, new_wrapped);
-      const float raw_diff = new_wrapped - last_wrapped_;
 
-      if (std::fabs(delta) > static_cast<float>(M_PI) ||
-        std::fabs(raw_diff) > static_cast<float>(M_PI))
-      {
+      // Do not use raw (new - prev) for jump detection: crossing pi->-pi gives
+      // |raw| ~ 2*pi even though unwrapped delta is small.
+      if (std::fabs(delta) > kOriginJumpThreshold) {
         RCLCPP_WARN(
           get_logger(),
-          "Large position jump (raw=%.4f, unwrapped_delta=%.4f); resetting total to %.4f",
-          raw_diff, delta, new_wrapped);
+          "Large unwrapped step (%.4f rad); resetting total to %.4f",
+          delta, new_wrapped);
         total_position_ = new_wrapped;
       } else {
         total_position_ += delta;
