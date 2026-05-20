@@ -2,8 +2,10 @@
 // motor deltas until joint_despos is reached.
 //
 // When |motor_error| < coarse threshold (default 0.25*pi): 100 Hz hold (0 delta)
-// keeps feedback flowing; 5 Hz lock-in sends the exact motor error to snap to despos.
+// keeps feedback flowing. After lockin_settle_hold_count holds, 5 Hz lock-in sends
+// the exact motor error to snap to despos.
 
+#include <atomic>
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
@@ -24,6 +26,7 @@ constexpr float kDefaultMotorErrorCoarseThreshold =
   0.25f * static_cast<float>(M_PI);
 constexpr float kDefaultKp = 2.0f;
 constexpr float kDefaultKd = 0.02f;
+constexpr int kDefaultLockinSettleHoldCount = 10;
 constexpr float kMaxMotorDelta = static_cast<float>(M_PI);
 
 float clamp(float value, float low, float high)
@@ -63,6 +66,8 @@ public:
       "joint_error_tolerance", kDefaultJointErrorTolerance);
     motor_error_coarse_threshold_ = declare_parameter<double>(
       "motor_error_coarse_threshold", kDefaultMotorErrorCoarseThreshold);
+    lockin_settle_hold_count_ = declare_parameter<int>(
+      "lockin_settle_hold_count", kDefaultLockinSettleHoldCount);
     kp_ = declare_parameter<double>("kp", kDefaultKp);
     kd_ = declare_parameter<double>("kd", kDefaultKd);
 
@@ -74,6 +79,9 @@ public:
     }
     if (lockin_hz_ <= 0.0) {
       throw std::invalid_argument("lockin_hz must be > 0");
+    }
+    if (lockin_settle_hold_count_ < 0) {
+      throw std::invalid_argument("lockin_settle_hold_count must be >= 0");
     }
 
     motor_total_sub_ = create_subscription<motor_interfaces::msg::MotorTotalPosition>(
@@ -102,9 +110,10 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "gear_ratio=%.4f control_hz=%.1f lockin_hz=%.1f motor_step_max=%.4f "
-      "joint_error_tolerance=%.4f motor_error_coarse_threshold=%.4f kp=%.2f kd=%.3f",
+      "joint_error_tolerance=%.4f motor_error_coarse_threshold=%.4f "
+      "lockin_settle_hold_count=%d kp=%.2f kd=%.3f",
       gear_ratio_, control_hz_, lockin_hz_, motor_step_max_, joint_error_tolerance_,
-      motor_error_coarse_threshold_, kp_, kd_);
+      motor_error_coarse_threshold_, lockin_settle_hold_count_, kp_, kd_);
   }
 
 private:
@@ -144,6 +153,12 @@ private:
     std::lock_guard<std::mutex> lock(state_mutex_);
     joint_despos_ = msg->data;
     has_joint_despos_ = true;
+    settle_hold_count_.store(0);
+  }
+
+  void reset_settle_hold_count()
+  {
+    settle_hold_count_.store(0);
   }
 
   float compute_approach_motor_delta(float joint_error) const
@@ -202,6 +217,17 @@ private:
         motor_delta = compute_approach_motor_delta(joint_error);
       }
       // Within coarse threshold: hold at 100 Hz for continuous feedback.
+      if (motor_delta == 0.0f &&
+        settle_hold_count_.load() < lockin_settle_hold_count_)
+      {
+        settle_hold_count_.fetch_add(1);
+      }
+    } else {
+      reset_settle_hold_count();
+    }
+
+    if (motor_delta != 0.0f) {
+      reset_settle_hold_count();
     }
 
     publish_motor_command(motor_delta);
@@ -226,6 +252,9 @@ private:
       return;
     }
     if (std::fabs(motor_error) >= coarse) {
+      return;
+    }
+    if (settle_hold_count_.load() < lockin_settle_hold_count_) {
       return;
     }
 
@@ -263,8 +292,11 @@ private:
   double motor_step_max_{kDefaultMotorStepMax};
   double joint_error_tolerance_{kDefaultJointErrorTolerance};
   double motor_error_coarse_threshold_{kDefaultMotorErrorCoarseThreshold};
+  int lockin_settle_hold_count_{kDefaultLockinSettleHoldCount};
   double kp_{kDefaultKp};
   double kd_{kDefaultKd};
+
+  std::atomic<int> settle_hold_count_{0};
 
   bool warned_no_total_{false};
   rclcpp::Time last_warn_time_{0, 0, RCL_ROS_TIME};
