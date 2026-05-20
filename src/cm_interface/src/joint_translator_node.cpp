@@ -19,7 +19,7 @@ namespace
 {
 
 constexpr float kDefaultControlHz = 100.0f;
-constexpr float kDefaultLockinHz = 4.0f;
+constexpr float kDefaultLockinHz = 2.0f;
 constexpr float kDefaultMotorStepMax = 0.1f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kDefaultMotorErrorCoarseThreshold =
