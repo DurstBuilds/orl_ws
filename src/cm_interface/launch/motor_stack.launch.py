@@ -17,6 +17,12 @@ def generate_launch_description():
         description='Motor-to-joint reduction (motor_rad / joint_rad) for joint_translator_node.',
     )
 
+    motor_model_arg = DeclareLaunchArgument(
+        'motor_model',
+        default_value='ak70_10',
+        description='Motor MIT profile: ak70_10 | ak10_9 | ak80_64',
+    )
+
     joy_dev_arg = DeclareLaunchArgument(
         'joy_dev',
         default_value='0',
@@ -27,6 +33,9 @@ def generate_launch_description():
         package='cm_interface',
         executable='motor_node_continuous',
         name='motor_node_continuous',
+        parameters=[{
+            'motor_model': LaunchConfiguration('motor_model'),
+        }],
     )
 
     motor_unwrapper_node = Node(
@@ -55,6 +64,7 @@ def generate_launch_description():
 
     return LaunchDescription([
         gear_ratio_arg,
+        motor_model_arg,
         joy_dev_arg,
         motor_node_continuous,
         motor_unwrapper_node,

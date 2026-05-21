@@ -18,6 +18,7 @@
 #include <linux/can.h>
 #include <linux/can/raw.h>
 
+#include "cm_interface/motor_mit_profile.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "motor_interfaces/msg/motor_command.hpp"
 #include "motor_interfaces/msg/motor_state.hpp"
@@ -25,22 +26,8 @@
 namespace
 {
 
-constexpr float kPMin = -static_cast<float>(M_PI);
-constexpr float kPMax = static_cast<float>(M_PI);
-constexpr float kVMin = -50.0f;
-constexpr float kVMax = 50.0f;
-constexpr float kTMin = -25.0f;
-constexpr float kTMax = 25.0f;
-constexpr float kKpMin = 0.0f;
-constexpr float kKpMax = 500.0f;
-constexpr float kKdMin = 0.0f;
-constexpr float kKdMax = 5.0f;
-
 constexpr int kDriveId = 0;
-
 constexpr float kCmdZeroEps = 1e-6f;
-
-// Bit 15 of the 16-bit position field in the MIT command
 constexpr int kPositionApplyBit = 0x8000;
 
 const char * mit_error_string(int code)
@@ -76,21 +63,7 @@ float uint_to_float(int x_int, float x_min, float x_max, int bits)
   return static_cast<float>(x_int) * span / static_cast<float>((1 << bits) - 1) + x_min;
 }
 
-// Pack position: bit 15 = apply enable; bits 14:0 = delta magnitude.
-int pack_position_continuous(float p_delta, float v_des, float t_ff)
-{
-  const bool hold = std::fabs(p_delta) < kCmdZeroEps &&
-                    std::fabs(v_des) < kCmdZeroEps &&
-                    std::fabs(t_ff) < kCmdZeroEps;
-
-  int p_int = float_to_uint(p_delta, kPMin, kPMax, 15) & 0x7FFF;
-  if (!hold) {
-    p_int |= kPositionApplyBit;
-  }
-  return p_int;
-}
-
-struct Ak70MitFeedback
+struct MitFeedback
 {
   int drive_id{0};
   uint32_t can_id{0};
@@ -100,7 +73,10 @@ struct Ak70MitFeedback
   float temperature_c{0.0f};
   int error_code{0};
 
-  bool unpack_reply(const struct can_frame & frame, int expected_drive_id)
+  bool unpack_reply(
+    const struct can_frame & frame,
+    int expected_drive_id,
+    const cm_interface::MotorMitProfile & profile)
   {
     if (frame.can_dlc < 7) {
       return false;
@@ -110,7 +86,7 @@ struct Ak70MitFeedback
     drive_id = frame.data[0];
 
     if (static_cast<int>(can_id) != expected_drive_id ||
-        drive_id != expected_drive_id)
+      drive_id != expected_drive_id)
     {
       return false;
     }
@@ -120,9 +96,9 @@ struct Ak70MitFeedback
     const int i_int = ((frame.data[4] & 0x0F) << 8) | frame.data[5];
     const int t_int = frame.data[6];
 
-    position_rad = uint_to_float(p_int, kPMin, kPMax, 16);
-    velocity_rad_s = uint_to_float(v_int, kVMin, kVMax, 12);
-    torque_nm = uint_to_float(i_int, kTMin, kTMax, 12);
+    position_rad = uint_to_float(p_int, profile.p_min, profile.p_max, 16);
+    velocity_rad_s = uint_to_float(v_int, profile.v_min, profile.v_max, 12);
+    torque_nm = uint_to_float(i_int, profile.t_min, profile.t_max, 12);
     temperature_c = static_cast<float>(t_int) - 40.0f;
     error_code = frame.can_dlc >= 8 ? static_cast<int>(frame.data[7]) : 0;
 
@@ -135,11 +111,28 @@ struct Ak70MitFeedback
 class MotorNodeContinuous : public rclcpp::Node
 {
 public:
-  MotorNodeContinuous() : Node("motor_node_continuous")
+  MotorNodeContinuous()
+  : Node("motor_node_continuous")
   {
+    const std::string motor_model = declare_parameter<std::string>(
+      "motor_model", "ak70_10");
+    try {
+      profile_ = cm_interface::get_motor_mit_profile(motor_model);
+    } catch (const std::exception & e) {
+      RCLCPP_FATAL(get_logger(), "%s", e.what());
+      throw;
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Motor model: %s | position [%.3f, %.3f] rad | velocity [%.1f, %.1f] rad/s | "
+      "torque [%.1f, %.1f] Nm",
+      profile_.name, profile_.p_min, profile_.p_max,
+      profile_.v_min, profile_.v_max, profile_.t_min, profile_.t_max);
+
     can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (can_socket_ < 0) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to create CAN socket.");
+      RCLCPP_ERROR(get_logger(), "Failed to create CAN socket.");
       return;
     }
 
@@ -148,7 +141,7 @@ public:
     std::strncpy(ifr.ifr_name, "can0", IFNAMSIZ - 1);
 
     if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) {
-      RCLCPP_ERROR(this->get_logger(), "can0 not found.");
+      RCLCPP_ERROR(get_logger(), "can0 not found.");
       close(can_socket_);
       can_socket_ = -1;
       return;
@@ -160,18 +153,18 @@ public:
     addr.can_ifindex = ifr.ifr_ifindex;
 
     if (bind(can_socket_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-      RCLCPP_ERROR(this->get_logger(), "Bind failed.");
+      RCLCPP_ERROR(get_logger(), "Bind failed.");
       close(can_socket_);
       can_socket_ = -1;
       return;
     }
 
-    subscription_ = this->create_subscription<motor_interfaces::msg::MotorCommand>(
+    subscription_ = create_subscription<motor_interfaces::msg::MotorCommand>(
       "motor_command",
       10,
       std::bind(&MotorNodeContinuous::motor_command_callback, this, std::placeholders::_1));
 
-    state_publisher_ = this->create_publisher<motor_interfaces::msg::MotorState>("motor_state", 10);
+    state_publisher_ = create_publisher<motor_interfaces::msg::MotorState>("motor_state", 10);
 
     enable_motor();
     set_motor_origin();
@@ -186,6 +179,19 @@ public:
   }
 
 private:
+  int pack_position_continuous(float p_delta, float v_des, float t_ff) const
+  {
+    const bool hold = std::fabs(p_delta) < kCmdZeroEps &&
+      std::fabs(v_des) < kCmdZeroEps &&
+      std::fabs(t_ff) < kCmdZeroEps;
+
+    int p_int = float_to_uint(p_delta, profile_.p_min, profile_.p_max, 15) & 0x7FFF;
+    if (!hold) {
+      p_int |= kPositionApplyBit;
+    }
+    return p_int;
+  }
+
   void enable_motor()
   {
     if (can_socket_ < 0) {
@@ -228,7 +234,6 @@ private:
     write(can_socket_, &frame, sizeof(frame));
   }
 
-  // Set current shaft position as MIT zero (0xFF..0xFE command byte).
   void set_motor_origin()
   {
     if (can_socket_ < 0) {
@@ -248,20 +253,20 @@ private:
     frame.data[7] = 0xFE;
 
     if (write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame))) {
-      RCLCPP_INFO(this->get_logger(), "Set motor origin (current position = 0).");
+      RCLCPP_INFO(get_logger(), "Set motor origin (current position = 0).");
       read_mit_feedback();
     } else {
-      RCLCPP_ERROR(this->get_logger(), "Failed to set motor origin.");
+      RCLCPP_ERROR(get_logger(), "Failed to set motor origin.");
     }
   }
 
   void send_mit_command(float p_delta, float v_des, float kp, float kd, float t_ff)
   {
     const int p_int = pack_position_continuous(p_delta, v_des, t_ff);
-    const int v_int = float_to_uint(v_des, kVMin, kVMax, 12);
-    const int kp_int = float_to_uint(kp, kKpMin, kKpMax, 12);
-    const int kd_int = float_to_uint(kd, kKdMin, kKdMax, 12);
-    const int t_int = float_to_uint(t_ff, kTMin, kTMax, 12);
+    const int v_int = float_to_uint(v_des, profile_.v_min, profile_.v_max, 12);
+    const int kp_int = float_to_uint(kp, profile_.kp_min, profile_.kp_max, 12);
+    const int kd_int = float_to_uint(kd, profile_.kd_min, profile_.kd_max, 12);
+    const int t_int = float_to_uint(t_ff, profile_.t_min, profile_.t_max, 12);
 
     struct can_frame frame{};
     frame.can_id = kDriveId;
@@ -277,13 +282,13 @@ private:
     frame.data[7] = t_int & 0xFF;
 
     if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
-      RCLCPP_ERROR(this->get_logger(), "Failed to send MIT command.");
+      RCLCPP_ERROR(get_logger(), "Failed to send MIT command.");
       return;
     }
 
     const int apply_bit = (p_int & kPositionApplyBit) ? 1 : 0;
     RCLCPP_INFO(
-      this->get_logger(),
+      get_logger(),
       "Sent MIT cmd: dP=%.3f apply=%d p_packed=0x%04X V=%.3f KP=%.3f KD=%.3f T=%.3f",
       p_delta, apply_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
 
@@ -293,7 +298,8 @@ private:
   void read_mit_feedback()
   {
     constexpr int kPollTimeoutMs = 50;
-    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kPollTimeoutMs);
+    const auto deadline = std::chrono::steady_clock::now() +
+      std::chrono::milliseconds(kPollTimeoutMs);
 
     while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
       const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -312,7 +318,8 @@ private:
         if (errno == EINTR) {
           continue;
         }
-        RCLCPP_WARN(this->get_logger(), "poll() while waiting for MIT feedback: %s",
+        RCLCPP_WARN(
+          get_logger(), "poll() while waiting for MIT feedback: %s",
           std::strerror(errno));
         return;
       }
@@ -323,7 +330,8 @@ private:
       struct can_frame frame{};
       const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
       if (nbytes < 0) {
-        RCLCPP_WARN(this->get_logger(), "read() while waiting for MIT feedback: %s",
+        RCLCPP_WARN(
+          get_logger(), "read() while waiting for MIT feedback: %s",
           std::strerror(errno));
         return;
       }
@@ -331,18 +339,18 @@ private:
         continue;
       }
 
-      Ak70MitFeedback fb;
-      if (fb.unpack_reply(frame, kDriveId)) {
+      MitFeedback fb;
+      if (fb.unpack_reply(frame, kDriveId, profile_)) {
         publish_motor_state(fb);
         log_mit_feedback(fb);
         return;
       }
     }
 
-    RCLCPP_WARN(this->get_logger(), "No MIT feedback received within %d ms.", kPollTimeoutMs);
+    RCLCPP_WARN(get_logger(), "No MIT feedback received within %d ms.", kPollTimeoutMs);
   }
 
-  void publish_motor_state(const Ak70MitFeedback & fb)
+  void publish_motor_state(const MitFeedback & fb)
   {
     motor_interfaces::msg::MotorState msg;
     msg.position = fb.position_rad;
@@ -354,13 +362,13 @@ private:
     state_publisher_->publish(msg);
   }
 
-  void log_mit_feedback(const Ak70MitFeedback & fb)
+  void log_mit_feedback(const MitFeedback & fb)
   {
     const double position_deg = fb.position_rad * 180.0 / M_PI;
 
     std::ostringstream out;
     out << std::fixed << std::setprecision(4);
-    out << "\n========== AK70-10 MIT Feedback ==========\n";
+    out << "\n========== " << profile_.name << " MIT Feedback ==========\n";
     out << "Drive ID:      " << fb.drive_id << '\n';
     out << "Position:      " << fb.position_rad << " rad  (" << position_deg << " deg)\n";
     out << "Velocity:      " << fb.velocity_rad_s << " rad/s\n";
@@ -369,7 +377,7 @@ private:
     out << "Error code:    " << fb.error_code << " (" << mit_error_string(fb.error_code) << ")\n";
     out << "==========================================";
 
-    RCLCPP_INFO(this->get_logger(), "%s", out.str().c_str());
+    RCLCPP_INFO(get_logger(), "%s", out.str().c_str());
   }
 
   void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
@@ -377,6 +385,7 @@ private:
     send_mit_command(msg->position, msg->velocity, msg->kp, msg->kd, msg->torque);
   }
 
+  cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
   rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_publisher_;
   int can_socket_{-1};
@@ -385,7 +394,13 @@ private:
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);
-  rclcpp::spin(std::make_shared<MotorNodeContinuous>());
+  try {
+    rclcpp::spin(std::make_shared<MotorNodeContinuous>());
+  } catch (const std::exception & e) {
+    RCLCPP_FATAL(rclcpp::get_logger("motor_node_continuous"), "%s", e.what());
+    rclcpp::shutdown();
+    return 1;
+  }
   rclcpp::shutdown();
   return 0;
 }

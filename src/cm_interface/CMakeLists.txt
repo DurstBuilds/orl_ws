@@ -33,6 +33,10 @@ ament_target_dependencies(motor_node rclcpp std_msgs motor_interfaces)
 
 # continuous delta-position MIT firmware
 add_executable(motor_node_continuous src/motor_node_continuous.cpp)
+target_include_directories(motor_node_continuous PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 ament_target_dependencies(motor_node_continuous rclcpp std_msgs motor_interfaces)
 
 add_executable(motor_unwrapper_node src/motor_unwrapper_node.cpp)
@@ -74,6 +78,10 @@ install(PROGRAMS
 
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
+)
+
+install(DIRECTORY include/
+  DESTINATION include
 )
 
 ament_package()
