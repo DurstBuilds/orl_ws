@@ -13,7 +13,7 @@ from std_msgs.msg import Float32
 
 def stick_to_joint_angle(x: float, y: float) -> float:
     """Map right-stick deflection to joint angle (rad): down=0, right=pi/2, up=pi, left=-pi/2."""
-    return math.atan2(x, y)
+    return math.atan2(x, -y)
 
 class JoyState:
     def __init__(self) -> None:
@@ -32,7 +32,7 @@ class JoyState:
             x = float(msg.axes[x_axis])
             y = float(msg.axes[y_axis])
             if math.hypot(x, y) > stick_deadzone:
-                stick_angle = stick_to_joint_angle(x, -y)
+                stick_angle = stick_to_joint_angle(x, y)
 
         with self._lock:
             self._deadman_active = deadman
