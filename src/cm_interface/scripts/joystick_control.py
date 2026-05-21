@@ -21,23 +21,48 @@ class JoyState:
         self._deadman_active = False
         self._stick_angle: Optional[float] = None
 
-    def update(self, msg: Joy, deadman_index: int, x_axis: int, y_axis: int,
-               stick_deadzone: float) -> None:
+    def update(
+        self,
+        msg: Joy,
+        deadman_index: int,
+        right_x_axis: int,
+        right_y_axis: int,
+        left_x_axis: int,
+        left_y_axis: int,
+        stick_deadzone: float,
+    ) -> None:
         deadman = (
             deadman_index < len(msg.buttons) and msg.buttons[deadman_index] == 1
         )
         stick_angle: Optional[float] = None
 
-        if deadman and x_axis < len(msg.axes) and y_axis < len(msg.axes):
-            x = float(msg.axes[x_axis])
-            y = float(msg.axes[y_axis])
-            if math.hypot(x, y) > stick_deadzone:
-                stick_angle = stick_to_joint_angle(x, y)
+        if deadman:
+            right_x = self._read_axis(msg, right_x_axis)
+            right_y = self._read_axis(msg, right_y_axis)
+            left_x = self._read_axis(msg, left_x_axis)
+            left_y = self._read_axis(msg, left_y_axis)
+
+            if right_x is not None and right_y is not None:
+                right_centered = math.hypot(right_x, right_y) <= stick_deadzone
+                left_centered = True
+                if left_x is not None and left_y is not None:
+                    left_centered = math.hypot(left_x, left_y) <= stick_deadzone
+
+                if right_centered and left_centered:
+                    stick_angle = 0.0
+                elif not right_centered:
+                    stick_angle = stick_to_joint_angle(right_x, right_y)
 
         with self._lock:
             self._deadman_active = deadman
             if stick_angle is not None:
                 self._stick_angle = stick_angle
+
+    @staticmethod
+    def _read_axis(msg: Joy, axis_index: int) -> Optional[float]:
+        if axis_index < len(msg.axes):
+            return float(msg.axes[axis_index])
+        return None
 
     def get_publish_state(self) -> tuple[bool, Optional[float]]:
         with self._lock:
@@ -55,6 +80,8 @@ class JoystickControl(Node):
         self.declare_parameter('deadman_button_index', 5)
         self.declare_parameter('right_stick_x_axis', 3)
         self.declare_parameter('right_stick_y_axis', 4)
+        self.declare_parameter('left_stick_x_axis', 0)
+        self.declare_parameter('left_stick_y_axis', 1)
         self.declare_parameter('stick_deadzone', 0.15)
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
@@ -62,11 +89,17 @@ class JoystickControl(Node):
         self._deadman_index = (
             self.get_parameter('deadman_button_index').get_parameter_value().integer_value
         )
-        self._x_axis = (
+        self._right_x_axis = (
             self.get_parameter('right_stick_x_axis').get_parameter_value().integer_value
         )
-        self._y_axis = (
+        self._right_y_axis = (
             self.get_parameter('right_stick_y_axis').get_parameter_value().integer_value
+        )
+        self._left_x_axis = (
+            self.get_parameter('left_stick_x_axis').get_parameter_value().integer_value
+        )
+        self._left_y_axis = (
+            self.get_parameter('left_stick_y_axis').get_parameter_value().integer_value
         )
         self._stick_deadzone = (
             self.get_parameter('stick_deadzone').get_parameter_value().double_value
@@ -80,15 +113,18 @@ class JoystickControl(Node):
         self.get_logger().info(
             f'Subscribed to {joy_topic}; publishing joint_despos at {publish_hz:.0f} Hz '
             f'when button[{self._deadman_index}] held. '
-            f'Stick axes [{self._x_axis}, {self._y_axis}] (x inverted), '
-            f'map: down=0, right=pi/2, up=pi')
+            f'Right stick axes [{self._right_x_axis}, {self._right_y_axis}], '
+            f'left stick axes [{self._left_x_axis}, {self._left_y_axis}], '
+            f'both centered -> despos=0')
 
     def _joy_callback(self, msg: Joy) -> None:
         self._state.update(
             msg,
             self._deadman_index,
-            self._x_axis,
-            self._y_axis,
+            self._right_x_axis,
+            self._right_y_axis,
+            self._left_x_axis,
+            self._left_y_axis,
             self._stick_deadzone,
         )
 

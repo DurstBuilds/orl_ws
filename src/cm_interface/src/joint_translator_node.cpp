@@ -21,7 +21,7 @@ constexpr float kDefaultMotorDeltaMax = 0.2f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kDefaultPdKp = 0.5f;
 constexpr float kDefaultPdKd = 0.05f;
-constexpr float kDefaultMitKp = 2.0f;
+constexpr float kDefaultMitKp = 4.0f;
 constexpr float kDefaultMitKd = 0.02f;
 constexpr float kMitKdMax = 5.0f;
 
