@@ -13,7 +13,7 @@ from std_msgs.msg import Float32
 
 def stick_to_joint_angle(x: float, y: float) -> float:
     """Map right-stick deflection to joint angle (rad): down=0, right=pi/2, up=pi, left=-pi/2."""
-    return math.atan2(y, x)
+    return math.atan2(x, -y)
 
 class JoyState:
     def __init__(self) -> None:
@@ -29,7 +29,7 @@ class JoyState:
         stick_angle: Optional[float] = None
 
         if deadman and x_axis < len(msg.axes) and y_axis < len(msg.axes):
-            x = -float(msg.axes[x_axis])
+            x = float(msg.axes[x_axis])
             y = float(msg.axes[y_axis])
             if math.hypot(x, y) > stick_deadzone:
                 stick_angle = stick_to_joint_angle(x, y)
@@ -53,8 +53,8 @@ class JoystickControl(Node):
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('publish_hz', 10.0)
         self.declare_parameter('deadman_button_index', 5)
-        self.declare_parameter('right_stick_x_axis', 4)
-        self.declare_parameter('right_stick_y_axis', 5)
+        self.declare_parameter('right_stick_x_axis', 3)
+        self.declare_parameter('right_stick_y_axis', 4)
         self.declare_parameter('stick_deadzone', 0.15)
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
