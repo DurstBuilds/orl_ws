@@ -29,10 +29,10 @@ class JoyState:
         stick_angle: Optional[float] = None
 
         if deadman and x_axis < len(msg.axes) and y_axis < len(msg.axes):
-            x = -float(msg.axes[x_axis])
+            x = float(msg.axes[x_axis])
             y = float(msg.axes[y_axis])
             if math.hypot(x, y) > stick_deadzone:
-                stick_angle = stick_to_joint_angle(x, y)
+                stick_angle = stick_to_joint_angle(x, -y)
 
         with self._lock:
             self._deadman_active = deadman
