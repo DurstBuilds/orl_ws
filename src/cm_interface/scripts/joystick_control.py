@@ -101,7 +101,7 @@ class JoystickControl(Node):
         self.declare_parameter('left_stick_x_axis', 0)
         self.declare_parameter('left_stick_y_axis', 1)
         self.declare_parameter('velocity_axis', 6)
-        self.declare_parameter('velocity_constant', 2.0)
+        self.declare_parameter('velocity_constant', 4.0)
         self.declare_parameter('stick_deadzone', 0.15)
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
