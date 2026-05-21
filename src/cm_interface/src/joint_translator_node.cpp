@@ -17,7 +17,7 @@ namespace
 
 constexpr float kDefaultFeedbackHz = 200.0f;
 constexpr float kDefaultCommandHz = 50.0f;
-constexpr float kDefaultMotorDeltaMax = 0.1f;
+constexpr float kDefaultMotorDeltaMax = 0.2f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kDefaultPdKp = 0.5f;
 constexpr float kDefaultPdKd = 0.05f;
@@ -114,6 +114,7 @@ private:
     bool has_total{false};
     bool has_velocity{false};
     bool has_despos{false};
+    bool at_goal_latched{false};
   };
 
   ControlState read_state()
@@ -121,7 +122,8 @@ private:
     std::lock_guard<std::mutex> lock(state_mutex_);
     return ControlState{
       total_position_, motor_velocity_, joint_despos_,
-      has_total_position_, has_motor_velocity_, has_joint_despos_};
+      has_total_position_, has_motor_velocity_, has_joint_despos_,
+      at_goal_latched_};
   }
 
   void motor_total_position_callback(
@@ -150,6 +152,11 @@ private:
   void joint_despos_callback(const std_msgs::msg::Float32::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    if (!has_joint_despos_ ||
+      std::fabs(msg->data - joint_despos_) > static_cast<float>(joint_error_tolerance_))
+    {
+      at_goal_latched_ = false;
+    }
     joint_despos_ = msg->data;
     has_joint_despos_ = true;
   }
@@ -192,9 +199,15 @@ private:
       return;
     }
 
+    if (state.at_goal_latched) {
+      return;
+    }
+
     const float joint_curpos = state.total_position / static_cast<float>(gear_ratio_);
     const float joint_error = state.joint_despos - joint_curpos;
     if (std::fabs(joint_error) < static_cast<float>(joint_error_tolerance_)) {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      at_goal_latched_ = true;
       return;
     }
 
@@ -232,6 +245,7 @@ private:
   bool has_total_position_{false};
   bool has_motor_velocity_{false};
   bool has_joint_despos_{false};
+  bool at_goal_latched_{false};
 
   double gear_ratio_{0.0};
   double feedback_hz_{kDefaultFeedbackHz};
