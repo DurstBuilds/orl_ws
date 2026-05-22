@@ -23,6 +23,24 @@ def generate_launch_description():
         description='Motor MIT profile: ak70_10 | ak10_9 | ak80_64',
     )
 
+    can_id_arg = DeclareLaunchArgument(
+        'can_id',
+        default_value='0',
+        description='CAN drive ID for motor_node_continuous (MIT command and feedback).',
+    )
+
+    mit_kp_arg = DeclareLaunchArgument(
+        'mit_kp',
+        default_value='4.0',
+        description='MIT Kp sent on motor_command (joint_translator_node).',
+    )
+
+    mit_kd_arg = DeclareLaunchArgument(
+        'mit_kd',
+        default_value='0.02',
+        description='MIT Kd sent on motor_command (joint_translator_node).',
+    )
+
     joy_dev_arg = DeclareLaunchArgument(
         'joy_dev',
         default_value='0',
@@ -35,6 +53,7 @@ def generate_launch_description():
         name='motor_node_continuous',
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
+            'can_id': LaunchConfiguration('can_id'),
         }],
     )
 
@@ -50,6 +69,8 @@ def generate_launch_description():
         name='joint_translator_node',
         parameters=[{
             'gear_ratio': LaunchConfiguration('gear_ratio'),
+            'mit_kp': LaunchConfiguration('mit_kp'),
+            'mit_kd': LaunchConfiguration('mit_kd'),
         }],
     )
 
@@ -65,6 +86,9 @@ def generate_launch_description():
     return LaunchDescription([
         gear_ratio_arg,
         motor_model_arg,
+        can_id_arg,
+        mit_kp_arg,
+        mit_kd_arg,
         joy_dev_arg,
         motor_node_continuous,
         motor_unwrapper_node,

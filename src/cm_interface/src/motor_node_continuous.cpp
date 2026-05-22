@@ -26,8 +26,10 @@
 namespace
 {
 
-constexpr int kDriveId = 0;
+constexpr int kDefaultCanId = 0;
 constexpr float kCmdZeroEps = 1e-6f;
+
+// Bit 15 of the 16-bit position field in the MIT command
 constexpr int kPositionApplyBit = 0x8000;
 
 const char * mit_error_string(int code)
@@ -116,6 +118,12 @@ public:
   {
     const std::string motor_model = declare_parameter<std::string>(
       "motor_model", "ak70_10");
+    can_id_ = declare_parameter<int>("can_id", kDefaultCanId);
+
+    if (can_id_ < 0 || can_id_ > 0x7FF) {
+      throw std::invalid_argument("can_id must be in [0, 2047] for standard CAN");
+    }
+
     try {
       profile_ = cm_interface::get_motor_mit_profile(motor_model);
     } catch (const std::exception & e) {
@@ -125,9 +133,9 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Motor model: %s | position [%.3f, %.3f] rad | velocity [%.1f, %.1f] rad/s | "
+      "Motor model: %s | can_id: %d | position [%.3f, %.3f] rad | velocity [%.1f, %.1f] rad/s | "
       "torque [%.1f, %.1f] Nm",
-      profile_.name, profile_.p_min, profile_.p_max,
+      profile_.name, can_id_, profile_.p_min, profile_.p_max,
       profile_.v_min, profile_.v_max, profile_.t_min, profile_.t_max);
 
     can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
@@ -199,7 +207,7 @@ private:
     }
 
     struct can_frame frame{};
-    frame.can_id = kDriveId;
+    frame.can_id = static_cast<canid_t>(can_id_);
     frame.can_dlc = 8;
     frame.data[0] = 0xFF;
     frame.data[1] = 0xFF;
@@ -220,7 +228,7 @@ private:
     }
 
     struct can_frame frame{};
-    frame.can_id = kDriveId;
+    frame.can_id = static_cast<canid_t>(can_id_);
     frame.can_dlc = 8;
     frame.data[0] = 0xFF;
     frame.data[1] = 0xFF;
@@ -241,7 +249,7 @@ private:
     }
 
     struct can_frame frame{};
-    frame.can_id = kDriveId;
+    frame.can_id = static_cast<canid_t>(can_id_);
     frame.can_dlc = 8;
     frame.data[0] = 0xFF;
     frame.data[1] = 0xFF;
@@ -269,7 +277,7 @@ private:
     const int t_int = float_to_uint(t_ff, profile_.t_min, profile_.t_max, 12);
 
     struct can_frame frame{};
-    frame.can_id = kDriveId;
+    frame.can_id = static_cast<canid_t>(can_id_);
     frame.can_dlc = 8;
 
     frame.data[0] = static_cast<uint8_t>(p_int >> 8);
@@ -340,7 +348,7 @@ private:
       }
 
       MitFeedback fb;
-      if (fb.unpack_reply(frame, kDriveId, profile_)) {
+      if (fb.unpack_reply(frame, can_id_, profile_)) {
         publish_motor_state(fb);
         log_mit_feedback(fb);
         return;
@@ -386,6 +394,7 @@ private:
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
+  int can_id_{kDefaultCanId};
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
   rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_publisher_;
   int can_socket_{-1};
