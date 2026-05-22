@@ -19,7 +19,6 @@ namespace
 
 constexpr float kDefaultFeedbackHz = 200.0f;
 constexpr float kDefaultCommandHz = 50.0f;
-constexpr float kDefaultMotorDeltaMax = 0.1f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kDefaultMitKp = 4.0f;
 constexpr float kDefaultMitKd = 0.02f;
@@ -53,7 +52,6 @@ public:
     gear_ratio_ = declare_parameter<double>("gear_ratio", 0.0);
     feedback_hz_ = declare_parameter<double>("feedback_hz", kDefaultFeedbackHz);
     command_hz_ = declare_parameter<double>("command_hz", kDefaultCommandHz);
-    motor_delta_max_ = declare_parameter<double>("motor_delta_max", kDefaultMotorDeltaMax);
     joint_error_tolerance_ = declare_parameter<double>(
       "joint_error_tolerance", kDefaultJointErrorTolerance);
     mit_kp_ = declare_parameter<double>("mit_kp", kDefaultMitKp);
@@ -67,6 +65,7 @@ public:
     }
     pd_kp_ = profile_.pd_kp;
     pd_kd_ = profile_.pd_kd;
+    pdelta_max_ = profile_.pdelta_max;
 
     if (gear_ratio_ <= 0.0) {
       throw std::invalid_argument("gear_ratio must be > 0");
@@ -109,9 +108,9 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "motor_model=%s gear_ratio=%.4f feedback_hz=%.1f command_hz=%.1f "
-      "motor_delta_max=%.4f joint_error_tolerance=%.4f pd_kp=%.4f pd_kd=%.4f "
+      "pdelta_max=%.4f joint_error_tolerance=%.4f pd_kp=%.4f pd_kd=%.4f "
       "mit_kp=%.2f mit_kd=%.3f",
-      profile_.name, gear_ratio_, feedback_hz_, command_hz_, motor_delta_max_,
+      profile_.name, gear_ratio_, feedback_hz_, command_hz_, pdelta_max_,
       joint_error_tolerance_, pd_kp_, pd_kd_, mit_kp_, mit_kd_);
   }
 
@@ -174,7 +173,7 @@ private:
   float compute_motor_delta(float total_position_error, float motor_velocity) const
   {
     const float raw = pd_kp_ * total_position_error - pd_kd_ * motor_velocity;
-    return clamp_magnitude(raw, static_cast<float>(motor_delta_max_));
+    return clamp_magnitude(raw, pdelta_max_);
   }
 
   void publish_motor_command(float motor_delta)
@@ -259,11 +258,11 @@ private:
   double gear_ratio_{0.0};
   double feedback_hz_{kDefaultFeedbackHz};
   double command_hz_{kDefaultCommandHz};
-  double motor_delta_max_{kDefaultMotorDeltaMax};
   double joint_error_tolerance_{kDefaultJointErrorTolerance};
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   float pd_kp_{0.0f};
   float pd_kd_{0.0f};
+  float pdelta_max_{0.0f};
   double mit_kp_{kDefaultMitKp};
   double mit_kd_{kDefaultMitKd};
 
