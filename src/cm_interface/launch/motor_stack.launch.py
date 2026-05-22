@@ -6,6 +6,7 @@ from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -53,7 +54,7 @@ def generate_launch_description():
         name='motor_node_continuous',
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
-            'can_id': LaunchConfiguration('can_id'),
+            'can_id': ParameterValue(LaunchConfiguration('can_id'), value_type=int),
         }],
     )
 

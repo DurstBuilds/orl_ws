@@ -65,6 +65,45 @@ float uint_to_float(int x_int, float x_min, float x_max, int bits)
   return static_cast<float>(x_int) * span / static_cast<float>((1 << bits) - 1) + x_min;
 }
 
+// SocketCAN arbitration ID (standard or extended, flags stripped).
+int arbitration_id_from_frame(const struct can_frame & frame)
+{
+  const canid_t raw = frame.can_id;
+  if (raw & CAN_EFF_FLAG) {
+    return static_cast<int>(raw & CAN_EFF_MASK);
+  }
+  return static_cast<int>(raw & CAN_SFF_MASK);
+}
+
+// Motor drive ID encoded in MIT feedback DATA[0] (full byte or low nibble + ERR high nibble).
+int motor_id_from_feedback_data(uint8_t data0, int expected_drive_id)
+{
+  const int id_low_nibble = static_cast<int>(data0 & 0x0F);
+  if (id_low_nibble == expected_drive_id) {
+    return id_low_nibble;
+  }
+  return static_cast<int>(data0);
+}
+
+// True when this frame is MIT feedback for expected_drive_id.
+// Commands use the motor CAN ID; feedback may use the same ID (AK70-style) or the
+// master ID (default 0) with the motor ID in DATA[0] (GL / AK gimbal-style manual §5.4).
+bool feedback_frame_matches_drive(const struct can_frame & frame, int expected_drive_id)
+{
+  if (frame.can_dlc < 7) {
+    return false;
+  }
+
+  const int arb_id = arbitration_id_from_frame(frame);
+  const int motor_id = motor_id_from_feedback_data(frame.data[0], expected_drive_id);
+  if (motor_id != expected_drive_id) {
+    return false;
+  }
+
+  constexpr int kDefaultMasterCanId = 0;
+  return arb_id == expected_drive_id || arb_id == kDefaultMasterCanId;
+}
+
 struct MitFeedback
 {
   int drive_id{0};
@@ -80,18 +119,12 @@ struct MitFeedback
     int expected_drive_id,
     const cm_interface::MotorMitProfile & profile)
   {
-    if (frame.can_dlc < 7) {
+    if (!feedback_frame_matches_drive(frame, expected_drive_id)) {
       return false;
     }
 
-    can_id = frame.can_id & CAN_SFF_MASK;
-    drive_id = frame.data[0];
-
-    if (static_cast<int>(can_id) != expected_drive_id ||
-      drive_id != expected_drive_id)
-    {
-      return false;
-    }
+    can_id = static_cast<uint32_t>(arbitration_id_from_frame(frame));
+    drive_id = motor_id_from_feedback_data(frame.data[0], expected_drive_id);
 
     const int p_int = (frame.data[1] << 8) | frame.data[2];
     const int v_int = (frame.data[3] << 4) | (frame.data[4] >> 4);
@@ -119,6 +152,9 @@ public:
     const std::string motor_model = declare_parameter<std::string>(
       "motor_model", "ak70_10");
     can_id_ = declare_parameter<int>("can_id", kDefaultCanId);
+    if (!get_parameter("can_id", can_id_)) {
+      throw std::runtime_error("Failed to read can_id parameter");
+    }
 
     if (can_id_ < 0 || can_id_ > 0x7FF) {
       throw std::invalid_argument("can_id must be in [0, 2047] for standard CAN");
@@ -309,6 +345,10 @@ private:
     const auto deadline = std::chrono::steady_clock::now() +
       std::chrono::milliseconds(kPollTimeoutMs);
 
+    bool saw_any_frame = false;
+    int last_arb_id = -1;
+    uint8_t last_data0 = 0;
+
     while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
       const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         deadline - std::chrono::steady_clock::now()).count();
@@ -347,6 +387,10 @@ private:
         continue;
       }
 
+      saw_any_frame = true;
+      last_arb_id = arbitration_id_from_frame(frame);
+      last_data0 = frame.data[0];
+
       MitFeedback fb;
       if (fb.unpack_reply(frame, can_id_, profile_)) {
         publish_motor_state(fb);
@@ -355,7 +399,18 @@ private:
       }
     }
 
-    RCLCPP_WARN(get_logger(), "No MIT feedback received within %d ms.", kPollTimeoutMs);
+    if (!saw_any_frame) {
+      RCLCPP_WARN(
+        get_logger(),
+        "No MIT feedback within %d ms for can_id=%d (no CAN frames on bus).",
+        kPollTimeoutMs, can_id_);
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "No MIT feedback within %d ms for can_id=%d. Last frame arb_id=%d data[0]=0x%02X "
+        "(feedback may use master ID 0 with motor ID in data[0] low nibble).",
+        kPollTimeoutMs, can_id_, last_arb_id, last_data0);
+    }
   }
 
   void publish_motor_state(const MitFeedback & fb)
