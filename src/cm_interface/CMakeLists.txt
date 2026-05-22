@@ -43,6 +43,10 @@ add_executable(motor_unwrapper_node src/motor_unwrapper_node.cpp)
 ament_target_dependencies(motor_unwrapper_node rclcpp std_msgs motor_interfaces)
 
 add_executable(joint_translator_node src/joint_translator_node.cpp)
+target_include_directories(joint_translator_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
 ament_target_dependencies(joint_translator_node rclcpp std_msgs motor_interfaces)
 
 # required for terminal_position_publisher

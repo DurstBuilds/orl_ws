@@ -69,6 +69,7 @@ def generate_launch_description():
         executable='joint_translator_node',
         name='joint_translator_node',
         parameters=[{
+            'motor_model': LaunchConfiguration('motor_model'),
             'gear_ratio': LaunchConfiguration('gear_ratio'),
             'mit_kp': LaunchConfiguration('mit_kp'),
             'mit_kd': LaunchConfiguration('mit_kd'),
