@@ -11,6 +11,12 @@ def generate_launch_description():
         description='Joystick device index for joy_node.',
     )
 
+    namespaces_arg = DeclareLaunchArgument(
+        'namespaces',
+        default_value='',
+        description='Comma-separated namespaces for joint_despos publishing (e.g. motor_a,motor_b).',
+    )
+
     joy_node = Node(
         package='joy',
         executable='joy_node',
@@ -26,10 +32,14 @@ def generate_launch_description():
         package='cm_interface',
         executable='joystick_control_node',
         name='joystick_control_node',
+        parameters=[{
+            'namespaces': LaunchConfiguration('namespaces'),
+        }],
     )
 
     return LaunchDescription([
         joy_dev_arg,
+        namespaces_arg,
         joy_node,
         joystick_control_node,
     ])

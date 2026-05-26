@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 # Publishes joint_despos from gamepad when deadman bumper is held.
 # Right stick: absolute position. Left stick X (axis 6): velocity offset from curpos.
+# Supports multiple namespaces: publishes to each /{ns}/joint_despos simultaneously.
 
 import math
 import threading
@@ -89,6 +90,41 @@ class JoyState:
             )
 
 
+class NamespaceTarget:
+    """Per-namespace publisher + curpos state."""
+
+    def __init__(self, node: Node, namespace: str) -> None:
+        self.namespace = namespace
+        self.lock = threading.Lock()
+        self.curpos = 0.0
+        self.has_curpos = False
+
+        if namespace:
+            despos_topic = f'/{namespace}/joint_despos'
+            curpos_topic = f'/{namespace}/joint_curpos'
+        else:
+            despos_topic = 'joint_despos'
+            curpos_topic = 'joint_curpos'
+
+        self.publisher = node.create_publisher(Float32, despos_topic, 10)
+        node.create_subscription(
+            Float32, curpos_topic, self._curpos_callback, 10)
+
+    def _curpos_callback(self, msg: Float32) -> None:
+        with self.lock:
+            self.curpos = msg.data
+            self.has_curpos = True
+
+    def get_curpos(self) -> tuple[bool, float]:
+        with self.lock:
+            return self.has_curpos, self.curpos
+
+    def publish(self, despos: float) -> None:
+        msg = Float32()
+        msg.data = float(despos)
+        self.publisher.publish(msg)
+
+
 class JoystickControl(Node):
     def __init__(self) -> None:
         super().__init__('joystick_control_node')
@@ -103,6 +139,7 @@ class JoystickControl(Node):
         self.declare_parameter('velocity_axis', 6)
         self.declare_parameter('velocity_constant', 4.0)
         self.declare_parameter('stick_deadzone', 0.15)
+        self.declare_parameter('namespaces', '')
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
         publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
@@ -131,29 +168,24 @@ class JoystickControl(Node):
             self.get_parameter('stick_deadzone').get_parameter_value().double_value
         )
 
-        self._state = JoyState()
-        self._curpos_lock = threading.Lock()
-        self._joint_curpos = 0.0
-        self._has_curpos = False
+        ns_param = self.get_parameter('namespaces').get_parameter_value().string_value
+        ns_list = [s.strip() for s in ns_param.split(',') if s.strip()] if ns_param.strip() else ['']
 
-        self._publisher = self.create_publisher(Float32, 'joint_despos', 10)
+        self._state = JoyState()
+        self._targets = [NamespaceTarget(self, ns) for ns in ns_list]
+
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
-        self.create_subscription(Float32, 'joint_curpos', self._joint_curpos_callback, 10)
         self.create_timer(1.0 / publish_hz, self._publish_timer_callback)
 
+        target_topics = ', '.join(t.publisher.topic_name for t in self._targets)
         self.get_logger().info(
-            f'Subscribed to {joy_topic} and joint_curpos; publishing joint_despos at '
+            f'Subscribed to {joy_topic}; publishing to [{target_topics}] at '
             f'{publish_hz:.0f} Hz when button[{self._deadman_index}] held.\n'
             f'  Right stick [{self._right_x_axis}, {self._right_y_axis}]: position\n'
             f'  Velocity axis [{self._velocity_axis}]: '
             f'despos = curpos + axis * {self._velocity_constant:.3f}\n'
             f'  Both sticks centered (right + left [{self._left_x_axis}, '
             f'{self._left_y_axis}]): despos=0')
-
-    def _joint_curpos_callback(self, msg: Float32) -> None:
-        with self._curpos_lock:
-            self._joint_curpos = msg.data
-            self._has_curpos = True
 
     def _joy_callback(self, msg: Joy) -> None:
         self._state.update(
@@ -174,23 +206,20 @@ class JoystickControl(Node):
         if not deadman:
             return
 
-        despos: Optional[float] = None
+        for target in self._targets:
+            despos: Optional[float] = None
 
-        if position_angle is not None:
-            despos = position_angle
-        elif velocity_axis is not None:
-            with self._curpos_lock:
-                if self._has_curpos:
-                    despos = self._joint_curpos + velocity_axis * self._velocity_constant
-        elif both_centered:
-            despos = 0.0
+            if position_angle is not None:
+                despos = position_angle
+            elif velocity_axis is not None:
+                has_curpos, curpos = target.get_curpos()
+                if has_curpos:
+                    despos = curpos + velocity_axis * self._velocity_constant
+            elif both_centered:
+                despos = 0.0
 
-        if despos is None:
-            return
-
-        msg = Float32()
-        msg.data = float(despos)
-        self._publisher.publish(msg)
+            if despos is not None:
+                target.publish(despos)
 
 
 def main(args=None) -> None:

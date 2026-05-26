@@ -15,7 +15,7 @@ def generate_launch_description():
     ns_arg = DeclareLaunchArgument(
         'ns',
         default_value='',
-        description='ROS namespace for all nodes (e.g. motor_a). Empty = no namespace.',
+        description='ROS namespace for motor nodes (e.g. motor_a). Empty = no namespace.',
     )
 
     gear_ratio_arg = DeclareLaunchArgument(
@@ -68,22 +68,22 @@ def generate_launch_description():
         }],
     )
 
+    namespaced_group = GroupAction([
+        PushRosNamespace(LaunchConfiguration('ns')),
+        motor_node_continuous,
+        motor_unwrapper_node,
+        joint_translator_node,
+    ])
+
     joystick_teleop = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(
             os.path.join(pkg_share, 'launch', 'joystick_teleop.launch.py'),
         ),
         launch_arguments={
             'joy_dev': LaunchConfiguration('joy_dev'),
+            'namespaces': LaunchConfiguration('ns'),
         }.items(),
     )
-
-    namespaced_group = GroupAction([
-        PushRosNamespace(LaunchConfiguration('ns')),
-        motor_node_continuous,
-        motor_unwrapper_node,
-        joint_translator_node,
-        joystick_teleop,
-    ])
 
     return LaunchDescription([
         ns_arg,
@@ -92,4 +92,5 @@ def generate_launch_description():
         can_id_arg,
         joy_dev_arg,
         namespaced_group,
+        joystick_teleop,
     ])
