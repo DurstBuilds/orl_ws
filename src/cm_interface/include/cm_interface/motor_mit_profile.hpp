@@ -24,6 +24,8 @@ struct MotorMitProfile
   float pd_kp;       // joint_translator outer-loop position gain (motor delta)
   float pd_kd;       // joint_translator outer-loop damping (motor delta)
   float pdelta_max;  // joint_translator max |deltaP| per command (rad)
+  float mit_kp;      // default MIT Kp for motor_command messages
+  float mit_kd;      // default MIT Kd for motor_command messages
 };
 
 inline constexpr MotorMitProfile kAk70_10{
@@ -36,6 +38,7 @@ inline constexpr MotorMitProfile kAk70_10{
   0.0f, 5.0f,
   0.5f, 0.05f,
   0.2f,
+  4.0f, 0.02f,
 };
 
 inline constexpr MotorMitProfile kAk10_9{
@@ -48,6 +51,7 @@ inline constexpr MotorMitProfile kAk10_9{
   0.0f, 5.0f,
   0.1f, 0.008f,
   0.2f,
+  10.0f, 0.1f,
 };
 
 inline constexpr MotorMitProfile kAk80_64{
@@ -60,6 +64,7 @@ inline constexpr MotorMitProfile kAk80_64{
   0.0f, 5.0f,
   0.08f, 0.012f,
   0.07f,
+  50.0f, 0.25f,
 };
 
 inline const MotorMitProfile & get_motor_mit_profile(const std::string & motor_model)

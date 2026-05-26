@@ -20,8 +20,6 @@ namespace
 constexpr float kDefaultFeedbackHz = 200.0f;
 constexpr float kDefaultCommandHz = 50.0f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
-constexpr float kDefaultMitKp = 4.0f;
-constexpr float kDefaultMitKd = 0.02f;
 constexpr float kMitKdMax = 5.0f;
 
 float clamp(float value, float low, float high)
@@ -54,15 +52,15 @@ public:
     command_hz_ = declare_parameter<double>("command_hz", kDefaultCommandHz);
     joint_error_tolerance_ = declare_parameter<double>(
       "joint_error_tolerance", kDefaultJointErrorTolerance);
-    mit_kp_ = declare_parameter<double>("mit_kp", kDefaultMitKp);
-    mit_kd_ = declare_parameter<double>("mit_kd", kDefaultMitKd);
-
     try {
       profile_ = cm_interface::get_motor_mit_profile(motor_model);
     } catch (const std::exception & e) {
       RCLCPP_FATAL(get_logger(), "%s", e.what());
       throw;
     }
+
+    mit_kp_ = declare_parameter<double>("mit_kp", static_cast<double>(profile_.mit_kp));
+    mit_kd_ = declare_parameter<double>("mit_kd", static_cast<double>(profile_.mit_kd));
     pd_kp_ = profile_.pd_kp;
     pd_kd_ = profile_.pd_kd;
     pdelta_max_ = profile_.pdelta_max;
@@ -263,8 +261,8 @@ private:
   float pd_kp_{0.0f};
   float pd_kd_{0.0f};
   float pdelta_max_{0.0f};
-  double mit_kp_{kDefaultMitKp};
-  double mit_kd_{kDefaultMitKd};
+  double mit_kp_{0.0};
+  double mit_kd_{0.0};
 
   bool warned_no_total_{false};
   rclcpp::Time last_warn_time_{0, 0, RCL_ROS_TIME};
