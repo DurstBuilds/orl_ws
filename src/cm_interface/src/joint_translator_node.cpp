@@ -19,7 +19,7 @@ namespace
 {
 
 constexpr float kDefaultFeedbackHz = 200.0f;
-constexpr float kDefaultJointErrorTolerance = 1e-2f;
+constexpr float kDefaultJointErrorTolerance = 1e-1f;
 constexpr float kDefaultMitKp = 4.0f;
 constexpr float kDefaultMitKd = 0.02f;
 constexpr float kMitKdMax = 5.0f;
