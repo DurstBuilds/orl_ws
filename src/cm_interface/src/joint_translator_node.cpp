@@ -1,6 +1,6 @@
 // joint_translator_node: maps motor total position to joint space and commands
-// motor deltas via PD control until joint_despos is reached.
-// Hold (blank) motor commands at feedback_hz; deltaP commands at command_hz.
+// motor deltas via PD control at loop_hz (default 200 Hz). Every tick either
+// sends a PD delta toward joint_despos or a hold (deltaP=0) if idle/at goal.
 
 #include <cmath>
 #include <mutex>
@@ -17,8 +17,7 @@
 namespace
 {
 
-constexpr float kDefaultFeedbackHz = 200.0f;
-constexpr float kDefaultCommandHz = 50.0f;
+constexpr float kDefaultLoopHz = 200.0f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kMitKdMax = 5.0f;
 
@@ -48,10 +47,10 @@ public:
     const std::string motor_model = declare_parameter<std::string>(
       "motor_model", "ak70_10");
     gear_ratio_ = declare_parameter<double>("gear_ratio", 0.0);
-    feedback_hz_ = declare_parameter<double>("feedback_hz", kDefaultFeedbackHz);
-    command_hz_ = declare_parameter<double>("command_hz", kDefaultCommandHz);
+    loop_hz_ = declare_parameter<double>("loop_hz", kDefaultLoopHz);
     joint_error_tolerance_ = declare_parameter<double>(
       "joint_error_tolerance", kDefaultJointErrorTolerance);
+
     try {
       profile_ = cm_interface::get_motor_mit_profile(motor_model);
     } catch (const std::exception & e) {
@@ -68,11 +67,8 @@ public:
     if (gear_ratio_ <= 0.0) {
       throw std::invalid_argument("gear_ratio must be > 0");
     }
-    if (feedback_hz_ <= 0.0) {
-      throw std::invalid_argument("feedback_hz must be > 0");
-    }
-    if (command_hz_ <= 0.0) {
-      throw std::invalid_argument("command_hz must be > 0");
+    if (loop_hz_ <= 0.0) {
+      throw std::invalid_argument("loop_hz must be > 0");
     }
 
     motor_total_sub_ = create_subscription<motor_interfaces::msg::MotorTotalPosition>(
@@ -93,22 +89,17 @@ public:
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
 
-    const auto feedback_period = std::chrono::duration<double>(1.0 / feedback_hz_);
-    feedback_timer_ = create_wall_timer(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(feedback_period),
-      std::bind(&JointTranslatorNode::feedback_timer_callback, this));
-
-    const auto command_period = std::chrono::duration<double>(1.0 / command_hz_);
-    command_timer_ = create_wall_timer(
-      std::chrono::duration_cast<std::chrono::nanoseconds>(command_period),
-      std::bind(&JointTranslatorNode::command_timer_callback, this));
+    const auto loop_period = std::chrono::duration<double>(1.0 / loop_hz_);
+    loop_timer_ = create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(loop_period),
+      std::bind(&JointTranslatorNode::loop_timer_callback, this));
 
     RCLCPP_INFO(
       get_logger(),
-      "motor_model=%s gear_ratio=%.4f feedback_hz=%.1f command_hz=%.1f "
+      "motor_model=%s gear_ratio=%.4f loop_hz=%.1f "
       "pdelta_max=%.4f joint_error_tolerance=%.4f pd_kp=%.4f pd_kd=%.4f "
       "mit_kp=%.2f mit_kd=%.3f",
-      profile_.name, gear_ratio_, feedback_hz_, command_hz_, pdelta_max_,
+      profile_.name, gear_ratio_, loop_hz_, pdelta_max_,
       joint_error_tolerance_, pd_kp_, pd_kd_, mit_kp_, mit_kd_);
   }
 
@@ -185,27 +176,16 @@ private:
     motor_command_pub_->publish(cmd);
   }
 
-  // 200 Hz: blank commands (hold) to keep motor feedback streaming.
-  void feedback_timer_callback()
-  {
-    publish_motor_command(0.0f);
-  }
-
-  // 50 Hz: PD deltaP commands toward joint_despos.
-  void command_timer_callback()
+  // 200 Hz: PD command if active, hold (deltaP=0) otherwise.
+  void loop_timer_callback()
   {
     const auto state = read_state();
 
-    if (!state.has_total) {
-      warn_no_total_position();
-      return;
-    }
-
-    if (!state.has_despos) {
-      return;
-    }
-
-    if (state.at_goal_latched) {
+    if (!state.has_total || !state.has_despos || state.at_goal_latched) {
+      if (!state.has_total) {
+        warn_no_total_position();
+      }
+      publish_motor_command(0.0f);
       return;
     }
 
@@ -214,6 +194,7 @@ private:
     if (std::fabs(joint_error) < static_cast<float>(joint_error_tolerance_)) {
       std::lock_guard<std::mutex> lock(state_mutex_);
       at_goal_latched_ = true;
+      publish_motor_command(0.0f);
       return;
     }
 
@@ -241,8 +222,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr joint_despos_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
-  rclcpp::TimerBase::SharedPtr feedback_timer_;
-  rclcpp::TimerBase::SharedPtr command_timer_;
+  rclcpp::TimerBase::SharedPtr loop_timer_;
 
   std::mutex state_mutex_;
   float total_position_{0.0f};
@@ -254,8 +234,7 @@ private:
   bool at_goal_latched_{false};
 
   double gear_ratio_{0.0};
-  double feedback_hz_{kDefaultFeedbackHz};
-  double command_hz_{kDefaultCommandHz};
+  double loop_hz_{kDefaultLoopHz};
   double joint_error_tolerance_{kDefaultJointErrorTolerance};
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   float pd_kp_{0.0f};
