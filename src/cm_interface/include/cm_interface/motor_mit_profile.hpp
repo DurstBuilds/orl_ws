@@ -46,7 +46,7 @@ inline constexpr MotorMitProfile kAk10_9{
   -65.0f, 65.0f,
   0.0f, 500.0f,
   0.0f, 5.0f,
-  0.1f, 0.01f,
+  0.1f, 0.008f,
   0.2f,
 };
 
