@@ -2,15 +2,21 @@ import os
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
     pkg_share = get_package_share_directory('cm_interface')
+
+    ns_arg = DeclareLaunchArgument(
+        'ns',
+        default_value='',
+        description='ROS namespace for all nodes (e.g. motor_a). Empty = no namespace.',
+    )
 
     gear_ratio_arg = DeclareLaunchArgument(
         'gear_ratio',
@@ -71,13 +77,19 @@ def generate_launch_description():
         }.items(),
     )
 
-    return LaunchDescription([
-        gear_ratio_arg,
-        motor_model_arg,
-        can_id_arg,
-        joy_dev_arg,
+    namespaced_group = GroupAction([
+        PushRosNamespace(LaunchConfiguration('ns')),
         motor_node_continuous,
         motor_unwrapper_node,
         joint_translator_node,
         joystick_teleop,
+    ])
+
+    return LaunchDescription([
+        ns_arg,
+        gear_ratio_arg,
+        motor_model_arg,
+        can_id_arg,
+        joy_dev_arg,
+        namespaced_group,
     ])

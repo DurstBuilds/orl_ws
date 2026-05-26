@@ -1,10 +1,16 @@
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, GroupAction
 from launch.substitutions import LaunchConfiguration
-from launch_ros.actions import Node
+from launch_ros.actions import Node, PushRosNamespace
 
 
 def generate_launch_description():
+    ns_arg = DeclareLaunchArgument(
+        'ns',
+        default_value='',
+        description='ROS namespace (e.g. motor_a). Empty = no namespace.',
+    )
+
     motor_model_arg = DeclareLaunchArgument(
         'motor_model',
         default_value='ak70_10',
@@ -27,8 +33,14 @@ def generate_launch_description():
         }],
     )
 
+    namespaced_group = GroupAction([
+        PushRosNamespace(LaunchConfiguration('ns')),
+        joint_translator_node,
+    ])
+
     return LaunchDescription([
+        ns_arg,
         motor_model_arg,
         gear_ratio_arg,
-        joint_translator_node,
+        namespaced_group,
     ])
