@@ -95,7 +95,7 @@ class BoomJoystickControl(Node):
         self.declare_parameter('right_stick_x_axis', 3)
         self.declare_parameter('left_stick_x_axis', 0)
         self.declare_parameter('soft_mode_button_index', 1)
-        self.declare_parameter('velocity_constant', 1.0)
+        self.declare_parameter('velocity_constant', 2.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
 
