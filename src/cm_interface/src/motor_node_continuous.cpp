@@ -30,6 +30,7 @@ namespace
 constexpr int kDefaultCanId = 0;
 constexpr float kCmdZeroEps = 1e-6f;
 constexpr float kSoftModeKd = 0.025f;
+constexpr float kSoftReleaseKp = 0.5f;
 
 // Bit 15 of the 16-bit position field in the MIT command
 constexpr int kPositionApplyBit = 0x8000;
@@ -467,6 +468,7 @@ private:
         send_soft_mode_command();
       } else {
         send_zero_mit_command();
+        send_soft_release_hold_command();
       }
       RCLCPP_WARN(
         get_logger(),
@@ -486,6 +488,13 @@ private:
   {
     // Blank zero MIT message requested on soft-mode OFF transition.
     send_mit_command(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
+  }
+
+  void send_soft_release_hold_command()
+  {
+    // Re-acquire hold at current position using delta=0 with apply bit forced.
+    // Low Kp avoids snapping back aggressively to stale target state.
+    send_mit_command(0.0f, 0.0f, kSoftReleaseKp, 0.0f, 0.0f, true);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};

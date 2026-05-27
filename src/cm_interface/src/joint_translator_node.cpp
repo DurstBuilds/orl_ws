@@ -187,7 +187,15 @@ private:
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     if (soft_mode_ != msg->data) {
+      const bool was_soft_mode = soft_mode_;
       soft_mode_ = msg->data;
+      if (was_soft_mode && !soft_mode_ && has_total_position_) {
+        // On soft-mode exit, pin desired joint position to current so we do not
+        // chase a stale pre-soft target.
+        joint_despos_ = total_position_ / static_cast<float>(gear_ratio_);
+        has_joint_despos_ = true;
+        at_goal_latched_ = true;
+      }
       RCLCPP_INFO(get_logger(), "soft_mode=%s", soft_mode_ ? "true" : "false");
     }
   }
