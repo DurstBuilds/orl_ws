@@ -62,9 +62,9 @@ inline constexpr MotorMitProfile kAk80_64{
   -144.0f, 144.0f,
   0.0f, 500.0f,
   0.0f, 5.0f,
-  0.025f, 0.0015f,
+  0.020f, 0.0015f,
   0.02f,
-  50.0f, 0.25f,
+  40.0f, 0.25f,
 };
 
 inline const MotorMitProfile & get_motor_mit_profile(const std::string & motor_model)
