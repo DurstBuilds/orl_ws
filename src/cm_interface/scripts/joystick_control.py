@@ -10,7 +10,7 @@ from typing import Optional
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
-from std_msgs.msg import Float32
+from std_msgs.msg import Bool, Float32
 
 
 def stick_to_joint_angle(x: float, y: float) -> float:
@@ -22,6 +22,8 @@ class JoyState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._deadman_active = False
+        self._soft_mode = False
+        self._prev_soft_mode_button_pressed = False
         self._position_angle: Optional[float] = None
         self._velocity_axis_value: Optional[float] = None
         self._both_centered = False
@@ -35,10 +37,15 @@ class JoyState:
         left_x_axis: int,
         left_y_axis: int,
         velocity_axis: int,
+        soft_mode_button_index: int,
         stick_deadzone: float,
     ) -> None:
         deadman = (
             deadman_index < len(msg.buttons) and msg.buttons[deadman_index] == 1
+        )
+        soft_mode_button_pressed = (
+            soft_mode_button_index < len(msg.buttons) and
+            msg.buttons[soft_mode_button_index] == 1
         )
         position_angle: Optional[float] = None
         velocity_axis_value: Optional[float] = None
@@ -67,6 +74,9 @@ class JoyState:
                     position_angle = 0.0
 
         with self._lock:
+            if soft_mode_button_pressed and not self._prev_soft_mode_button_pressed:
+                self._soft_mode = not self._soft_mode
+            self._prev_soft_mode_button_pressed = soft_mode_button_pressed
             self._deadman_active = deadman
             self._position_angle = position_angle
             self._velocity_axis_value = velocity_axis_value
@@ -88,6 +98,10 @@ class JoyState:
                 self._velocity_axis_value,
                 self._both_centered,
             )
+
+    def get_soft_mode(self) -> bool:
+        with self._lock:
+            return self._soft_mode
 
 
 class NamespaceTarget:
@@ -137,6 +151,7 @@ class JoystickControl(Node):
         self.declare_parameter('left_stick_x_axis', 0)
         self.declare_parameter('left_stick_y_axis', 1)
         self.declare_parameter('velocity_axis', 6)
+        self.declare_parameter('soft_mode_button_index', 1)
         self.declare_parameter('velocity_constant', 4.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
@@ -161,6 +176,9 @@ class JoystickControl(Node):
         self._velocity_axis = (
             self.get_parameter('velocity_axis').get_parameter_value().integer_value
         )
+        self._soft_mode_button_index = (
+            self.get_parameter('soft_mode_button_index').get_parameter_value().integer_value
+        )
         self._velocity_constant = (
             self.get_parameter('velocity_constant').get_parameter_value().double_value
         )
@@ -173,6 +191,8 @@ class JoystickControl(Node):
 
         self._state = JoyState()
         self._targets = [NamespaceTarget(self, ns) for ns in ns_list]
+        self._soft_mode_pub = self.create_publisher(Bool, 'soft_mode', 10)
+        self._last_soft_mode = False
 
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_timer(1.0 / publish_hz, self._publish_timer_callback)
@@ -184,6 +204,7 @@ class JoystickControl(Node):
             f'  Right stick [{self._right_x_axis}, {self._right_y_axis}]: position\n'
             f'  Velocity axis [{self._velocity_axis}]: '
             f'despos = curpos + axis * {self._velocity_constant:.3f}\n'
+            f'  Button[{self._soft_mode_button_index}]: toggle soft_mode\n'
             f'  Both sticks centered (right + left [{self._left_x_axis}, '
             f'{self._left_y_axis}]): despos=0')
 
@@ -196,10 +217,19 @@ class JoystickControl(Node):
             self._left_x_axis,
             self._left_y_axis,
             self._velocity_axis,
+            self._soft_mode_button_index,
             self._stick_deadzone,
         )
 
     def _publish_timer_callback(self) -> None:
+        soft_mode = self._state.get_soft_mode()
+        soft_msg = Bool()
+        soft_msg.data = soft_mode
+        self._soft_mode_pub.publish(soft_msg)
+        if soft_mode != self._last_soft_mode:
+            self.get_logger().info(f'soft_mode={soft_mode}')
+            self._last_soft_mode = soft_mode
+
         deadman, position_angle, velocity_axis, both_centered = (
             self._state.get_control_state()
         )

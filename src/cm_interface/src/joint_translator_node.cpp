@@ -9,6 +9,7 @@
 
 #include "cm_interface/motor_mit_profile.hpp"
 #include "rclcpp/rclcpp.hpp"
+#include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float32.hpp"
 #include "motor_interfaces/msg/motor_command.hpp"
 #include "motor_interfaces/msg/motor_state.hpp"
@@ -94,6 +95,11 @@ public:
       10,
       std::bind(&JointTranslatorNode::joint_despos_callback, this, std::placeholders::_1));
 
+    soft_mode_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "soft_mode",
+      10,
+      std::bind(&JointTranslatorNode::soft_mode_callback, this, std::placeholders::_1));
+
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
 
@@ -117,6 +123,7 @@ private:
     float total_position{0.0f};
     float motor_velocity{0.0f};
     float joint_despos{0.0f};
+    bool soft_mode{false};
     bool has_total{false};
     bool has_velocity{false};
     bool has_despos{false};
@@ -127,7 +134,7 @@ private:
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return ControlState{
-      total_position_, motor_velocity_, joint_despos_,
+      total_position_, motor_velocity_, joint_despos_, soft_mode_,
       has_total_position_, has_motor_velocity_, has_joint_despos_,
       at_goal_latched_};
   }
@@ -167,6 +174,15 @@ private:
     has_joint_despos_ = true;
   }
 
+  void soft_mode_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (soft_mode_ != msg->data) {
+      soft_mode_ = msg->data;
+      RCLCPP_INFO(get_logger(), "soft_mode=%s", soft_mode_ ? "true" : "false");
+    }
+  }
+
   float compute_motor_delta(float total_position_error, float motor_velocity) const
   {
     const float raw = pd_kp_ * total_position_error - pd_kd_ * motor_velocity;
@@ -188,6 +204,10 @@ private:
   void loop_timer_callback()
   {
     const auto state = read_state();
+
+    if (state.soft_mode) {
+      return;
+    }
 
     if (!state.has_total || !state.has_despos || state.at_goal_latched) {
       if (!state.has_total) {
@@ -228,6 +248,7 @@ private:
   rclcpp::Subscription<motor_interfaces::msg::MotorTotalPosition>::SharedPtr motor_total_sub_;
   rclcpp::Subscription<motor_interfaces::msg::MotorState>::SharedPtr motor_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr joint_despos_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
@@ -236,6 +257,7 @@ private:
   float total_position_{0.0f};
   float motor_velocity_{0.0f};
   float joint_despos_{0.0f};
+  bool soft_mode_{false};
   bool has_total_position_{false};
   bool has_motor_velocity_{false};
   bool has_joint_despos_{false};

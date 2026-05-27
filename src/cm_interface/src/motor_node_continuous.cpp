@@ -22,6 +22,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "motor_interfaces/msg/motor_command.hpp"
 #include "motor_interfaces/msg/motor_state.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 namespace
 {
@@ -207,6 +208,11 @@ public:
       "motor_command",
       10,
       std::bind(&MotorNodeContinuous::motor_command_callback, this, std::placeholders::_1));
+
+    soft_mode_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "soft_mode",
+      10,
+      std::bind(&MotorNodeContinuous::soft_mode_callback, this, std::placeholders::_1));
 
     state_publisher_ = create_publisher<motor_interfaces::msg::MotorState>("motor_state", 10);
 
@@ -445,14 +451,37 @@ private:
 
   void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
   {
+    if (soft_mode_) {
+      send_soft_mode_command();
+      return;
+    }
     send_mit_command(msg->position, msg->velocity, msg->kp, msg->kd, msg->torque);
+  }
+
+  void soft_mode_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (soft_mode_ != msg->data) {
+      soft_mode_ = msg->data;
+      RCLCPP_WARN(
+        get_logger(),
+        "soft_mode=%s; %s",
+        soft_mode_ ? "true" : "false",
+        soft_mode_ ? "ignoring motor_command and sending KD-max only" : "normal command flow resumed");
+    }
+  }
+
+  void send_soft_mode_command()
+  {
+    send_mit_command(0.0f, 0.0f, 0.0f, profile_.kd_max, 0.0f);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   int can_id_{kDefaultCanId};
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_publisher_;
   int can_socket_{-1};
+  bool soft_mode_{false};
 };
 
 int main(int argc, char ** argv)
