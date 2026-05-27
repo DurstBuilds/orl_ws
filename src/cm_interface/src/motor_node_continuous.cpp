@@ -315,6 +315,8 @@ private:
   void send_mit_command(
     float p_delta, float v_des, float kp, float kd, float t_ff, bool force_apply = false)
   {
+    drain_pending_can_frames();
+
     const int p_int = pack_position_continuous(p_delta, v_des, t_ff, force_apply);
     const int v_int = float_to_uint(v_des, profile_.v_min, profile_.v_max, 12);
     const int kp_int = float_to_uint(kp, profile_.kp_min, profile_.kp_max, 12);
@@ -346,6 +348,25 @@ private:
       p_delta, apply_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
 
     read_mit_feedback();
+  }
+
+  void drain_pending_can_frames()
+  {
+    if (can_socket_ < 0) {
+      return;
+    }
+
+    struct pollfd pfd{};
+    pfd.fd = can_socket_;
+    pfd.events = POLLIN;
+
+    while (poll(&pfd, 1, 0) > 0) {
+      struct can_frame frame{};
+      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
+      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+        break;
+      }
+    }
   }
 
   void read_mit_feedback()
