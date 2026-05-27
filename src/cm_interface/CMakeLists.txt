@@ -80,6 +80,12 @@ install(PROGRAMS
   RENAME joystick_control_node
 )
 
+install(PROGRAMS
+  scripts/boom_joystick_control.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME boom_joystick_control_node
+)
+
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )
