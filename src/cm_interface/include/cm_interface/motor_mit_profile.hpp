@@ -62,7 +62,7 @@ inline constexpr MotorMitProfile kAk80_64{
   -144.0f, 144.0f,
   0.0f, 500.0f,
   0.0f, 5.0f,
-  0.025f, 0.001f,
+  0.025f, 0.002f,
   0.02f,
   50.0f, 0.25f,
 };
