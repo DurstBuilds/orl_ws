@@ -470,14 +470,14 @@ private:
         get_logger(),
         "soft_mode=%s; %s",
         soft_mode_ ? "true" : "false",
-        soft_mode_ ? "ignoring motor_command and sending KD-max only" : "normal command flow resumed");
+        soft_mode_ ? "ignoring motor_command and sending KD only" : "normal command flow resumed");
     }
   }
 
   void send_soft_mode_command()
   {
     // Force apply so the KD-only frame is latched even with zero delta/velocity/torque.
-    send_mit_command(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
+    //send_mit_command(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
