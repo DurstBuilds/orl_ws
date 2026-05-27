@@ -84,6 +84,7 @@ class NamespaceTarget:
         self.curpos = 0.0
         self.has_curpos = False
         self.warned_no_curpos = False
+        self.control_was_active = False
 
         if namespace:
             despos_topic = f'/{namespace}/joint_despos'
@@ -205,37 +206,42 @@ class BoomJoystickControl(Node):
         for target in self._targets:
             has_curpos, curpos = target.get_curpos()
 
+            control_active = False
+            delta = 0.0
+
             if 'hip' in target.namespace_lower:
-                if hip_neg and hip_pos:
-                    continue
-                if hip_neg:
+                if hip_neg and not hip_pos:
+                    control_active = True
                     delta = -self._hip_velocity_constant
-                elif hip_pos:
+                elif hip_pos and not hip_neg:
+                    control_active = True
                     delta = self._hip_velocity_constant
-                else:
-                    continue
             elif 'knee' in target.namespace_lower:
                 axis = right_x
-                if abs(axis) <= self._stick_deadzone:
-                    continue
-                delta = axis * self._knee_velocity_constant
+                if abs(axis) > self._stick_deadzone:
+                    control_active = True
+                    delta = axis * self._knee_velocity_constant
             elif 'wheel' in target.namespace_lower:
                 axis = left_x
-                if abs(axis) <= self._stick_deadzone:
-                    continue
-                delta = axis * self._wheel_velocity_constant
+                if abs(axis) > self._stick_deadzone:
+                    control_active = True
+                    delta = axis * self._wheel_velocity_constant
             else:
                 continue
 
-            if not has_curpos and not target.warned_no_curpos:
-                topic_name = target.despos_publisher.topic_name
-                self.get_logger().warn(
-                    f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
-                )
-                target.warned_no_curpos = True
-
-            despos = curpos + delta
-            target.publish_despos(despos)
+            if control_active:
+                if not has_curpos and not target.warned_no_curpos:
+                    topic_name = target.despos_publisher.topic_name
+                    self.get_logger().warn(
+                        f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
+                    )
+                    target.warned_no_curpos = True
+                target.publish_despos(curpos + delta)
+                target.control_was_active = True
+            elif target.control_was_active:
+                if has_curpos:
+                    target.publish_despos(curpos)
+                target.control_was_active = False
 
 
 def main(args=None) -> None:
