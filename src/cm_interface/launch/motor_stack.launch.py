@@ -70,7 +70,7 @@ def generate_launch_description():
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
             'gear_ratio': LaunchConfiguration('gear_ratio'),
-            'omega_max': LaunchConfiguration('omega_max'),
+            'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
         }],
     )
 

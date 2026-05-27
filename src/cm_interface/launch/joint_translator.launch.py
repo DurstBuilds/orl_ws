@@ -2,6 +2,7 @@ from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, GroupAction
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
+from launch_ros.parameter_descriptions import ParameterValue
 
 
 def generate_launch_description():
@@ -35,7 +36,7 @@ def generate_launch_description():
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
             'gear_ratio': LaunchConfiguration('gear_ratio'),
-            'omega_max': LaunchConfiguration('omega_max'),
+            'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
         }],
     )
 
