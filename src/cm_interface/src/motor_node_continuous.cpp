@@ -229,14 +229,14 @@ public:
   }
 
 private:
-  int pack_position_continuous(float p_delta, float v_des, float t_ff) const
+  int pack_position_continuous(float p_delta, float v_des, float t_ff, bool force_apply = false) const
   {
     const bool hold = std::fabs(p_delta) < kCmdZeroEps &&
       std::fabs(v_des) < kCmdZeroEps &&
       std::fabs(t_ff) < kCmdZeroEps;
 
     int p_int = float_to_uint(p_delta, profile_.p_min, profile_.p_max, 15) & 0x7FFF;
-    if (!hold) {
+    if (force_apply || !hold) {
       p_int |= kPositionApplyBit;
     }
     return p_int;
@@ -310,9 +310,10 @@ private:
     }
   }
 
-  void send_mit_command(float p_delta, float v_des, float kp, float kd, float t_ff)
+  void send_mit_command(
+    float p_delta, float v_des, float kp, float kd, float t_ff, bool force_apply = false)
   {
-    const int p_int = pack_position_continuous(p_delta, v_des, t_ff);
+    const int p_int = pack_position_continuous(p_delta, v_des, t_ff, force_apply);
     const int v_int = float_to_uint(v_des, profile_.v_min, profile_.v_max, 12);
     const int kp_int = float_to_uint(kp, profile_.kp_min, profile_.kp_max, 12);
     const int kd_int = float_to_uint(kd, profile_.kd_min, profile_.kd_max, 12);
@@ -452,7 +453,6 @@ private:
   void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
   {
     if (soft_mode_) {
-      send_soft_mode_command();
       return;
     }
     send_mit_command(msg->position, msg->velocity, msg->kp, msg->kd, msg->torque);
@@ -462,6 +462,9 @@ private:
   {
     if (soft_mode_ != msg->data) {
       soft_mode_ = msg->data;
+      if (soft_mode_) {
+        send_soft_mode_command();
+      }
       RCLCPP_WARN(
         get_logger(),
         "soft_mode=%s; %s",
@@ -472,7 +475,8 @@ private:
 
   void send_soft_mode_command()
   {
-    send_mit_command(0.0f, 0.0f, 0.0f, profile_.kd_max, 0.0f);
+    // Force apply so the KD-only frame is latched even with zero delta/velocity/torque.
+    send_mit_command(0.0f, 0.0f, 0.0f, profile_.kd_max, 0.0f, true);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
