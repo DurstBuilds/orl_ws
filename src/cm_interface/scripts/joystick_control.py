@@ -105,7 +105,7 @@ class JoyState:
 
 
 class NamespaceTarget:
-    """Per-namespace publisher + curpos state."""
+    """Per-namespace publishers + curpos state."""
 
     def __init__(self, node: Node, namespace: str) -> None:
         self.namespace = namespace
@@ -116,11 +116,14 @@ class NamespaceTarget:
         if namespace:
             despos_topic = f'/{namespace}/joint_despos'
             curpos_topic = f'/{namespace}/joint_curpos'
+            soft_mode_topic = f'/{namespace}/soft_mode'
         else:
             despos_topic = 'joint_despos'
             curpos_topic = 'joint_curpos'
+            soft_mode_topic = 'soft_mode'
 
         self.publisher = node.create_publisher(Float32, despos_topic, 10)
+        self.soft_mode_publisher = node.create_publisher(Bool, soft_mode_topic, 10)
         node.create_subscription(
             Float32, curpos_topic, self._curpos_callback, 10)
 
@@ -191,16 +194,19 @@ class JoystickControl(Node):
 
         self._state = JoyState()
         self._targets = [NamespaceTarget(self, ns) for ns in ns_list]
-        self._soft_mode_pub = self.create_publisher(Bool, 'soft_mode', 10)
         self._last_soft_mode = False
 
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_timer(1.0 / publish_hz, self._publish_timer_callback)
 
         target_topics = ', '.join(t.publisher.topic_name for t in self._targets)
+        soft_mode_topics = ', '.join(
+            t.soft_mode_publisher.topic_name for t in self._targets
+        )
         self.get_logger().info(
             f'Subscribed to {joy_topic}; publishing to [{target_topics}] at '
             f'{publish_hz:.0f} Hz when button[{self._deadman_index}] held.\n'
+            f'  soft_mode topics: [{soft_mode_topics}]\n'
             f'  Right stick [{self._right_x_axis}, {self._right_y_axis}]: position\n'
             f'  Velocity axis [{self._velocity_axis}]: '
             f'despos = curpos + axis * {self._velocity_constant:.3f}\n'
@@ -225,7 +231,8 @@ class JoystickControl(Node):
         soft_mode = self._state.get_soft_mode()
         soft_msg = Bool()
         soft_msg.data = soft_mode
-        self._soft_mode_pub.publish(soft_msg)
+        for target in self._targets:
+            target.soft_mode_publisher.publish(soft_msg)
         if soft_mode != self._last_soft_mode:
             self.get_logger().info(f'soft_mode={soft_mode}')
             self._last_soft_mode = soft_mode
