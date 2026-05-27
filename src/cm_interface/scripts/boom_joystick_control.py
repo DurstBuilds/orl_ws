@@ -56,6 +56,7 @@ class NamespaceTarget:
         self.lock = threading.Lock()
         self.curpos = 0.0
         self.has_curpos = False
+        self.warned_no_curpos = False
 
         if namespace:
             despos_topic = f'/{namespace}/joint_despos'
@@ -157,8 +158,6 @@ class BoomJoystickControl(Node):
 
         for target in self._targets:
             has_curpos, curpos = target.get_curpos()
-            if not has_curpos:
-                continue
 
             axis = 0.0
             if 'knee' in target.namespace_lower:
@@ -170,6 +169,13 @@ class BoomJoystickControl(Node):
 
             if abs(axis) <= self._stick_deadzone:
                 continue
+
+            if not has_curpos and not target.warned_no_curpos:
+                topic_name = target.despos_publisher.topic_name
+                self.get_logger().warn(
+                    f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
+                )
+                target.warned_no_curpos = True
 
             despos = curpos + axis * self._velocity_constant
             target.publish_despos(despos)
