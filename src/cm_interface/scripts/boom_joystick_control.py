@@ -3,7 +3,7 @@
 # - right stick X drives namespaces containing "knee"
 # - left stick X drives namespaces containing "wheel"
 # - button 4 (held) negative / button 5 (held) positive for namespaces containing "hip"
-# Also publishes soft_mode toggle (button index configurable, default 1).
+# Also publishes soft_mode toggle and hold_joint (false while controlling, true on release).
 
 import threading
 from typing import Optional
@@ -90,13 +90,16 @@ class NamespaceTarget:
             despos_topic = f'/{namespace}/joint_despos'
             curpos_topic = f'/{namespace}/joint_curpos'
             soft_mode_topic = f'/{namespace}/soft_mode'
+            hold_joint_topic = f'/{namespace}/hold_joint'
         else:
             despos_topic = 'joint_despos'
             curpos_topic = 'joint_curpos'
             soft_mode_topic = 'soft_mode'
+            hold_joint_topic = 'hold_joint'
 
         self.despos_publisher = node.create_publisher(Float32, despos_topic, 10)
         self.soft_mode_publisher = node.create_publisher(Bool, soft_mode_topic, 10)
+        self.hold_joint_publisher = node.create_publisher(Bool, hold_joint_topic, 10)
         node.create_subscription(Float32, curpos_topic, self._curpos_callback, 10)
 
     def _curpos_callback(self, msg: Float32) -> None:
@@ -173,9 +176,11 @@ class BoomJoystickControl(Node):
 
         despos_topics = ', '.join(t.despos_publisher.topic_name for t in self._targets)
         soft_mode_topics = ', '.join(t.soft_mode_publisher.topic_name for t in self._targets)
+        hold_joint_topics = ', '.join(t.hold_joint_publisher.topic_name for t in self._targets)
         self.get_logger().info(
             f'Subscribed to {joy_topic}; publishing to [{despos_topics}] at {publish_hz:.0f} Hz.\n'
             f'  soft_mode topics: [{soft_mode_topics}]\n'
+            f'  hold_joint topics: [{hold_joint_topics}]\n'
             f'  Right X axis [{self._right_x_axis}] -> knee: curpos + axis * {self._knee_velocity_constant:.3f}\n'
             f'  Left X axis [{self._left_x_axis}] -> wheel: curpos + axis * {self._wheel_velocity_constant:.3f}\n'
             f'  Button[{self._hip_neg_button_index}] held -> hip: curpos - {self._hip_velocity_constant:.3f}\n'
@@ -203,6 +208,8 @@ class BoomJoystickControl(Node):
             self.get_logger().info(f'soft_mode={soft_mode}')
             self._last_soft_mode = soft_mode
 
+        hold_joint_msg = Bool()
+
         for target in self._targets:
             has_curpos, curpos = target.get_curpos()
 
@@ -226,22 +233,24 @@ class BoomJoystickControl(Node):
                 if abs(axis) > self._stick_deadzone:
                     control_active = True
                     delta = axis * self._wheel_velocity_constant
-            else:
-                continue
 
-            if control_active:
-                if not has_curpos and not target.warned_no_curpos:
-                    topic_name = target.despos_publisher.topic_name
-                    self.get_logger().warn(
-                        f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
-                    )
-                    target.warned_no_curpos = True
-                target.publish_despos(curpos + delta)
-                target.control_was_active = True
-            elif target.control_was_active:
-                if has_curpos:
+            hold_joint_msg.data = not control_active
+            target.hold_joint_publisher.publish(hold_joint_msg)
+
+            if not control_active:
+                if target.control_was_active and has_curpos:
                     target.publish_despos(curpos)
                 target.control_was_active = False
+                continue
+
+            if not has_curpos and not target.warned_no_curpos:
+                topic_name = target.despos_publisher.topic_name
+                self.get_logger().warn(
+                    f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
+                )
+                target.warned_no_curpos = True
+            target.publish_despos(curpos + delta)
+            target.control_was_active = True
 
 
 def main(args=None) -> None:

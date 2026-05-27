@@ -102,6 +102,11 @@ public:
       10,
       std::bind(&JointTranslatorNode::soft_mode_callback, this, std::placeholders::_1));
 
+    hold_joint_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "hold_joint",
+      10,
+      std::bind(&JointTranslatorNode::hold_joint_callback, this, std::placeholders::_1));
+
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
 
@@ -126,6 +131,8 @@ private:
     float motor_velocity{0.0f};
     float joint_despos{0.0f};
     bool soft_mode{false};
+    bool hold_joint{false};
+    bool has_hold_joint{false};
     bool has_total{false};
     bool has_velocity{false};
     bool has_despos{false};
@@ -136,8 +143,8 @@ private:
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return ControlState{
-      total_position_, motor_velocity_, joint_despos_, soft_mode_,
-      has_total_position_, has_motor_velocity_, has_joint_despos_,
+      total_position_, motor_velocity_, joint_despos_, soft_mode_, hold_joint_,
+      has_hold_joint_, has_total_position_, has_motor_velocity_, has_joint_despos_,
       at_goal_latched_};
   }
 
@@ -185,6 +192,16 @@ private:
     }
   }
 
+  void hold_joint_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    has_hold_joint_ = true;
+    if (hold_joint_ != msg->data) {
+      hold_joint_ = msg->data;
+      RCLCPP_INFO(get_logger(), "hold_joint=%s", hold_joint_ ? "true" : "false");
+    }
+  }
+
   float compute_motor_delta(float total_position_error, float motor_velocity) const
   {
     const float raw = pd_kp_ * total_position_error - pd_kd_ * motor_velocity;
@@ -222,6 +239,12 @@ private:
 
     if (state.soft_mode) {
       reset_velocity_ramp();
+      return;
+    }
+
+    if (state.has_hold_joint && state.hold_joint) {
+      reset_velocity_ramp();
+      publish_motor_command(0.0f);
       return;
     }
 
@@ -272,6 +295,7 @@ private:
   rclcpp::Subscription<motor_interfaces::msg::MotorState>::SharedPtr motor_state_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr joint_despos_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
@@ -281,6 +305,8 @@ private:
   float motor_velocity_{0.0f};
   float joint_despos_{0.0f};
   bool soft_mode_{false};
+  bool hold_joint_{false};
+  bool has_hold_joint_{false};
   bool has_total_position_{false};
   bool has_motor_velocity_{false};
   bool has_joint_despos_{false};
