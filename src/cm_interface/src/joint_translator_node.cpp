@@ -21,6 +21,7 @@ namespace
 constexpr float kDefaultLoopHz = 200.0f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kMitKdMax = 5.0f;
+constexpr float kVelocityRampFraction = 0.05f;
 
 float clamp(float value, float low, float high)
 {
@@ -79,6 +80,7 @@ public:
       throw std::invalid_argument("omega_max must be > 0");
     }
     pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
+    velocity_ramp_step_ = kVelocityRampFraction * omega_max_;
 
     motor_total_sub_ = create_subscription<motor_interfaces::msg::MotorTotalPosition>(
       "motor_total_position",
@@ -111,9 +113,9 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "motor_model=%s gear_ratio=%.4f loop_hz=%.1f "
-      "omega_max=%.3f pdelta_max=%.4f joint_error_tolerance=%.4f pd_kp=%.4f pd_kd=%.4f "
-      "mit_kp=%.2f mit_kd=%.3f",
-      profile_.name, gear_ratio_, loop_hz_, omega_max_, pdelta_max_,
+      "omega_max=%.3f pdelta_max=%.4f velocity_ramp_step=%.4f joint_error_tolerance=%.4f "
+      "pd_kp=%.4f pd_kd=%.4f mit_kp=%.2f mit_kd=%.3f",
+      profile_.name, gear_ratio_, loop_hz_, omega_max_, pdelta_max_, velocity_ramp_step_,
       joint_error_tolerance_, pd_kp_, pd_kd_, mit_kp_, mit_kd_);
   }
 
@@ -189,6 +191,19 @@ private:
     return clamp_magnitude(raw, pdelta_max_);
   }
 
+  float ramp_command_velocity(float target_velocity)
+  {
+    const float delta_v = target_velocity - ramped_command_velocity_;
+    const float step = clamp(delta_v, -velocity_ramp_step_, velocity_ramp_step_);
+    ramped_command_velocity_ += step;
+    return ramped_command_velocity_;
+  }
+
+  void reset_velocity_ramp()
+  {
+    ramped_command_velocity_ = 0.0f;
+  }
+
   void publish_motor_command(float motor_delta)
   {
     motor_interfaces::msg::MotorCommand cmd;
@@ -206,6 +221,7 @@ private:
     const auto state = read_state();
 
     if (state.soft_mode) {
+      reset_velocity_ramp();
       return;
     }
 
@@ -213,6 +229,7 @@ private:
       if (!state.has_total) {
         warn_no_total_position();
       }
+      reset_velocity_ramp();
       publish_motor_command(0.0f);
       return;
     }
@@ -222,6 +239,7 @@ private:
     if (std::fabs(joint_error) < static_cast<float>(joint_error_tolerance_)) {
       std::lock_guard<std::mutex> lock(state_mutex_);
       at_goal_latched_ = true;
+      reset_velocity_ramp();
       publish_motor_command(0.0f);
       return;
     }
@@ -230,7 +248,12 @@ private:
     const float total_position_error = desired_total - state.total_position;
     const float motor_velocity = state.has_velocity ? state.motor_velocity : 0.0f;
 
-    publish_motor_command(compute_motor_delta(total_position_error, motor_velocity));
+    const float raw_delta = compute_motor_delta(total_position_error, motor_velocity);
+    const float loop_hz = static_cast<float>(loop_hz_);
+    const float target_command_velocity = raw_delta * loop_hz;
+    const float ramped_velocity = ramp_command_velocity(target_command_velocity);
+    const float ramped_delta = clamp_magnitude(ramped_velocity / loop_hz, pdelta_max_);
+    publish_motor_command(ramped_delta);
   }
 
   void warn_no_total_position()
@@ -271,6 +294,8 @@ private:
   float pd_kd_{0.0f};
   float omega_max_{0.0f};
   float pdelta_max_{0.0f};
+  float velocity_ramp_step_{0.0f};
+  float ramped_command_velocity_{0.0f};
   double mit_kp_{0.0};
   double mit_kd_{0.0};
 
