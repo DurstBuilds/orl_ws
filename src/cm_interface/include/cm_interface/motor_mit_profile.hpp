@@ -23,7 +23,7 @@ struct MotorMitProfile
   float kd_max;
   float pd_kp;       // joint_translator PD position gain (per tick at loop_hz)
   float pd_kd;       // joint_translator PD velocity damping (per tick at loop_hz)
-  float pdelta_max;  // max |deltaP| per tick (rad); tuned for 200 Hz loop
+  float omega_max;   // max motor speed command magnitude (rad/s)
   float mit_kp;      // default MIT Kp for motor_command messages
   float mit_kd;      // default MIT Kd for motor_command messages
 };
@@ -37,7 +37,7 @@ inline constexpr MotorMitProfile kAk70_10{
   0.0f, 500.0f,
   0.0f, 5.0f,
   0.1f, 0.005f,
-  0.05f,
+  10.0f,
   4.0f, 0.02f,
 };
 
@@ -50,7 +50,7 @@ inline constexpr MotorMitProfile kAk10_9{
   0.0f, 500.0f,
   0.0f, 5.0f,
   0.025f, 0.002f,
-  0.05f,
+  10.0f,
   10.0f, 0.1f,
 };
 
@@ -63,7 +63,7 @@ inline constexpr MotorMitProfile kAk80_64{
   0.0f, 500.0f,
   0.0f, 5.0f,
   0.020f, 0.0005f,
-  0.02f,
+  4.0f,
   40.0f, 0.25f,
 };
 

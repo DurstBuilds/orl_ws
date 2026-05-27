@@ -60,9 +60,10 @@ public:
 
     mit_kp_ = declare_parameter<double>("mit_kp", static_cast<double>(profile_.mit_kp));
     mit_kd_ = declare_parameter<double>("mit_kd", static_cast<double>(profile_.mit_kd));
+    const std::string omega_max_param = declare_parameter<std::string>("omega_max", "auto");
     pd_kp_ = profile_.pd_kp;
     pd_kd_ = profile_.pd_kd;
-    pdelta_max_ = profile_.pdelta_max;
+    omega_max_ = profile_.omega_max;
 
     if (gear_ratio_ <= 0.0) {
       throw std::invalid_argument("gear_ratio must be > 0");
@@ -70,6 +71,13 @@ public:
     if (loop_hz_ <= 0.0) {
       throw std::invalid_argument("loop_hz must be > 0");
     }
+    if (omega_max_param != "auto") {
+      omega_max_ = static_cast<float>(std::stod(omega_max_param));
+    }
+    if (omega_max_ <= 0.0f) {
+      throw std::invalid_argument("omega_max must be > 0");
+    }
+    pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
 
     motor_total_sub_ = create_subscription<motor_interfaces::msg::MotorTotalPosition>(
       "motor_total_position",
@@ -97,9 +105,9 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "motor_model=%s gear_ratio=%.4f loop_hz=%.1f "
-      "pdelta_max=%.4f joint_error_tolerance=%.4f pd_kp=%.4f pd_kd=%.4f "
+      "omega_max=%.3f pdelta_max=%.4f joint_error_tolerance=%.4f pd_kp=%.4f pd_kd=%.4f "
       "mit_kp=%.2f mit_kd=%.3f",
-      profile_.name, gear_ratio_, loop_hz_, pdelta_max_,
+      profile_.name, gear_ratio_, loop_hz_, omega_max_, pdelta_max_,
       joint_error_tolerance_, pd_kp_, pd_kd_, mit_kp_, mit_kd_);
   }
 
@@ -239,6 +247,7 @@ private:
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   float pd_kp_{0.0f};
   float pd_kd_{0.0f};
+  float omega_max_{0.0f};
   float pdelta_max_{0.0f};
   double mit_kp_{0.0};
   double mit_kd_{0.0};

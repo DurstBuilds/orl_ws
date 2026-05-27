@@ -22,6 +22,11 @@ def generate_launch_description():
         default_value='10.0',
         description='Motor-to-joint reduction (motor_rad / joint_rad).',
     )
+    omega_max_arg = DeclareLaunchArgument(
+        'omega_max',
+        default_value='auto',
+        description='Optional max motor speed (rad/s); auto uses motor profile.',
+    )
 
     joint_translator_node = Node(
         package='cm_interface',
@@ -30,6 +35,7 @@ def generate_launch_description():
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
             'gear_ratio': LaunchConfiguration('gear_ratio'),
+            'omega_max': LaunchConfiguration('omega_max'),
         }],
     )
 
@@ -42,5 +48,6 @@ def generate_launch_description():
         ns_arg,
         motor_model_arg,
         gear_ratio_arg,
+        omega_max_arg,
         namespaced_group,
     ])

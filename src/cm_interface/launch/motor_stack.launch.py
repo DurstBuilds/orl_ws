@@ -41,6 +41,11 @@ def generate_launch_description():
         default_value='0',
         description='Joystick device index for joy_node.',
     )
+    omega_max_arg = DeclareLaunchArgument(
+        'omega_max',
+        default_value='auto',
+        description='Optional max motor speed (rad/s) for joint_translator_node; auto uses motor profile.',
+    )
 
     motor_node_continuous = Node(
         package='cm_interface',
@@ -65,6 +70,7 @@ def generate_launch_description():
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
             'gear_ratio': LaunchConfiguration('gear_ratio'),
+            'omega_max': LaunchConfiguration('omega_max'),
         }],
     )
 
@@ -91,6 +97,7 @@ def generate_launch_description():
         motor_model_arg,
         can_id_arg,
         joy_dev_arg,
+        omega_max_arg,
         namespaced_group,
         joystick_teleop,
     ])
