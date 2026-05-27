@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
-# Publishes joint_despos increments from joystick X axes by namespace role:
+# Publishes joint_despos increments from joystick by namespace role:
 # - right stick X drives namespaces containing "knee"
 # - left stick X drives namespaces containing "wheel"
+# - button 4 (held) negative / button 5 (held) positive for namespaces containing "hip"
 # Also publishes soft_mode toggle (button index configurable, default 1).
 
 import threading
@@ -20,18 +21,38 @@ class JoyState:
         self._left_x = 0.0
         self._soft_mode = False
         self._prev_soft_mode_button_pressed = False
+        self._hip_neg_pressed = False
+        self._hip_pos_pressed = False
 
-    def update(self, msg: Joy, right_x_axis: int, left_x_axis: int, soft_mode_button_index: int) -> None:
+    def update(
+        self,
+        msg: Joy,
+        right_x_axis: int,
+        left_x_axis: int,
+        soft_mode_button_index: int,
+        hip_neg_button_index: int,
+        hip_pos_button_index: int,
+    ) -> None:
         right_x = -self._read_axis(msg, right_x_axis) or 0.0
         left_x = -self._read_axis(msg, left_x_axis) or 0.0
         soft_mode_button_pressed = (
             soft_mode_button_index < len(msg.buttons) and
             msg.buttons[soft_mode_button_index] == 1
         )
+        hip_neg_pressed = (
+            hip_neg_button_index < len(msg.buttons) and
+            msg.buttons[hip_neg_button_index] == 1
+        )
+        hip_pos_pressed = (
+            hip_pos_button_index < len(msg.buttons) and
+            msg.buttons[hip_pos_button_index] == 1
+        )
 
         with self._lock:
             self._right_x = right_x
             self._left_x = left_x
+            self._hip_neg_pressed = hip_neg_pressed
+            self._hip_pos_pressed = hip_pos_pressed
             if soft_mode_button_pressed and not self._prev_soft_mode_button_pressed:
                 self._soft_mode = not self._soft_mode
             self._prev_soft_mode_button_pressed = soft_mode_button_pressed
@@ -42,9 +63,15 @@ class JoyState:
             return float(msg.axes[axis_index])
         return None
 
-    def get_state(self) -> tuple[float, float, bool]:
+    def get_state(self) -> tuple[float, float, bool, bool, bool]:
         with self._lock:
-            return self._right_x, self._left_x, self._soft_mode
+            return (
+                self._right_x,
+                self._left_x,
+                self._soft_mode,
+                self._hip_neg_pressed,
+                self._hip_pos_pressed,
+            )
 
 
 class NamespaceTarget:
@@ -95,6 +122,8 @@ class BoomJoystickControl(Node):
         self.declare_parameter('right_stick_x_axis', 3)
         self.declare_parameter('left_stick_x_axis', 0)
         self.declare_parameter('soft_mode_button_index', 1)
+        self.declare_parameter('hip_neg_button_index', 4)
+        self.declare_parameter('hip_pos_button_index', 5)
         self.declare_parameter('velocity_constant', 2.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
@@ -109,6 +138,12 @@ class BoomJoystickControl(Node):
         )
         self._soft_mode_button_index = (
             self.get_parameter('soft_mode_button_index').get_parameter_value().integer_value
+        )
+        self._hip_neg_button_index = (
+            self.get_parameter('hip_neg_button_index').get_parameter_value().integer_value
+        )
+        self._hip_pos_button_index = (
+            self.get_parameter('hip_pos_button_index').get_parameter_value().integer_value
         )
         self._velocity_constant = (
             self.get_parameter('velocity_constant').get_parameter_value().double_value
@@ -134,7 +169,9 @@ class BoomJoystickControl(Node):
             f'  soft_mode topics: [{soft_mode_topics}]\n'
             f'  Right X axis [{self._right_x_axis}] -> namespaces containing "knee"\n'
             f'  Left X axis [{self._left_x_axis}] -> namespaces containing "wheel"\n'
-            f'  despos increment: curpos + axis * {self._velocity_constant:.3f}\n'
+            f'  Button[{self._hip_neg_button_index}] held -> hip: curpos - {self._velocity_constant:.3f}\n'
+            f'  Button[{self._hip_pos_button_index}] held -> hip: curpos + {self._velocity_constant:.3f}\n'
+            f'  Stick despos increment: curpos + axis * {self._velocity_constant:.3f}\n'
             f'  Button[{self._soft_mode_button_index}] toggles soft_mode')
 
     def _joy_callback(self, msg: Joy) -> None:
@@ -143,10 +180,12 @@ class BoomJoystickControl(Node):
             self._right_x_axis,
             self._left_x_axis,
             self._soft_mode_button_index,
+            self._hip_neg_button_index,
+            self._hip_pos_button_index,
         )
 
     def _publish_timer_callback(self) -> None:
-        right_x, left_x, soft_mode = self._state.get_state()
+        right_x, left_x, soft_mode, hip_neg, hip_pos = self._state.get_state()
 
         soft_msg = Bool()
         soft_msg.data = soft_mode
@@ -159,15 +198,26 @@ class BoomJoystickControl(Node):
         for target in self._targets:
             has_curpos, curpos = target.get_curpos()
 
-            axis = 0.0
-            if 'knee' in target.namespace_lower:
+            if 'hip' in target.namespace_lower:
+                if hip_neg and hip_pos:
+                    continue
+                if hip_neg:
+                    delta = -self._velocity_constant
+                elif hip_pos:
+                    delta = self._velocity_constant
+                else:
+                    continue
+            elif 'knee' in target.namespace_lower:
                 axis = right_x
+                if abs(axis) <= self._stick_deadzone:
+                    continue
+                delta = axis * self._velocity_constant
             elif 'wheel' in target.namespace_lower:
                 axis = left_x
+                if abs(axis) <= self._stick_deadzone:
+                    continue
+                delta = axis * self._velocity_constant
             else:
-                continue
-
-            if abs(axis) <= self._stick_deadzone:
                 continue
 
             if not has_curpos and not target.warned_no_curpos:
@@ -177,7 +227,7 @@ class BoomJoystickControl(Node):
                 )
                 target.warned_no_curpos = True
 
-            despos = curpos + axis * self._velocity_constant
+            despos = curpos + delta
             target.publish_despos(despos)
 
 
