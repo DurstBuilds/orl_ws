@@ -22,8 +22,8 @@ class JoyState:
         self._prev_soft_mode_button_pressed = False
 
     def update(self, msg: Joy, right_x_axis: int, left_x_axis: int, soft_mode_button_index: int) -> None:
-        right_x = self._read_axis(msg, right_x_axis) or 0.0
-        left_x = self._read_axis(msg, left_x_axis) or 0.0
+        right_x = -self._read_axis(msg, right_x_axis) or 0.0
+        left_x = -self._read_axis(msg, left_x_axis) or 0.0
         soft_mode_button_pressed = (
             soft_mode_button_index < len(msg.buttons) and
             msg.buttons[soft_mode_button_index] == 1
@@ -95,7 +95,7 @@ class BoomJoystickControl(Node):
         self.declare_parameter('right_stick_x_axis', 3)
         self.declare_parameter('left_stick_x_axis', 0)
         self.declare_parameter('soft_mode_button_index', 1)
-        self.declare_parameter('velocity_constant', 4.0)
+        self.declare_parameter('velocity_constant', 1.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
 
