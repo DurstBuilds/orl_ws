@@ -432,6 +432,8 @@ private:
     msg.error_code = fb.error_code;
     msg.drive_id = static_cast<uint8_t>(fb.drive_id);
     state_publisher_->publish(msg);
+    last_position_rad_ = fb.position_rad;
+    has_last_position_ = true;
   }
 
   void log_mit_feedback(const MitFeedback & fb)
@@ -465,10 +467,17 @@ private:
     if (soft_mode_ != msg->data) {
       soft_mode_ = msg->data;
       if (soft_mode_) {
+        soft_mode_on_position_rad_ = last_position_rad_;
+        has_soft_mode_on_position_ = has_last_position_;
         send_soft_mode_command();
       } else {
         send_zero_mit_command();
-        send_soft_release_hold_command();
+        if (has_soft_mode_on_position_ && has_last_position_) {
+          const float p_delta = last_position_rad_ - soft_mode_on_position_rad_;
+          send_soft_release_hold_command(p_delta);
+        } else {
+          send_soft_release_hold_command(0.0f);
+        }
       }
       RCLCPP_WARN(
         get_logger(),
@@ -490,11 +499,11 @@ private:
     send_mit_command(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
   }
 
-  void send_soft_release_hold_command()
+  void send_soft_release_hold_command(float p_delta)
   {
-    // Re-acquire hold at current position using delta=0 with apply bit forced.
-    // Low Kp avoids snapping back aggressively to stale target state.
-    send_mit_command(0.0f, 0.0f, kSoftReleaseKp, 0.0f, 0.0f, true);
+    // Re-acquire hold by shifting target using observed movement during soft mode.
+    // Low Kp avoids snapping back aggressively.
+    send_mit_command(p_delta, 0.0f, kSoftReleaseKp, 0.0f, 0.0f, true);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
@@ -504,6 +513,10 @@ private:
   rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_publisher_;
   int can_socket_{-1};
   bool soft_mode_{false};
+  float last_position_rad_{0.0f};
+  bool has_last_position_{false};
+  float soft_mode_on_position_rad_{0.0f};
+  bool has_soft_mode_on_position_{false};
 };
 
 int main(int argc, char ** argv)
