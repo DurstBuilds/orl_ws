@@ -204,6 +204,7 @@ class BoomJoystickControl(Node):
         soft_msg.data = soft_mode
         for target in self._targets:
             target.soft_mode_publisher.publish(soft_msg)
+        soft_mode_toggled_off = self._last_soft_mode and not soft_mode
         if soft_mode != self._last_soft_mode:
             self.get_logger().info(f'soft_mode={soft_mode}')
             self._last_soft_mode = soft_mode
@@ -212,6 +213,10 @@ class BoomJoystickControl(Node):
 
         for target in self._targets:
             has_curpos, curpos = target.get_curpos()
+
+            if soft_mode_toggled_off and has_curpos:
+                # On soft-mode OFF transition, re-seed joint_despos to current position.
+                target.publish_despos(curpos)
 
             control_active = False
             delta = 0.0

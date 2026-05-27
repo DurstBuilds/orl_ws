@@ -465,6 +465,8 @@ private:
       soft_mode_ = msg->data;
       if (soft_mode_) {
         send_soft_mode_command();
+      } else {
+        send_zero_mit_command();
       }
       RCLCPP_WARN(
         get_logger(),
@@ -478,6 +480,12 @@ private:
   {
     // Force apply so the KD-only frame is latched even with zero delta/velocity/torque.
     send_mit_command(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, false);
+  }
+
+  void send_zero_mit_command()
+  {
+    // Blank zero MIT message requested on soft-mode OFF transition.
+    send_mit_command(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
