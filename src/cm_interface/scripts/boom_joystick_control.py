@@ -19,8 +19,18 @@ def clamp_hip_despos(despos: float, limit_rad: float) -> float:
     return max(-limit_rad, min(limit_rad, despos))
 
 
-def hip_at_angle_limit(despos: float, limit_rad: float, eps: float = 1e-4) -> bool:
-    return abs(despos) >= limit_rad - eps
+def hip_at_angle_limit(
+    curpos: float,
+    limit_rad: float,
+    pressing_positive: bool,
+    pressing_negative: bool,
+    eps: float = 1e-4,
+) -> bool:
+    if pressing_positive and not pressing_negative:
+        return curpos >= limit_rad - eps
+    if pressing_negative and not pressing_positive:
+        return curpos <= -limit_rad + eps
+    return False
 
 
 class JoyState:
@@ -261,14 +271,19 @@ class BoomJoystickControl(Node):
 
             at_hip_limit = False
             if control_active and 'hip' in target.namespace_lower:
-                requested_despos = clamp_hip_despos(
-                    curpos + delta, self._hip_angle_limit_rad
-                )
                 at_hip_limit = hip_at_angle_limit(
-                    requested_despos, self._hip_angle_limit_rad
+                    curpos,
+                    self._hip_angle_limit_rad,
+                    pressing_positive=hip_pos,
+                    pressing_negative=hip_neg,
                 )
 
-            hold_joint_msg.data = (not control_active) or at_hip_limit
+            # Hip: hold only when released or already at limit in pressed direction.
+            # While curpos is inside limits and button is held, hold_joint stays false.
+            if 'hip' in target.namespace_lower:
+                hold_joint_msg.data = (not control_active) or at_hip_limit
+            else:
+                hold_joint_msg.data = not control_active
             target.hold_joint_publisher.publish(hold_joint_msg)
 
             if not control_active:
