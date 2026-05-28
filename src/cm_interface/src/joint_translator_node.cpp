@@ -1,6 +1,6 @@
 // joint_translator_node: maps motor total position to joint space and commands
-// motor deltas via PD control at loop_hz (default 200 Hz). Every tick either
-// sends a PD delta toward joint_despos or a hold (deltaP=0) if idle/at goal.
+// motor deltas via PD control at loop_hz (default 200 Hz). Hold (deltaP=0) when
+// hold_joint is true (from boom_joystick_control) or goal is reached/crossed.
 
 #include <cmath>
 #include <mutex>
@@ -178,6 +178,7 @@ private:
       std::fabs(msg->data - joint_despos_) > static_cast<float>(joint_error_tolerance_))
     {
       at_goal_latched_ = false;
+      has_prev_joint_error_ = false;
     }
     joint_despos_ = msg->data;
     has_joint_despos_ = true;
@@ -206,8 +207,28 @@ private:
     has_hold_joint_ = true;
     if (hold_joint_ != msg->data) {
       hold_joint_ = msg->data;
+      if (!hold_joint_) {
+        // Boom teleop resumed motion; allow tracking toward a new target.
+        at_goal_latched_ = false;
+        has_prev_joint_error_ = false;
+      }
       RCLCPP_INFO(get_logger(), "hold_joint=%s", hold_joint_ ? "true" : "false");
     }
+  }
+
+  bool should_hold_joint(const ControlState & state) const
+  {
+    const bool hold_from_teleop = state.has_hold_joint && state.hold_joint;
+    return hold_from_teleop || state.at_goal_latched;
+  }
+
+  void latch_goal_at_current_position(float joint_curpos)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    at_goal_latched_ = true;
+    joint_despos_ = joint_curpos;
+    has_joint_despos_ = true;
+    has_prev_joint_error_ = false;
   }
 
   float compute_motor_delta(float total_position_error, float motor_velocity) const
@@ -250,13 +271,7 @@ private:
       return;
     }
 
-    if (state.has_hold_joint && state.hold_joint) {
-      reset_velocity_ramp();
-      publish_motor_command(0.0f);
-      return;
-    }
-
-    if (!state.has_total || !state.has_despos || state.at_goal_latched) {
+    if (!state.has_total || !state.has_despos) {
       if (!state.has_total) {
         warn_no_total_position();
       }
@@ -267,17 +282,36 @@ private:
 
     const float joint_curpos = state.total_position / static_cast<float>(gear_ratio_);
     const float joint_error = state.joint_despos - joint_curpos;
-    if (std::fabs(joint_error) < static_cast<float>(joint_error_tolerance_)) {
+    const bool within_tolerance =
+      std::fabs(joint_error) < static_cast<float>(joint_error_tolerance_);
+    bool crossed_desired = false;
+    {
       std::lock_guard<std::mutex> lock(state_mutex_);
-      at_goal_latched_ = true;
+      if (has_prev_joint_error_ &&
+        prev_joint_error_ * joint_error < 0.0f)
+      {
+        crossed_desired = true;
+      }
+    }
+
+    if (within_tolerance || crossed_desired) {
+      latch_goal_at_current_position(joint_curpos);
+    } else {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      prev_joint_error_ = joint_error;
+      has_prev_joint_error_ = true;
+    }
+
+    const auto hold_state = read_state();
+    if (should_hold_joint(hold_state)) {
       reset_velocity_ramp();
       publish_motor_command(0.0f);
       return;
     }
 
-    const float desired_total = state.joint_despos * static_cast<float>(gear_ratio_);
-    const float total_position_error = desired_total - state.total_position;
-    const float motor_velocity = state.has_velocity ? state.motor_velocity : 0.0f;
+    const float desired_total = hold_state.joint_despos * static_cast<float>(gear_ratio_);
+    const float total_position_error = desired_total - hold_state.total_position;
+    const float motor_velocity = hold_state.has_velocity ? hold_state.motor_velocity : 0.0f;
 
     const float raw_delta = compute_motor_delta(total_position_error, motor_velocity);
     const float loop_hz = static_cast<float>(loop_hz_);
@@ -319,6 +353,8 @@ private:
   bool has_motor_velocity_{false};
   bool has_joint_despos_{false};
   bool at_goal_latched_{false};
+  float prev_joint_error_{0.0f};
+  bool has_prev_joint_error_{false};
 
   double gear_ratio_{0.0};
   double loop_hz_{kDefaultLoopHz};
