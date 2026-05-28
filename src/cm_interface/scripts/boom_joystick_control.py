@@ -14,9 +14,6 @@ from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
 
-# Per-tick velocity params are defined at this publish rate; scaled when publish_hz changes.
-REFERENCE_PUBLISH_HZ = 10.0
-
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
     return max(-limit_rad, min(limit_rad, despos))
@@ -184,7 +181,7 @@ class BoomJoystickControl(Node):
         self.declare_parameter('hip_pos_button_index', 4)
         self.declare_parameter('knee_velocity_constant', 2.0)
         self.declare_parameter('wheel_velocity_constant', 2.0)
-        self.declare_parameter('hip_velocity_constant', 0.5)
+        self.declare_parameter('hip_velocity_constant', 1.0)
         self.declare_parameter('hip_angle_limit_deg', 45.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
@@ -193,8 +190,6 @@ class BoomJoystickControl(Node):
         publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
         if publish_hz <= 0.0:
             raise ValueError('publish_hz must be > 0')
-        self._publish_hz = publish_hz
-        publish_hz_scale = REFERENCE_PUBLISH_HZ / publish_hz
         self._right_x_axis = (
             self.get_parameter('right_stick_x_axis').get_parameter_value().integer_value
         )
@@ -210,18 +205,15 @@ class BoomJoystickControl(Node):
         self._hip_pos_button_index = (
             self.get_parameter('hip_pos_button_index').get_parameter_value().integer_value
         )
-        knee_vel_at_ref = (
+        self._knee_velocity_constant = (
             self.get_parameter('knee_velocity_constant').get_parameter_value().double_value
         )
-        wheel_vel_at_ref = (
+        self._wheel_velocity_constant = (
             self.get_parameter('wheel_velocity_constant').get_parameter_value().double_value
         )
-        hip_vel_at_ref = (
+        self._hip_velocity_constant = (
             self.get_parameter('hip_velocity_constant').get_parameter_value().double_value
         )
-        self._knee_velocity_constant = knee_vel_at_ref * publish_hz_scale
-        self._wheel_velocity_constant = wheel_vel_at_ref * publish_hz_scale
-        self._hip_velocity_constant = hip_vel_at_ref * publish_hz_scale
         hip_angle_limit_deg = (
             self.get_parameter('hip_angle_limit_deg').get_parameter_value().double_value
         )
@@ -249,9 +241,8 @@ class BoomJoystickControl(Node):
             f'  hold_joint topics: [{hold_joint_topics}]\n'
             f'  Right X axis [{self._right_x_axis}] -> knee: curpos + axis * {self._knee_velocity_constant:.3f}\n'
             f'  Left X axis [{self._left_x_axis}] -> wheel: curpos + axis * {self._wheel_velocity_constant:.3f}\n'
-            f'  Button[{self._hip_neg_button_index}] held -> hip: curpos - {self._hip_velocity_constant:.4f}/tick '
-            f'({hip_vel_at_ref * REFERENCE_PUBLISH_HZ:.3f} rad/s)\n'
-            f'  Button[{self._hip_pos_button_index}] held -> hip: curpos + {self._hip_velocity_constant:.4f}/tick\n'
+            f'  Button[{self._hip_neg_button_index}] held -> hip: curpos - {self._hip_velocity_constant:.4f}\n'
+            f'  Button[{self._hip_pos_button_index}] held -> hip: curpos + {self._hip_velocity_constant:.4f}\n'
             f'  Hip joint_despos limited to +/-{hip_angle_limit_deg:.1f} deg (predictive hold)\n'
             f'  Button[{self._soft_mode_button_index}] toggles soft_mode')
 

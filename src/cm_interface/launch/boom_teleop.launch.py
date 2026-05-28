@@ -125,7 +125,7 @@ def generate_launch_description():
     publish_hz_arg = DeclareLaunchArgument(
         'publish_hz',
         default_value='50.0',
-        description='boom_joystick_control publish rate (Hz). Velocity constants scale with this rate.',
+        description='boom_joystick_control publish rate (Hz).',
     )
     joint_angle_limit_deg_arg = DeclareLaunchArgument(
         'joint_angle_limit_deg',
