@@ -181,7 +181,7 @@ class BoomJoystickControl(Node):
         self.declare_parameter('hip_pos_button_index', 4)
         self.declare_parameter('knee_velocity_constant', 2.0)
         self.declare_parameter('wheel_velocity_constant', 2.0)
-        self.declare_parameter('hip_velocity_constant', 0.5)
+        self.declare_parameter('hip_velocity_constant', 0.1)
         self.declare_parameter('hip_angle_limit_deg', 45.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
