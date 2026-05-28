@@ -9,12 +9,12 @@ def generate_launch_description():
     ns_arg = DeclareLaunchArgument(
         'ns',
         default_value='',
-        description='ROS namespace for motor nodes (e.g. motor_a). Empty = no namespace.',
+        description='ROS namespace for motor nodes (e.g. hip_motor). Empty = no namespace. Include hip, knee, or wheel',
     )
 
     gear_ratio_arg = DeclareLaunchArgument(
         'gear_ratio',
-        default_value='10.0',
+        default_value='1.0',
         description='Motor-to-joint reduction (motor_rad / joint_rad) for joint_translator_node.',
     )
 
@@ -28,6 +28,11 @@ def generate_launch_description():
         'can_id',
         default_value='0',
         description='CAN drive ID for motor_node_continuous (MIT command and feedback).',
+    )
+    max_torque_arg = DeclareLaunchArgument(
+        'max_torque',
+        default_value='10.0',
+        description='Max modeled torque (Nm) used for deltaP clamp in motor_node_continuous.',
     )
 
     joy_dev_arg = DeclareLaunchArgument(
@@ -48,6 +53,7 @@ def generate_launch_description():
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
             'can_id': ParameterValue(LaunchConfiguration('can_id'), value_type=int),
+            'max_torque': ParameterValue(LaunchConfiguration('max_torque'), value_type=float),
         }],
     )
 
@@ -100,6 +106,7 @@ def generate_launch_description():
         gear_ratio_arg,
         motor_model_arg,
         can_id_arg,
+        max_torque_arg,
         joy_dev_arg,
         omega_max_arg,
         namespaced_group,

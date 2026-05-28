@@ -35,6 +35,11 @@ def generate_launch_description():
         default_value='0',
         description='CAN drive ID for motor_node_continuous (MIT command and feedback).',
     )
+    max_torque_arg = DeclareLaunchArgument(
+        'max_torque',
+        default_value='10.0',
+        description='Max modeled torque (Nm) used for deltaP clamp in motor_node_continuous.',
+    )
 
     joy_dev_arg = DeclareLaunchArgument(
         'joy_dev',
@@ -54,6 +59,7 @@ def generate_launch_description():
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
             'can_id': ParameterValue(LaunchConfiguration('can_id'), value_type=int),
+            'max_torque': ParameterValue(LaunchConfiguration('max_torque'), value_type=float),
         }],
     )
 
@@ -96,6 +102,7 @@ def generate_launch_description():
         gear_ratio_arg,
         motor_model_arg,
         can_id_arg,
+        max_torque_arg,
         joy_dev_arg,
         omega_max_arg,
         namespaced_group,

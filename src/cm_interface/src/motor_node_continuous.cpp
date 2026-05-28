@@ -31,6 +31,7 @@ constexpr int kDefaultCanId = 0;
 constexpr float kCmdZeroEps = 1e-6f;
 constexpr float kSoftModeKd = 0.025f;
 constexpr float kSoftReleaseKp = 0.5f;
+constexpr float kDefaultMaxTorqueNm = 10.0f;
 
 // Bit 15 of the 16-bit position field in the MIT command
 constexpr int kPositionApplyBit = 0x8000;
@@ -155,12 +156,17 @@ public:
     const std::string motor_model = declare_parameter<std::string>(
       "motor_model", "ak70_10");
     can_id_ = declare_parameter<int>("can_id", kDefaultCanId);
+    max_torque_nm_ = static_cast<float>(declare_parameter<double>(
+      "max_torque", static_cast<double>(kDefaultMaxTorqueNm)));
     if (!get_parameter("can_id", can_id_)) {
       throw std::runtime_error("Failed to read can_id parameter");
     }
 
     if (can_id_ < 0 || can_id_ > 0x7FF) {
       throw std::invalid_argument("can_id must be in [0, 2047] for standard CAN");
+    }
+    if (max_torque_nm_ <= 0.0f) {
+      throw std::invalid_argument("max_torque must be > 0");
     }
 
     try {
@@ -173,9 +179,9 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Motor model: %s | can_id: %d | position [%.3f, %.3f] rad | velocity [%.1f, %.1f] rad/s | "
-      "torque [%.1f, %.1f] Nm",
+      "torque [%.1f, %.1f] Nm | max_torque=%.2f Nm",
       profile_.name, can_id_, profile_.p_min, profile_.p_max,
-      profile_.v_min, profile_.v_max, profile_.t_min, profile_.t_max);
+      profile_.v_min, profile_.v_max, profile_.t_min, profile_.t_max, max_torque_nm_);
 
     can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
     if (can_socket_ < 0) {
@@ -316,8 +322,9 @@ private:
     float p_delta, float v_des, float kp, float kd, float t_ff, bool force_apply = false)
   {
     drain_pending_can_frames();
+    const float p_delta_limited = clamp_position_delta_for_torque(p_delta, kp);
 
-    const int p_int = pack_position_continuous(p_delta, v_des, t_ff, force_apply);
+    const int p_int = pack_position_continuous(p_delta_limited, v_des, t_ff, force_apply);
     const int v_int = float_to_uint(v_des, profile_.v_min, profile_.v_max, 12);
     const int kp_int = float_to_uint(kp, profile_.kp_min, profile_.kp_max, 12);
     const int kd_int = float_to_uint(kd, profile_.kd_min, profile_.kd_max, 12);
@@ -345,7 +352,7 @@ private:
     RCLCPP_INFO(
       get_logger(),
       "Sent MIT cmd: dP=%.3f apply=%d p_packed=0x%04X V=%.3f KP=%.3f KD=%.3f T=%.3f",
-      p_delta, apply_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
+      p_delta_limited, apply_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
 
     read_mit_feedback();
   }
@@ -367,6 +374,21 @@ private:
         break;
       }
     }
+  }
+
+  float clamp_position_delta_for_torque(float p_delta, float kp) const
+  {
+    if (kp <= kCmdZeroEps) {
+      return p_delta;
+    }
+    const float max_abs_delta = max_torque_nm_ / kp;
+    if (p_delta > max_abs_delta) {
+      return max_abs_delta;
+    }
+    if (p_delta < -max_abs_delta) {
+      return -max_abs_delta;
+    }
+    return p_delta;
   }
 
   void read_mit_feedback()
@@ -538,6 +560,7 @@ private:
   bool has_last_position_{false};
   float soft_mode_on_position_rad_{0.0f};
   bool has_soft_mode_on_position_{false};
+  float max_torque_nm_{kDefaultMaxTorqueNm};
 };
 
 int main(int argc, char ** argv)
