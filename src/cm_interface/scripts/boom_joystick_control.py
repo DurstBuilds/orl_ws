@@ -14,6 +14,9 @@ from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
 
+# Per-tick velocity params are defined at this publish rate; scaled when publish_hz changes.
+REFERENCE_PUBLISH_HZ = 10.0
+
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
     return max(-limit_rad, min(limit_rad, despos))
@@ -31,6 +34,38 @@ def hip_at_angle_limit(
     if pressing_negative and not pressing_positive:
         return curpos <= -limit_rad + eps
     return False
+
+
+def hip_would_hit_limit(
+    curpos: float,
+    delta: float,
+    limit_rad: float,
+    pressing_positive: bool,
+    pressing_negative: bool,
+    eps: float = 1e-4,
+) -> bool:
+    """Predictive limit: next command would reach or exceed the bound."""
+    requested = clamp_hip_despos(curpos + delta, limit_rad)
+    if pressing_positive and not pressing_negative:
+        return requested >= limit_rad - eps
+    if pressing_negative and not pressing_positive:
+        return requested <= -limit_rad + eps
+    return False
+
+
+def hip_should_hold(
+    curpos: float,
+    delta: float,
+    limit_rad: float,
+    pressing_positive: bool,
+    pressing_negative: bool,
+    eps: float = 1e-4,
+) -> bool:
+    return hip_at_angle_limit(
+        curpos, limit_rad, pressing_positive, pressing_negative, eps
+    ) or hip_would_hit_limit(
+        curpos, delta, limit_rad, pressing_positive, pressing_negative, eps
+    )
 
 
 class JoyState:
@@ -141,7 +176,7 @@ class BoomJoystickControl(Node):
         super().__init__('boom_joystick_control_node')
 
         self.declare_parameter('joy_topic', '/joy')
-        self.declare_parameter('publish_hz', 100.0)
+        self.declare_parameter('publish_hz', 50.0)
         self.declare_parameter('right_stick_x_axis', 3)
         self.declare_parameter('left_stick_x_axis', 0)
         self.declare_parameter('soft_mode_button_index', 1)
@@ -149,13 +184,17 @@ class BoomJoystickControl(Node):
         self.declare_parameter('hip_pos_button_index', 4)
         self.declare_parameter('knee_velocity_constant', 2.0)
         self.declare_parameter('wheel_velocity_constant', 2.0)
-        self.declare_parameter('hip_velocity_constant', 1.0)
+        self.declare_parameter('hip_velocity_constant', 0.05)
         self.declare_parameter('hip_angle_limit_deg', 45.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
         publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
+        if publish_hz <= 0.0:
+            raise ValueError('publish_hz must be > 0')
+        self._publish_hz = publish_hz
+        publish_hz_scale = REFERENCE_PUBLISH_HZ / publish_hz
         self._right_x_axis = (
             self.get_parameter('right_stick_x_axis').get_parameter_value().integer_value
         )
@@ -171,15 +210,18 @@ class BoomJoystickControl(Node):
         self._hip_pos_button_index = (
             self.get_parameter('hip_pos_button_index').get_parameter_value().integer_value
         )
-        self._knee_velocity_constant = (
+        knee_vel_at_ref = (
             self.get_parameter('knee_velocity_constant').get_parameter_value().double_value
         )
-        self._wheel_velocity_constant = (
+        wheel_vel_at_ref = (
             self.get_parameter('wheel_velocity_constant').get_parameter_value().double_value
         )
-        self._hip_velocity_constant = (
+        hip_vel_at_ref = (
             self.get_parameter('hip_velocity_constant').get_parameter_value().double_value
         )
+        self._knee_velocity_constant = knee_vel_at_ref * publish_hz_scale
+        self._wheel_velocity_constant = wheel_vel_at_ref * publish_hz_scale
+        self._hip_velocity_constant = hip_vel_at_ref * publish_hz_scale
         hip_angle_limit_deg = (
             self.get_parameter('hip_angle_limit_deg').get_parameter_value().double_value
         )
@@ -207,9 +249,10 @@ class BoomJoystickControl(Node):
             f'  hold_joint topics: [{hold_joint_topics}]\n'
             f'  Right X axis [{self._right_x_axis}] -> knee: curpos + axis * {self._knee_velocity_constant:.3f}\n'
             f'  Left X axis [{self._left_x_axis}] -> wheel: curpos + axis * {self._wheel_velocity_constant:.3f}\n'
-            f'  Button[{self._hip_neg_button_index}] held -> hip: curpos - {self._hip_velocity_constant:.3f}\n'
-            f'  Button[{self._hip_pos_button_index}] held -> hip: curpos + {self._hip_velocity_constant:.3f}\n'
-            f'  Hip joint_despos limited to +/-{hip_angle_limit_deg:.1f} deg\n'
+            f'  Button[{self._hip_neg_button_index}] held -> hip: curpos - {self._hip_velocity_constant:.4f}/tick '
+            f'({hip_vel_at_ref * REFERENCE_PUBLISH_HZ:.3f} rad/s)\n'
+            f'  Button[{self._hip_pos_button_index}] held -> hip: curpos + {self._hip_velocity_constant:.4f}/tick\n'
+            f'  Hip joint_despos limited to +/-{hip_angle_limit_deg:.1f} deg (predictive hold)\n'
             f'  Button[{self._soft_mode_button_index}] toggles soft_mode')
 
     def _publish_despos_for_target(self, target: NamespaceTarget, despos: float) -> None:
@@ -271,15 +314,15 @@ class BoomJoystickControl(Node):
 
             at_hip_limit = False
             if control_active and 'hip' in target.namespace_lower:
-                at_hip_limit = hip_at_angle_limit(
+                at_hip_limit = hip_should_hold(
                     curpos,
+                    delta,
                     self._hip_angle_limit_rad,
                     pressing_positive=hip_pos,
                     pressing_negative=hip_neg,
                 )
 
-            # Hip: hold only when released or already at limit in pressed direction.
-            # While curpos is inside limits and button is held, hold_joint stays false.
+            # Hip: hold when released, at limit, or next command would hit limit.
             if 'hip' in target.namespace_lower:
                 hold_joint_msg.data = (not control_active) or at_hip_limit
             else:
@@ -299,10 +342,16 @@ class BoomJoystickControl(Node):
                 )
                 target.warned_no_curpos = True
 
-            if at_hip_limit:
-                self._publish_despos_for_target(
-                    target, clamp_hip_despos(curpos + delta, self._hip_angle_limit_rad)
-                )
+            if at_hip_limit and 'hip' in target.namespace_lower:
+                if hip_pos and not hip_neg:
+                    limit_despos = self._hip_angle_limit_rad
+                elif hip_neg and not hip_pos:
+                    limit_despos = -self._hip_angle_limit_rad
+                else:
+                    limit_despos = clamp_hip_despos(
+                        curpos + delta, self._hip_angle_limit_rad
+                    )
+                self._publish_despos_for_target(target, limit_despos)
             else:
                 self._publish_despos_for_target(target, curpos + delta)
             target.control_was_active = True

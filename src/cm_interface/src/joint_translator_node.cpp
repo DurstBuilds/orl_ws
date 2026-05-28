@@ -22,6 +22,7 @@ constexpr float kDefaultLoopHz = 200.0f;
 constexpr float kDefaultJointErrorTolerance = 1e-3f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kVelocityRampFraction = 0.01f;
+constexpr double kDefaultJointAngleLimitDeg = 0.0;
 
 float clamp(float value, float low, float high)
 {
@@ -52,6 +53,12 @@ public:
     loop_hz_ = declare_parameter<double>("loop_hz", kDefaultLoopHz);
     joint_error_tolerance_ = declare_parameter<double>(
       "joint_error_tolerance", kDefaultJointErrorTolerance);
+    const double joint_angle_limit_deg = declare_parameter<double>(
+      "joint_angle_limit_deg", kDefaultJointAngleLimitDeg);
+    if (joint_angle_limit_deg < 0.0) {
+      throw std::invalid_argument("joint_angle_limit_deg must be >= 0 (0 disables clamp)");
+    }
+    joint_angle_limit_rad_ = static_cast<float>(joint_angle_limit_deg * M_PI / 180.0);
 
     try {
       profile_ = cm_interface::get_motor_mit_profile(motor_model);
@@ -119,9 +126,9 @@ public:
       get_logger(),
       "motor_model=%s gear_ratio=%.4f loop_hz=%.1f "
       "omega_max=%.3f pdelta_max=%.4f velocity_ramp_step=%.4f joint_error_tolerance=%.4f "
-      "pd_kp=%.4f pd_kd=%.4f mit_kp=%.2f mit_kd=%.3f",
+      "joint_angle_limit_deg=%.1f pd_kp=%.4f pd_kd=%.4f mit_kp=%.2f mit_kd=%.3f",
       profile_.name, gear_ratio_, loop_hz_, omega_max_, pdelta_max_, velocity_ramp_step_,
-      joint_error_tolerance_, pd_kp_, pd_kd_, mit_kp_, mit_kd_);
+      joint_error_tolerance_, joint_angle_limit_deg, pd_kp_, pd_kd_, mit_kp_, mit_kd_);
   }
 
 private:
@@ -180,7 +187,7 @@ private:
       at_goal_latched_ = false;
       has_prev_joint_error_ = false;
     }
-    joint_despos_ = msg->data;
+    joint_despos_ = clamp_joint_despos(msg->data);
     has_joint_despos_ = true;
   }
 
@@ -193,7 +200,8 @@ private:
       if (was_soft_mode && !soft_mode_ && has_total_position_) {
         // On soft-mode exit, pin desired joint position to current so we do not
         // chase a stale pre-soft target.
-        joint_despos_ = total_position_ / static_cast<float>(gear_ratio_);
+        joint_despos_ = clamp_joint_despos(
+          total_position_ / static_cast<float>(gear_ratio_));
         has_joint_despos_ = true;
         at_goal_latched_ = true;
       }
@@ -222,11 +230,19 @@ private:
     return hold_from_teleop || state.at_goal_latched;
   }
 
+  float clamp_joint_despos(float joint_despos) const
+  {
+    if (joint_angle_limit_rad_ <= 0.0f) {
+      return joint_despos;
+    }
+    return clamp(joint_despos, -joint_angle_limit_rad_, joint_angle_limit_rad_);
+  }
+
   void latch_goal_at_current_position(float joint_curpos)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     at_goal_latched_ = true;
-    joint_despos_ = joint_curpos;
+    joint_despos_ = clamp_joint_despos(joint_curpos);
     has_joint_despos_ = true;
     has_prev_joint_error_ = false;
   }
@@ -366,6 +382,7 @@ private:
   float pdelta_max_{0.0f};
   float velocity_ramp_step_{0.0f};
   float ramped_command_velocity_{0.0f};
+  float joint_angle_limit_rad_{0.0f};
   double mit_kp_{0.0};
   double mit_kd_{0.0};
 
