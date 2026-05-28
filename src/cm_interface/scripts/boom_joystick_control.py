@@ -5,6 +5,7 @@
 # - button 4 (held) negative / button 5 (held) positive for namespaces containing "hip"
 # Also publishes soft_mode toggle and hold_joint (false while controlling, true on release).
 
+import math
 import threading
 from typing import Optional
 
@@ -12,6 +13,10 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
+
+
+def clamp_hip_despos(despos: float, limit_rad: float) -> float:
+    return max(-limit_rad, min(limit_rad, despos))
 
 
 class JoyState:
@@ -131,6 +136,7 @@ class BoomJoystickControl(Node):
         self.declare_parameter('knee_velocity_constant', 2.0)
         self.declare_parameter('wheel_velocity_constant', 2.0)
         self.declare_parameter('hip_velocity_constant', 1.0)
+        self.declare_parameter('hip_angle_limit_deg', 45.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
 
@@ -160,6 +166,10 @@ class BoomJoystickControl(Node):
         self._hip_velocity_constant = (
             self.get_parameter('hip_velocity_constant').get_parameter_value().double_value
         )
+        hip_angle_limit_deg = (
+            self.get_parameter('hip_angle_limit_deg').get_parameter_value().double_value
+        )
+        self._hip_angle_limit_rad = math.radians(hip_angle_limit_deg)
         self._stick_deadzone = (
             self.get_parameter('stick_deadzone').get_parameter_value().double_value
         )
@@ -185,7 +195,13 @@ class BoomJoystickControl(Node):
             f'  Left X axis [{self._left_x_axis}] -> wheel: curpos + axis * {self._wheel_velocity_constant:.3f}\n'
             f'  Button[{self._hip_neg_button_index}] held -> hip: curpos - {self._hip_velocity_constant:.3f}\n'
             f'  Button[{self._hip_pos_button_index}] held -> hip: curpos + {self._hip_velocity_constant:.3f}\n'
+            f'  Hip joint_despos limited to +/-{hip_angle_limit_deg:.1f} deg\n'
             f'  Button[{self._soft_mode_button_index}] toggles soft_mode')
+
+    def _publish_despos_for_target(self, target: NamespaceTarget, despos: float) -> None:
+        if 'hip' in target.namespace_lower:
+            despos = clamp_hip_despos(despos, self._hip_angle_limit_rad)
+        target.publish_despos(despos)
 
     def _joy_callback(self, msg: Joy) -> None:
         self._state.update(
@@ -216,7 +232,7 @@ class BoomJoystickControl(Node):
 
             if soft_mode_toggled_off and has_curpos:
                 # On soft-mode OFF transition, re-seed joint_despos to current position.
-                target.publish_despos(curpos)
+                self._publish_despos_for_target(target, curpos)
 
             control_active = False
             delta = 0.0
@@ -244,7 +260,7 @@ class BoomJoystickControl(Node):
 
             if not control_active:
                 if target.control_was_active and has_curpos:
-                    target.publish_despos(curpos)
+                    self._publish_despos_for_target(target, curpos)
                 target.control_was_active = False
                 continue
 
@@ -254,7 +270,7 @@ class BoomJoystickControl(Node):
                     f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
                 )
                 target.warned_no_curpos = True
-            target.publish_despos(curpos + delta)
+            self._publish_despos_for_target(target, curpos + delta)
             target.control_was_active = True
 
 
