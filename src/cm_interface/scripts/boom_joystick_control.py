@@ -141,7 +141,7 @@ class BoomJoystickControl(Node):
         super().__init__('boom_joystick_control_node')
 
         self.declare_parameter('joy_topic', '/joy')
-        self.declare_parameter('publish_hz', 10.0)
+        self.declare_parameter('publish_hz', 100.0)
         self.declare_parameter('right_stick_x_axis', 3)
         self.declare_parameter('left_stick_x_axis', 0)
         self.declare_parameter('soft_mode_button_index', 1)
