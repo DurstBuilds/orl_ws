@@ -19,6 +19,10 @@ def clamp_hip_despos(despos: float, limit_rad: float) -> float:
     return max(-limit_rad, min(limit_rad, despos))
 
 
+def hip_at_angle_limit(despos: float, limit_rad: float, eps: float = 1e-4) -> bool:
+    return abs(despos) >= limit_rad - eps
+
+
 class JoyState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -255,7 +259,16 @@ class BoomJoystickControl(Node):
                     control_active = True
                     delta = axis * self._wheel_velocity_constant
 
-            hold_joint_msg.data = not control_active
+            at_hip_limit = False
+            if control_active and 'hip' in target.namespace_lower:
+                requested_despos = clamp_hip_despos(
+                    curpos + delta, self._hip_angle_limit_rad
+                )
+                at_hip_limit = hip_at_angle_limit(
+                    requested_despos, self._hip_angle_limit_rad
+                )
+
+            hold_joint_msg.data = (not control_active) or at_hip_limit
             target.hold_joint_publisher.publish(hold_joint_msg)
 
             if not control_active:
@@ -270,7 +283,13 @@ class BoomJoystickControl(Node):
                     f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
                 )
                 target.warned_no_curpos = True
-            self._publish_despos_for_target(target, curpos + delta)
+
+            if at_hip_limit:
+                self._publish_despos_for_target(
+                    target, clamp_hip_despos(curpos + delta, self._hip_angle_limit_rad)
+                )
+            else:
+                self._publish_despos_for_target(target, curpos + delta)
             target.control_was_active = True
 
 
