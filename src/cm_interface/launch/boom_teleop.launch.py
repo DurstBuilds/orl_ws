@@ -44,6 +44,9 @@ def _launch_setup(context, *args, **kwargs):
             'gear_ratio': LaunchConfiguration('gear_ratio'),
             'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
             'joint_angle_limit_deg': joint_angle_limit_deg,
+            'motor_error_tolerance': ParameterValue(
+                LaunchConfiguration('motor_error_tolerance'), value_type=float
+            ),
         }],
     )
 
@@ -72,6 +75,7 @@ def _launch_setup(context, *args, **kwargs):
         parameters=[{
             'namespaces': LaunchConfiguration('ns'),
             'publish_hz': ParameterValue(LaunchConfiguration('publish_hz'), value_type=float),
+            'gear_ratio': ParameterValue(LaunchConfiguration('gear_ratio'), value_type=float),
         }],
     )
 
@@ -132,6 +136,11 @@ def generate_launch_description():
         default_value='45.0',
         description='Hip only: clamp joint_despos in joint_translator (deg). Non-hip namespaces use 0.',
     )
+    motor_error_tolerance_arg = DeclareLaunchArgument(
+        'motor_error_tolerance',
+        default_value='0.001',
+        description='Motor-space goal/hold tolerance (rad) for joint_translator_node.',
+    )
 
     return LaunchDescription([
         ns_arg,
@@ -143,5 +152,6 @@ def generate_launch_description():
         omega_max_arg,
         publish_hz_arg,
         joint_angle_limit_deg_arg,
+        motor_error_tolerance_arg,
         OpaqueFunction(function=_launch_setup),
     ])
