@@ -24,7 +24,7 @@ BOOM_MOTOR_STACKS = (
         'can_id': 0, # Revert to 3 for testing
         'joint_angle_limit_deg': 45.0,
     },
-"""     {
+     {
         'ns': 'wheel_motor1',
         'gear_ratio': 1.0,
         'motor_model': 'ak10_9',
@@ -37,7 +37,7 @@ BOOM_MOTOR_STACKS = (
         'motor_model': 'ak10_9',
         'can_id': 2,
         'joint_angle_limit_deg': 0.0,
-    }, """
+    },
 )
 
 DEFAULT_NAMESPACES = ','.join(stack['ns'] for stack in BOOM_MOTOR_STACKS)
