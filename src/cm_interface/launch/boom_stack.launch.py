@@ -2,8 +2,9 @@
 # Equivalent to four boom_teleop motor launches with a single shared teleop node.
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction
-from launch.substitutions import LaunchConfiguration
+from launch.actions import DeclareLaunchArgument, ExecuteProcess, GroupAction
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration, PythonExpression
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 
@@ -44,6 +45,7 @@ DEFAULT_NAMESPACES = ','.join(stack['ns'] for stack in BOOM_MOTOR_STACKS)
 DEFAULT_NAMESPACE_GEAR_RATIOS = ','.join(
     f"{stack['ns']}:{stack['gear_ratio']}" for stack in BOOM_MOTOR_STACKS
 )
+MOTOR_STATE_TOPICS = [f'/{stack["ns"]}/motor_state' for stack in BOOM_MOTOR_STACKS]
 
 
 def _motor_stack_group(stack: dict) -> GroupAction:
@@ -125,6 +127,40 @@ def generate_launch_description():
         default_value=DEFAULT_NAMESPACE_GEAR_RATIOS,
         description='Per-namespace gear ratios for teleop scaling (ns:ratio,...).',
     )
+    enable_logging_arg = DeclareLaunchArgument(
+        'enable_logging',
+        default_value='false',
+        description='If true, run ros2 bag record on all stack motor_state topics.',
+    )
+    bag_output_uri_arg = DeclareLaunchArgument(
+        'bag_output_uri',
+        default_value='boom_stack_bag',
+        description='Output URI for rosbag when enable_logging is true.',
+    )
+    bag_storage_id_arg = DeclareLaunchArgument(
+        'bag_storage_id',
+        default_value='mcap',
+        description='Rosbag storage plugin (e.g. mcap, sqlite3) when enable_logging is true.',
+    )
+
+    bag_record = ExecuteProcess(
+        condition=IfCondition(
+            PythonExpression([
+                "'", LaunchConfiguration('enable_logging'), "'.lower() in ('true', '1', 'yes')",
+            ])
+        ),
+        cmd=[
+            'ros2',
+            'bag',
+            'record',
+            '-o',
+            LaunchConfiguration('bag_output_uri'),
+            '-s',
+            LaunchConfiguration('bag_storage_id'),
+            *MOTOR_STATE_TOPICS,
+        ],
+        output='screen',
+    )
 
     joy_node = Node(
         package='joy',
@@ -162,7 +198,11 @@ def generate_launch_description():
         motor_error_tolerance_arg,
         namespaces_arg,
         namespace_gear_ratios_arg,
+        enable_logging_arg,
+        bag_output_uri_arg,
+        bag_storage_id_arg,
         *motor_groups,
         joy_node,
         boom_joystick_control_node,
+        bag_record,
     ])
