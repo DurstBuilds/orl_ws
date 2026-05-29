@@ -79,12 +79,50 @@ class JoyState:
             )
 
 
+def parse_namespace_gear_ratios(
+    param: str,
+    default_gear_ratio: float,
+) -> dict[str, float]:
+    """Parse 'ns1:1.6,ns2:30' into a namespace -> gear_ratio map."""
+    ratios: dict[str, float] = {}
+    if not param.strip():
+        return ratios
+    for entry in param.split(','):
+        item = entry.strip()
+        if not item:
+            continue
+        if ':' not in item:
+            raise ValueError(
+                f"namespace_gear_ratios entry '{item}' must be namespace:gear_ratio"
+            )
+        ns, ratio_str = item.split(':', 1)
+        ns = ns.strip()
+        ratio = float(ratio_str.strip())
+        if not ns:
+            raise ValueError('namespace_gear_ratios namespace must be non-empty')
+        if ratio <= 0.0:
+            raise ValueError(f'gear_ratio for {ns} must be > 0')
+        ratios[ns] = ratio
+    return ratios
+
+
 class NamespaceTarget:
     """Per-namespace publishers + curpos state."""
 
-    def __init__(self, node: Node, namespace: str) -> None:
+    def __init__(
+        self,
+        node: Node,
+        namespace: str,
+        *,
+        knee_velocity: float,
+        wheel_velocity: float,
+        hip_velocity: float,
+    ) -> None:
         self.namespace = namespace
         self.namespace_lower = namespace.lower()
+        self.knee_velocity = knee_velocity
+        self.wheel_velocity = wheel_velocity
+        self.hip_velocity = hip_velocity
         self.lock = threading.Lock()
         self.curpos = 0.0
         self.has_curpos = False
@@ -140,15 +178,23 @@ class BoomJoystickControl(Node):
         self.declare_parameter('hip_angle_limit_deg', 45.0)
         self.declare_parameter('stick_deadzone', 0.15)
         self.declare_parameter('namespaces', '')
+        self.declare_parameter('namespace_gear_ratios', '')
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
         publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
         if publish_hz <= 0.0:
             raise ValueError('publish_hz must be > 0')
-        gear_ratio = self.get_parameter('gear_ratio').get_parameter_value().double_value
-        if gear_ratio <= 0.0:
+        default_gear_ratio = (
+            self.get_parameter('gear_ratio').get_parameter_value().double_value
+        )
+        if default_gear_ratio <= 0.0:
             raise ValueError('gear_ratio must be > 0')
-        self._velocity_scale = 1.0 / gear_ratio
+        namespace_gear_ratios_param = (
+            self.get_parameter('namespace_gear_ratios').get_parameter_value().string_value
+        )
+        self._namespace_gear_ratios = parse_namespace_gear_ratios(
+            namespace_gear_ratios_param, default_gear_ratio
+        )
         self._right_x_axis = (
             self.get_parameter('right_stick_x_axis').get_parameter_value().integer_value
         )
@@ -173,9 +219,9 @@ class BoomJoystickControl(Node):
         hip_vel = (
             self.get_parameter('hip_velocity_constant').get_parameter_value().double_value
         )
-        self._knee_velocity_constant = knee_vel * self._velocity_scale
-        self._wheel_velocity_constant = wheel_vel * self._velocity_scale
-        self._hip_velocity_constant = hip_vel * self._velocity_scale
+        self._knee_velocity_base = knee_vel
+        self._wheel_velocity_base = wheel_vel
+        self._hip_velocity_base = hip_vel
         hip_angle_limit_deg = (
             self.get_parameter('hip_angle_limit_deg').get_parameter_value().double_value
         )
@@ -190,7 +236,17 @@ class BoomJoystickControl(Node):
         ns_list = [s.strip() for s in ns_param.split(',') if s.strip()] if ns_param.strip() else ['']
 
         self._state = JoyState()
-        self._targets = [NamespaceTarget(self, ns) for ns in ns_list]
+        self._targets = []
+        for ns in ns_list:
+            gear_ratio = self._namespace_gear_ratios.get(ns, default_gear_ratio)
+            velocity_scale = 1.0 / gear_ratio
+            self._targets.append(NamespaceTarget(
+                self,
+                ns,
+                knee_velocity=knee_vel * velocity_scale,
+                wheel_velocity=wheel_vel * velocity_scale,
+                hip_velocity=hip_vel * velocity_scale,
+            ))
         self._last_soft_mode = False
 
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
@@ -201,13 +257,13 @@ class BoomJoystickControl(Node):
         hold_joint_topics = ', '.join(t.hold_joint_publisher.topic_name for t in self._targets)
         self.get_logger().info(
             f'Subscribed to {joy_topic}; publishing to [{despos_topics}] at {publish_hz:.0f} Hz.\n'
-            f'  gear_ratio={gear_ratio:.4f} (joint delta = velocity_constant / gear_ratio)\n'
+            f'  default gear_ratio={default_gear_ratio:.4f}; '
+            f'per-ns gear ratios={self._namespace_gear_ratios or "(default)"}\n'
             f'  soft_mode topics: [{soft_mode_topics}]\n'
             f'  hold_joint topics: [{hold_joint_topics}]\n'
-            f'  Right X axis [{self._right_x_axis}] -> knee delta/tick {self._knee_velocity_constant:.4f}\n'
-            f'  Left X axis [{self._left_x_axis}] -> wheel delta/tick {self._wheel_velocity_constant:.4f}\n'
-            f'  Button[{self._hip_neg_button_index}] held -> hip delta/tick -{self._hip_velocity_constant:.4f}\n'
-            f'  Button[{self._hip_pos_button_index}] held -> hip delta/tick +{self._hip_velocity_constant:.4f}\n'
+            f'  Right X axis [{self._right_x_axis}] -> knee (base {self._knee_velocity_base:.4f} / gear_ratio)\n'
+            f'  Left X axis [{self._left_x_axis}] -> wheel (base {self._wheel_velocity_base:.4f} / gear_ratio)\n'
+            f'  Hip buttons -> delta/tick (base {self._hip_velocity_base:.4f} / gear_ratio)\n'
             f'  Hip joint_despos clamped to +/-{hip_angle_limit_deg:.1f} deg\n'
             f'  Button[{self._soft_mode_button_index}] toggles soft_mode')
 
@@ -252,20 +308,20 @@ class BoomJoystickControl(Node):
             if 'hip' in target.namespace_lower:
                 if hip_neg and not hip_pos:
                     control_active = True
-                    delta = -self._hip_velocity_constant
+                    delta = -target.hip_velocity
                 elif hip_pos and not hip_neg:
                     control_active = True
-                    delta = self._hip_velocity_constant
+                    delta = target.hip_velocity
             elif 'knee' in target.namespace_lower:
                 axis = right_x
                 if abs(axis) > self._stick_deadzone:
                     control_active = True
-                    delta = axis * self._knee_velocity_constant
+                    delta = axis * target.knee_velocity
             elif 'wheel' in target.namespace_lower:
                 axis = left_x
                 if abs(axis) > self._stick_deadzone:
                     control_active = True
-                    delta = axis * self._wheel_velocity_constant
+                    delta = axis * target.wheel_velocity
 
             hold_joint_msg.data = not control_active
             target.hold_joint_publisher.publish(hold_joint_msg)
