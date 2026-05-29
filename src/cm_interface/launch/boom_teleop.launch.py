@@ -76,6 +76,9 @@ def _launch_setup(context, *args, **kwargs):
             'namespaces': LaunchConfiguration('ns'),
             'publish_hz': ParameterValue(LaunchConfiguration('publish_hz'), value_type=float),
             'gear_ratio': ParameterValue(LaunchConfiguration('gear_ratio'), value_type=float),
+            'hip_angle_limit_deg': ParameterValue(
+                LaunchConfiguration('joint_angle_limit_deg'), value_type=float
+            ),
         }],
     )
 

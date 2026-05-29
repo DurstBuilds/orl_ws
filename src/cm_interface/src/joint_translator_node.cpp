@@ -19,7 +19,7 @@ namespace
 {
 
 constexpr float kDefaultLoopHz = 200.0f;
-constexpr float kDefaultMotorErrorTolerance = 1.0f;
+constexpr float kDefaultMotorErrorTolerance = 1e-2f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kVelocityRampFraction = 0.01f;
 constexpr float kJointAngleLimitEps = 1e-4f;
@@ -179,21 +179,52 @@ private:
     has_motor_velocity_ = true;
   }
 
+  bool joint_despos_changed_enough(float clamped_new, float clamped_prev) const
+  {
+    if (!has_joint_despos_) {
+      return true;
+    }
+    const float gear_ratio = static_cast<float>(gear_ratio_);
+    const float motor_tol = static_cast<float>(motor_error_tolerance_);
+    const float joint_change_tol = motor_tol / gear_ratio;
+    if (std::fabs(clamped_new - clamped_prev) > joint_change_tol) {
+      return true;
+    }
+    const float new_desired_total = clamped_new * gear_ratio;
+    const float prev_desired_total = clamped_prev * gear_ratio;
+    return std::fabs(new_desired_total - prev_desired_total) > motor_tol;
+  }
+
+  bool despos_moved_away_from_limit(float clamped_new, float clamped_prev) const
+  {
+    if (!joint_angle_limit_enabled() || !at_goal_latched_) {
+      return false;
+    }
+    const bool was_at_positive_limit =
+      std::fabs(clamped_prev - joint_angle_limit_rad_) < kJointAngleLimitEps;
+    const bool was_at_negative_limit =
+      std::fabs(clamped_prev + joint_angle_limit_rad_) < kJointAngleLimitEps;
+    if (was_at_positive_limit && clamped_new < clamped_prev - kJointAngleLimitEps) {
+      return true;
+    }
+    if (was_at_negative_limit && clamped_new > clamped_prev + kJointAngleLimitEps) {
+      return true;
+    }
+    return false;
+  }
+
   void joint_despos_callback(const std_msgs::msg::Float32::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
-    const float new_desired_total =
-      msg->data * static_cast<float>(gear_ratio_);
-    const float prev_desired_total =
-      joint_despos_ * static_cast<float>(gear_ratio_);
-    if (!has_joint_despos_ ||
-      std::fabs(new_desired_total - prev_desired_total) >
-      static_cast<float>(motor_error_tolerance_))
+    const float clamped_prev = has_joint_despos_ ? joint_despos_ : msg->data;
+    const float clamped_new = clamp_joint_despos(msg->data);
+    if (joint_despos_changed_enough(clamped_new, clamped_prev) ||
+      despos_moved_away_from_limit(clamped_new, clamped_prev))
     {
       at_goal_latched_ = false;
       has_prev_motor_error_ = false;
     }
-    joint_despos_ = clamp_joint_despos(msg->data);
+    joint_despos_ = clamped_new;
     has_joint_despos_ = true;
   }
 
@@ -264,20 +295,31 @@ private:
     return joint_angle_limit_rad_ > 0.0f;
   }
 
+  bool commanding_into_positive_limit(float motor_error, float motor_tol) const
+  {
+    return motor_error > motor_tol;
+  }
+
+  bool commanding_into_negative_limit(float motor_error, float motor_tol) const
+  {
+    return motor_error < -motor_tol;
+  }
+
   bool at_joint_angle_limit_reactive(
     float joint_curpos,
-    float motor_error) const
+    float motor_error,
+    float motor_tol) const
   {
     if (!joint_angle_limit_enabled()) {
       return false;
     }
     if (joint_curpos >= joint_angle_limit_rad_ - kJointAngleLimitEps &&
-      motor_error > 0.0f)
+      commanding_into_positive_limit(motor_error, motor_tol))
     {
       return true;
     }
     if (joint_curpos <= -joint_angle_limit_rad_ + kJointAngleLimitEps &&
-      motor_error < 0.0f)
+      commanding_into_negative_limit(motor_error, motor_tol))
     {
       return true;
     }
@@ -286,15 +328,46 @@ private:
 
   bool would_exceed_joint_angle_limit(
     float total_position,
-    float motor_delta) const
+    float motor_delta,
+    float motor_error,
+    float motor_tol) const
   {
     if (!joint_angle_limit_enabled()) {
       return false;
     }
     const float predicted_joint =
       (total_position + motor_delta) / static_cast<float>(gear_ratio_);
-    return predicted_joint > joint_angle_limit_rad_ + kJointAngleLimitEps ||
-           predicted_joint < -joint_angle_limit_rad_ - kJointAngleLimitEps;
+    if (predicted_joint > joint_angle_limit_rad_ + kJointAngleLimitEps) {
+      return commanding_into_positive_limit(motor_error, motor_tol);
+    }
+    if (predicted_joint < -joint_angle_limit_rad_ - kJointAngleLimitEps) {
+      return commanding_into_negative_limit(motor_error, motor_tol);
+    }
+    return false;
+  }
+
+  void clear_goal_latch_if_tracking_away_from_limit(
+    float joint_curpos,
+    float motor_error,
+    bool hold_joint,
+    float motor_tol)
+  {
+    if (!at_goal_latched_ || hold_joint || !joint_angle_limit_enabled()) {
+      return;
+    }
+    if (joint_curpos >= joint_angle_limit_rad_ - kJointAngleLimitEps &&
+      commanding_into_negative_limit(motor_error, motor_tol))
+    {
+      at_goal_latched_ = false;
+      has_prev_motor_error_ = false;
+      return;
+    }
+    if (joint_curpos <= -joint_angle_limit_rad_ + kJointAngleLimitEps &&
+      commanding_into_positive_limit(motor_error, motor_tol))
+    {
+      at_goal_latched_ = false;
+      has_prev_motor_error_ = false;
+    }
   }
 
   float compute_motor_delta(float total_position_error, float motor_velocity) const
@@ -350,6 +423,13 @@ private:
     const float desired_total = state.joint_despos * gear_ratio;
     const float motor_error = desired_total - state.total_position;
     const float motor_tol = static_cast<float>(motor_error_tolerance_);
+    const bool hold_from_teleop = state.has_hold_joint && state.hold_joint;
+
+    {
+      std::lock_guard<std::mutex> lock(state_mutex_);
+      clear_goal_latch_if_tracking_away_from_limit(
+        joint_curpos, motor_error, hold_from_teleop, motor_tol);
+    }
 
     const bool within_tolerance = std::fabs(motor_error) < motor_tol;
     bool crossed_desired = false;
@@ -394,8 +474,8 @@ private:
       return;
     }
 
-    if (at_joint_angle_limit_reactive(joint_curpos, total_position_error)) {
-      const float limit_rad = total_position_error > 0.0f ?
+    if (at_joint_angle_limit_reactive(joint_curpos, total_position_error, motor_tol)) {
+      const float limit_rad = commanding_into_positive_limit(total_position_error, motor_tol) ?
         joint_angle_limit_rad_ : -joint_angle_limit_rad_;
       latch_goal_at_joint_limit(limit_rad);
       reset_velocity_ramp();
@@ -403,10 +483,10 @@ private:
       return;
     }
 
-    if (would_exceed_joint_angle_limit(hold_state.total_position, ramped_delta)) {
-      const float predicted_joint =
-        (hold_state.total_position + ramped_delta) / gear_ratio;
-      const float limit_rad = predicted_joint > 0.0f ?
+    if (would_exceed_joint_angle_limit(
+        hold_state.total_position, ramped_delta, total_position_error, motor_tol))
+    {
+      const float limit_rad = commanding_into_positive_limit(total_position_error, motor_tol) ?
         joint_angle_limit_rad_ : -joint_angle_limit_rad_;
       latch_goal_at_joint_limit(limit_rad);
       reset_velocity_ramp();
