@@ -1,7 +1,7 @@
 // motor_node_continuous: MIT commands for continuous (delta position) firmware.
 // Position field bit 15: 0 = hold, 1 = apply new command. Lower 15 bits encode delta.
-// CAN RX runs on a dedicated thread with kernel filters; TX is rate-limited and uses the
-// latest motor_command only (no per-callback blocking read or RX drain).
+// CAN RX on a dedicated thread; TX timer sends the latest motor_command (QoS depth 1).
+// MIT feedback is only produced after MIT frames — startup probes with force_apply.
 
 #include <atomic>
 #include <chrono>
@@ -13,6 +13,7 @@
 #include <string>
 #include <thread>
 
+#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -227,14 +228,13 @@ public:
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     set_motor_origin();
 
-    if (wait_for_feedback(std::chrono::milliseconds(startup_feedback_timeout_ms_))) {
-      drive_ready_ = true;
+    if (probe_mit_feedback(std::chrono::milliseconds(startup_feedback_timeout_ms_))) {
       RCLCPP_INFO(get_logger(), "can_id=%d initial MIT feedback OK.", can_id_);
     } else {
       RCLCPP_WARN(
         get_logger(),
-        "can_id=%d no MIT feedback within %d ms at startup; motion TX deferred until "
-        "feedback is received.",
+        "can_id=%d no MIT feedback within %d ms at startup; TX will send MIT probes until "
+        "feedback arrives.",
         can_id_, startup_feedback_timeout_ms_);
     }
 
@@ -304,6 +304,11 @@ private:
       }
     }
 
+    const int flags = fcntl(can_socket_, F_GETFL, 0);
+    if (flags >= 0) {
+      fcntl(can_socket_, F_SETFL, flags | O_NONBLOCK);
+    }
+
     return true;
   }
 
@@ -324,6 +329,75 @@ private:
       return false;
     }
     return true;
+  }
+
+  bool handle_feedback_frame(const struct can_frame & frame)
+  {
+    MitFeedback fb;
+    if (!fb.unpack_reply(frame, can_id_, profile_)) {
+      return false;
+    }
+
+    if (fb.error_code != 0) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "can_id=%d MIT fault: %s (code %d)",
+        can_id_, mit_error_string(fb.error_code), fb.error_code);
+    }
+
+    bool first_feedback = false;
+    {
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      first_feedback = !has_feedback_;
+      last_feedback_time_ = SteadyClock::now();
+      has_feedback_ = true;
+      comm_fault_ = false;
+      last_position_rad_ = fb.position_rad;
+      has_last_position_ = true;
+    }
+
+    if (first_feedback) {
+      RCLCPP_INFO(get_logger(), "can_id=%d MIT feedback active.", can_id_);
+    }
+
+    publish_motor_state(fb);
+    feedback_cv_.notify_all();
+    return true;
+  }
+
+  int drain_can_rx()
+  {
+    int handled = 0;
+    while (rx_running_) {
+      struct can_frame frame{};
+      ssize_t nbytes = 0;
+      {
+        std::lock_guard<std::mutex> lock(can_io_mutex_);
+        if (can_socket_ < 0) {
+          break;
+        }
+        nbytes = read(can_socket_, &frame, sizeof(frame));
+      }
+      if (nbytes < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          break;
+        }
+        if (errno == EINTR) {
+          continue;
+        }
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "CAN RX read error on can_id=%d: %s", can_id_, std::strerror(errno));
+        break;
+      }
+      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+        break;
+      }
+      if (handle_feedback_frame(frame)) {
+        ++handled;
+      }
+    }
+    return handled;
   }
 
   void can_rx_thread_main()
@@ -349,50 +423,21 @@ private:
         continue;
       }
 
-      struct can_frame frame{};
-      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
-      if (nbytes < 0) {
-        if (errno == EINTR || !rx_running_) {
-          continue;
-        }
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000,
-          "CAN RX read error on can_id=%d: %s", can_id_, std::strerror(errno));
-        continue;
-      }
-      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
-        continue;
-      }
-
-      MitFeedback fb;
-      if (!fb.unpack_reply(frame, can_id_, profile_)) {
-        continue;
-      }
-
-      if (fb.error_code != 0) {
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000,
-          "can_id=%d MIT fault: %s (code %d)",
-          can_id_, mit_error_string(fb.error_code), fb.error_code);
-      }
-
-      {
-        std::lock_guard<std::mutex> lock(feedback_mutex_);
-        last_feedback_time_ = SteadyClock::now();
-        has_feedback_ = true;
-        comm_fault_ = false;
-        last_position_rad_ = fb.position_rad;
-        has_last_position_ = true;
-      }
-
-      if (!drive_ready_.load()) {
-        drive_ready_ = true;
-        RCLCPP_INFO(get_logger(), "can_id=%d MIT feedback active.", can_id_);
-      }
-
-      publish_motor_state(fb);
-      feedback_cv_.notify_all();
+      drain_can_rx();
     }
+  }
+
+  bool probe_mit_feedback(std::chrono::milliseconds timeout)
+  {
+    const auto deadline = SteadyClock::now() + timeout;
+    while (rclcpp::ok() && SteadyClock::now() < deadline) {
+      write_mit_frame(0.0f, 0.0f, profile_.mit_kp, profile_.mit_kd, 0.0f, true);
+      if (wait_for_feedback(std::chrono::milliseconds(25))) {
+        return true;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    return has_feedback_;
   }
 
   bool feedback_is_fresh()
@@ -408,10 +453,15 @@ private:
 
   void mark_comm_fault()
   {
-    if (!drive_ready_.load()) {
+    bool was_fault = false;
+    bool had_feedback = false;
+    {
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      had_feedback = has_feedback_;
+    }
+    if (!had_feedback) {
       return;
     }
-    bool was_fault = false;
     {
       std::lock_guard<std::mutex> lock(feedback_mutex_);
       was_fault = comm_fault_;
@@ -474,12 +524,17 @@ private:
     frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
     frame.data[7] = t_int & 0xFF;
 
-    if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
-      RCLCPP_ERROR_THROTTLE(
-        get_logger(), *get_clock(), 2000,
-        "Failed to send MIT command on can_id=%d.", can_id_);
-      return false;
+    {
+      std::lock_guard<std::mutex> lock(can_io_mutex_);
+      if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
+        RCLCPP_ERROR_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "Failed to send MIT command on can_id=%d.", can_id_);
+        return false;
+      }
     }
+
+    drain_can_rx();
     return true;
   }
 
@@ -610,22 +665,26 @@ private:
       return;
     }
 
-    if (!drive_ready_.load()) {
-      return;
+    bool had_feedback = false;
+    {
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      had_feedback = has_feedback_;
     }
 
-    if (!feedback_is_fresh()) {
+    if (had_feedback && !feedback_is_fresh()) {
       mark_comm_fault();
-      write_mit_frame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
+      write_mit_frame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
       return;
     }
 
     motor_interfaces::msg::MotorCommand cmd;
-    if (!get_latest_command(cmd)) {
+    if (get_latest_command(cmd)) {
+      write_mit_frame(cmd.position, cmd.velocity, cmd.kp, cmd.kd, cmd.torque, false);
       return;
     }
 
-    write_mit_frame(cmd.position, cmd.velocity, cmd.kp, cmd.kd, cmd.torque, false);
+    // Bootstrap: drives only reply to MIT traffic; probe until translator commands arrive.
+    write_mit_frame(0.0f, 0.0f, profile_.mit_kp, profile_.mit_kd, 0.0f, true);
   }
 
   void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
@@ -674,7 +733,7 @@ private:
 
   void send_soft_mode_command()
   {
-    write_mit_frame(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, false);
+    write_mit_frame(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
   }
 
   void send_zero_mit_command()
@@ -694,7 +753,6 @@ private:
   int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
   int startup_feedback_timeout_ms_{kDefaultStartupFeedbackTimeoutMs};
   bool use_can_filters_{false};
-  std::atomic<bool> drive_ready_{false};
 
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
@@ -704,6 +762,7 @@ private:
   int can_socket_{-1};
   std::atomic<bool> rx_running_{false};
   std::thread rx_thread_;
+  std::mutex can_io_mutex_;
 
   mutable std::mutex command_mutex_;
   motor_interfaces::msg::MotorCommand pending_command_;
