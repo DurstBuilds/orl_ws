@@ -91,7 +91,7 @@ def _next_bag_output_uri(base: str, bag_dir: str) -> str:
     return f'{base}_{next_index}'
 
 
-def _motor_stack_group(stack: dict) -> GroupAction:
+def _motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> GroupAction:
     ns = stack['ns']
     return GroupAction([
         PushRosNamespace(ns),
@@ -114,6 +114,7 @@ def _motor_stack_group(stack: dict) -> GroupAction:
                 'startup_feedback_timeout_ms': ParameterValue(
                     LaunchConfiguration('motor_startup_feedback_timeout_ms'), value_type=int
                 ),
+                'startup_delay_ms': motor_startup_delay_ms,
                 'use_can_filters': False,
             }],
         ),
@@ -167,7 +168,13 @@ def _launch_setup(context, *args, **kwargs):
         }],
     )
 
-    actions = [_motor_stack_group(stack) for stack in BOOM_MOTOR_STACKS]
+    stagger_ms = int(LaunchConfiguration('motor_startup_stagger_ms').perform(context))
+    if stagger_ms < 0:
+        stagger_ms = 0
+    actions = [
+        _motor_stack_group(stack, index * stagger_ms)
+        for index, stack in enumerate(BOOM_MOTOR_STACKS)
+    ]
     actions.extend([joy_node, boom_joystick_control_node])
 
     if _logging_enabled(context):
@@ -245,6 +252,14 @@ def generate_launch_description():
             'motor_startup_feedback_timeout_ms',
             default_value='2500',
             description='Wait for first MIT feedback at startup before motion TX (ms).',
+        ),
+        DeclareLaunchArgument(
+            'motor_startup_stagger_ms',
+            default_value='800',
+            description=(
+                'Delay between starting each motor_node_continuous (ms). '
+                'knee=0, hip=1*stagger, wheel1=2*stagger, wheel2=3*stagger.'
+            ),
         ),
         DeclareLaunchArgument(
             'namespaces',

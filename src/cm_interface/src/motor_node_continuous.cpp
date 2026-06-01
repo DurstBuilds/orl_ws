@@ -169,6 +169,7 @@ public:
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
     startup_feedback_timeout_ms_ = declare_parameter<int>(
       "startup_feedback_timeout_ms", kDefaultStartupFeedbackTimeoutMs);
+    startup_delay_ms_ = declare_parameter<int>("startup_delay_ms", 0);
     use_can_filters_ = declare_parameter<bool>("use_can_filters", false);
     if (!get_parameter("can_id", can_id_)) {
       throw std::runtime_error("Failed to read can_id parameter");
@@ -189,6 +190,9 @@ public:
     if (startup_feedback_timeout_ms_ <= 0) {
       throw std::invalid_argument("startup_feedback_timeout_ms must be > 0");
     }
+    if (startup_delay_ms_ < 0) {
+      throw std::invalid_argument("startup_delay_ms must be >= 0");
+    }
 
     try {
       profile_ = cm_interface::get_motor_mit_profile(motor_model);
@@ -203,6 +207,13 @@ public:
       "startup_feedback_timeout: %d ms | can_rx_filter=%s | max_torque=%.2f Nm",
       profile_.name, can_interface_.c_str(), can_id_, tx_rate_hz_, feedback_timeout_ms_,
       startup_feedback_timeout_ms_, use_can_filters_ ? "on" : "off", max_torque_nm_);
+
+    if (startup_delay_ms_ > 0) {
+      RCLCPP_INFO(
+        get_logger(), "can_id=%d waiting %d ms before CAN init (staggered startup).",
+        can_id_, startup_delay_ms_);
+      std::this_thread::sleep_for(std::chrono::milliseconds(startup_delay_ms_));
+    }
 
     if (!open_can_socket()) {
       return;
@@ -224,28 +235,24 @@ public:
     rx_running_ = true;
     rx_thread_ = std::thread(&MotorNodeContinuous::can_rx_thread_main, this);
 
-    enable_motor();
-    std::this_thread::sleep_for(std::chrono::milliseconds(50));
-    set_motor_origin();
-
-    if (probe_mit_feedback(std::chrono::milliseconds(startup_feedback_timeout_ms_))) {
-      RCLCPP_INFO(get_logger(), "can_id=%d initial MIT feedback OK.", can_id_);
-    } else {
-      RCLCPP_WARN(
-        get_logger(),
-        "can_id=%d no MIT feedback within %d ms at startup; TX will send MIT probes until "
-        "feedback arrives.",
-        can_id_, startup_feedback_timeout_ms_);
-    }
-
     const auto tx_period = std::chrono::duration<double>(1.0 / tx_rate_hz_);
     tx_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(tx_period),
       std::bind(&MotorNodeContinuous::tx_timer_callback, this));
+
+    enable_motor();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    set_motor_origin();
+
+    // Probe off the executor thread so spin can run the TX timer during startup.
+    startup_thread_ = std::thread([this]() { run_startup_feedback_probe(); });
   }
 
   ~MotorNodeContinuous() override
   {
+    if (startup_thread_.joinable()) {
+      startup_thread_.join();
+    }
     rx_running_ = false;
     if (can_socket_ >= 0) {
       shutdown(can_socket_, SHUT_RDWR);
@@ -427,6 +434,19 @@ private:
     }
   }
 
+  void run_startup_feedback_probe()
+  {
+    const auto timeout = std::chrono::milliseconds(startup_feedback_timeout_ms_);
+    if (probe_mit_feedback(timeout)) {
+      RCLCPP_INFO(get_logger(), "can_id=%d initial MIT feedback OK.", can_id_);
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "can_id=%d no MIT feedback within %d ms at startup; TX timer continues MIT probes.",
+        can_id_, startup_feedback_timeout_ms_);
+    }
+  }
+
   bool probe_mit_feedback(std::chrono::milliseconds timeout)
   {
     const auto deadline = SteadyClock::now() + timeout;
@@ -437,6 +457,7 @@ private:
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     return has_feedback_;
   }
 
@@ -544,12 +565,24 @@ private:
     write_mit_frame(p_delta, v_des, kp, kd, t_ff, force_apply);
   }
 
-  void enable_motor()
+  bool write_control_frame(const struct can_frame & frame, const char * label)
   {
     if (can_socket_ < 0) {
-      return;
+      return false;
     }
 
+    std::lock_guard<std::mutex> lock(can_io_mutex_);
+    const ssize_t nbytes = write(can_socket_, &frame, sizeof(frame));
+    if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+      RCLCPP_ERROR(
+        get_logger(), "can_id=%d %s failed: %s", can_id_, label, std::strerror(errno));
+      return false;
+    }
+    return true;
+  }
+
+  void enable_motor()
+  {
     struct can_frame frame{};
     frame.can_id = static_cast<canid_t>(can_id_);
     frame.can_dlc = 8;
@@ -562,15 +595,13 @@ private:
     frame.data[6] = 0xFF;
     frame.data[7] = 0xFC;
 
-    write(can_socket_, &frame, sizeof(frame));
+    if (write_control_frame(frame, "enable")) {
+      RCLCPP_INFO(get_logger(), "can_id=%d enable sent on %s.", can_id_, can_interface_.c_str());
+    }
   }
 
   void disable_motor()
   {
-    if (can_socket_ < 0) {
-      return;
-    }
-
     struct can_frame frame{};
     frame.can_id = static_cast<canid_t>(can_id_);
     frame.can_dlc = 8;
@@ -583,15 +614,11 @@ private:
     frame.data[6] = 0xFF;
     frame.data[7] = 0xFD;
 
-    write(can_socket_, &frame, sizeof(frame));
+    write_control_frame(frame, "disable");
   }
 
   void set_motor_origin()
   {
-    if (can_socket_ < 0) {
-      return;
-    }
-
     struct can_frame frame{};
     frame.can_id = static_cast<canid_t>(can_id_);
     frame.can_dlc = 8;
@@ -604,10 +631,8 @@ private:
     frame.data[6] = 0xFF;
     frame.data[7] = 0xFE;
 
-    if (write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame))) {
+    if (write_control_frame(frame, "set origin")) {
       RCLCPP_INFO(get_logger(), "Set motor origin (current position = 0).");
-    } else {
-      RCLCPP_ERROR(get_logger(), "Failed to set motor origin.");
     }
   }
 
@@ -752,6 +777,7 @@ private:
   double tx_rate_hz_{kDefaultTxRateHz};
   int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
   int startup_feedback_timeout_ms_{kDefaultStartupFeedbackTimeoutMs};
+  int startup_delay_ms_{0};
   bool use_can_filters_{false};
 
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
@@ -762,6 +788,7 @@ private:
   int can_socket_{-1};
   std::atomic<bool> rx_running_{false};
   std::thread rx_thread_;
+  std::thread startup_thread_;
   std::mutex can_io_mutex_;
 
   mutable std::mutex command_mutex_;
