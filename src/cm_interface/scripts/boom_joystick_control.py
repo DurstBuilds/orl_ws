@@ -38,7 +38,7 @@ class JoyState:
         hip_neg_button_index: int,
         hip_pos_button_index: int,
     ) -> None:
-        right_x = -self._read_axis(msg, right_x_axis) or 0.0
+        right_x = self._read_axis(msg, right_x_axis) or 0.0
         left_x = -self._read_axis(msg, left_x_axis) or 0.0
         soft_mode_button_pressed = (
             soft_mode_button_index < len(msg.buttons) and
