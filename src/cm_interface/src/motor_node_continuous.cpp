@@ -1,19 +1,16 @@
 // motor_node_continuous: MIT commands for continuous (delta position) firmware.
 // Position field bit 15: 0 = hold, 1 = apply new command. Lower 15 bits encode delta.
-// CAN RX on a dedicated thread; TX timer sends the latest motor_command (QoS depth 1).
-// MIT feedback is only produced after MIT frames — startup probes with force_apply.
+// TX timer sends latest motor_command (QoS depth 1). After each CAN TX, blocking RX
+// poll (pre-CAN-refactor path) — no separate RX thread.
 
-#include <atomic>
 #include <chrono>
 #include <cmath>
-#include <condition_variable>
 #include <cerrno>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <thread>
 
-#include <fcntl.h>
 #include <poll.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
@@ -39,8 +36,8 @@ constexpr float kSoftReleaseKp = 0.5f;
 constexpr float kDefaultMaxTorqueNm = 10.0f;
 constexpr double kDefaultTxRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
-constexpr int kDefaultStartupFeedbackTimeoutMs = 2500;
-constexpr int kCanRxSocketTimeoutMs = 100;
+constexpr int kDefaultMitFeedbackPollMs = 5;
+constexpr int kOriginFeedbackPollMs = 50;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 constexpr int kPositionApplyBit = 0x8000;
 
@@ -167,8 +164,8 @@ public:
     tx_rate_hz_ = declare_parameter<double>("tx_rate_hz", kDefaultTxRateHz);
     feedback_timeout_ms_ = declare_parameter<int>(
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
-    startup_feedback_timeout_ms_ = declare_parameter<int>(
-      "startup_feedback_timeout_ms", kDefaultStartupFeedbackTimeoutMs);
+    feedback_poll_ms_ = declare_parameter<int>(
+      "feedback_poll_ms", kDefaultMitFeedbackPollMs);
     startup_delay_ms_ = declare_parameter<int>("startup_delay_ms", 0);
     use_can_filters_ = declare_parameter<bool>("use_can_filters", false);
     if (!get_parameter("can_id", can_id_)) {
@@ -187,8 +184,8 @@ public:
     if (feedback_timeout_ms_ <= 0) {
       throw std::invalid_argument("feedback_timeout_ms must be > 0");
     }
-    if (startup_feedback_timeout_ms_ <= 0) {
-      throw std::invalid_argument("startup_feedback_timeout_ms must be > 0");
+    if (feedback_poll_ms_ <= 0) {
+      throw std::invalid_argument("feedback_poll_ms must be > 0");
     }
     if (startup_delay_ms_ < 0) {
       throw std::invalid_argument("startup_delay_ms must be >= 0");
@@ -204,9 +201,9 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Motor model: %s | %s | can_id: %d | tx_rate: %.0f Hz | feedback_timeout: %d ms | "
-      "startup_feedback_timeout: %d ms | can_rx_filter=%s | max_torque=%.2f Nm",
+      "feedback_poll: %d ms | can_rx_filter=%s | max_torque=%.2f Nm",
       profile_.name, can_interface_.c_str(), can_id_, tx_rate_hz_, feedback_timeout_ms_,
-      startup_feedback_timeout_ms_, use_can_filters_ ? "on" : "off", max_torque_nm_);
+      feedback_poll_ms_, use_can_filters_ ? "on" : "off", max_torque_nm_);
 
     if (startup_delay_ms_ > 0) {
       RCLCPP_INFO(
@@ -232,9 +229,6 @@ public:
 
     state_publisher_ = create_publisher<motor_interfaces::msg::MotorState>("motor_state", 10);
 
-    rx_running_ = true;
-    rx_thread_ = std::thread(&MotorNodeContinuous::can_rx_thread_main, this);
-
     const auto tx_period = std::chrono::duration<double>(1.0 / tx_rate_hz_);
     tx_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(tx_period),
@@ -243,23 +237,11 @@ public:
     enable_motor();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     set_motor_origin();
-
-    // Probe off the executor thread so spin can run the TX timer during startup.
-    startup_thread_ = std::thread([this]() { run_startup_feedback_probe(); });
+    write_mit_frame(0.0f, 0.0f, profile_.mit_kp, profile_.mit_kd, 0.0f, true);
   }
 
   ~MotorNodeContinuous() override
   {
-    if (startup_thread_.joinable()) {
-      startup_thread_.join();
-    }
-    rx_running_ = false;
-    if (can_socket_ >= 0) {
-      shutdown(can_socket_, SHUT_RDWR);
-    }
-    if (rx_thread_.joinable()) {
-      rx_thread_.join();
-    }
     disable_motor();
     if (can_socket_ >= 0) {
       close(can_socket_);
@@ -309,11 +291,6 @@ private:
         can_socket_ = -1;
         return false;
       }
-    }
-
-    const int flags = fcntl(can_socket_, F_GETFL, 0);
-    if (flags >= 0) {
-      fcntl(can_socket_, F_SETFL, flags | O_NONBLOCK);
     }
 
     return true;
@@ -368,97 +345,98 @@ private:
     }
 
     publish_motor_state(fb);
-    feedback_cv_.notify_all();
     return true;
   }
 
-  int drain_can_rx()
+  void drain_pending_can_frames()
   {
-    int handled = 0;
-    while (rx_running_) {
+    if (can_socket_ < 0) {
+      return;
+    }
+
+    struct pollfd pfd{};
+    pfd.fd = can_socket_;
+    pfd.events = POLLIN;
+
+    while (poll(&pfd, 1, 0) > 0) {
       struct can_frame frame{};
-      ssize_t nbytes = 0;
-      {
-        std::lock_guard<std::mutex> lock(can_io_mutex_);
-        if (can_socket_ < 0) {
-          break;
-        }
-        nbytes = read(can_socket_, &frame, sizeof(frame));
-      }
-      if (nbytes < 0) {
-        if (errno == EAGAIN || errno == EWOULDBLOCK) {
-          break;
-        }
-        if (errno == EINTR) {
-          continue;
-        }
-        RCLCPP_WARN_THROTTLE(
-          get_logger(), *get_clock(), 5000,
-          "CAN RX read error on can_id=%d: %s", can_id_, std::strerror(errno));
-        break;
-      }
+      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
       if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
         break;
       }
-      if (handle_feedback_frame(frame)) {
-        ++handled;
-      }
     }
-    return handled;
   }
 
-  void can_rx_thread_main()
+  void read_mit_feedback(int poll_timeout_ms)
   {
-    while (rx_running_) {
+    if (can_socket_ < 0) {
+      return;
+    }
+
+    const auto deadline = SteadyClock::now() + std::chrono::milliseconds(poll_timeout_ms);
+
+    bool saw_any_frame = false;
+    int last_arb_id = -1;
+    uint8_t last_data0 = 0;
+
+    while (rclcpp::ok() && SteadyClock::now() < deadline) {
+      const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        deadline - SteadyClock::now()).count();
+      if (remaining_ms <= 0) {
+        break;
+      }
+
       struct pollfd pfd{};
       pfd.fd = can_socket_;
       pfd.events = POLLIN;
 
-      const int poll_result = poll(&pfd, 1, kCanRxSocketTimeoutMs);
+      const int poll_result = poll(&pfd, 1, static_cast<int>(remaining_ms));
       if (poll_result < 0) {
         if (errno == EINTR) {
           continue;
         }
-        if (rx_running_) {
-          RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 5000,
-            "CAN RX poll error on can_id=%d: %s", can_id_, std::strerror(errno));
-        }
-        continue;
+        RCLCPP_WARN(
+          get_logger(), "poll() while waiting for MIT feedback: %s",
+          std::strerror(errno));
+        return;
       }
       if (poll_result == 0) {
+        break;
+      }
+
+      struct can_frame frame{};
+      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
+      if (nbytes < 0) {
+        RCLCPP_WARN(
+          get_logger(), "read() while waiting for MIT feedback: %s",
+          std::strerror(errno));
+        return;
+      }
+      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
         continue;
       }
 
-      drain_can_rx();
-    }
-  }
+      saw_any_frame = true;
+      last_arb_id = arbitration_id_from_frame(frame);
+      last_data0 = frame.data[0];
 
-  void run_startup_feedback_probe()
-  {
-    const auto timeout = std::chrono::milliseconds(startup_feedback_timeout_ms_);
-    if (probe_mit_feedback(timeout)) {
-      RCLCPP_INFO(get_logger(), "can_id=%d initial MIT feedback OK.", can_id_);
-    } else {
-      RCLCPP_WARN(
-        get_logger(),
-        "can_id=%d no MIT feedback within %d ms at startup; TX timer continues MIT probes.",
-        can_id_, startup_feedback_timeout_ms_);
-    }
-  }
-
-  bool probe_mit_feedback(std::chrono::milliseconds timeout)
-  {
-    const auto deadline = SteadyClock::now() + timeout;
-    while (rclcpp::ok() && SteadyClock::now() < deadline) {
-      write_mit_frame(0.0f, 0.0f, profile_.mit_kp, profile_.mit_kd, 0.0f, true);
-      if (wait_for_feedback(std::chrono::milliseconds(25))) {
-        return true;
+      if (handle_feedback_frame(frame)) {
+        return;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    std::lock_guard<std::mutex> lock(feedback_mutex_);
-    return has_feedback_;
+
+    if (!saw_any_frame) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "No MIT feedback within %d ms for can_id=%d (no CAN frames on bus).",
+        poll_timeout_ms, can_id_);
+    } else {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "No MIT feedback within %d ms for can_id=%d. Last frame arb_id=%d data[0]=0x%02X "
+        "(feedback may use master ID 0 with motor ID in data[0] low nibble).",
+        poll_timeout_ms, can_id_, last_arb_id, last_data0);
+    }
   }
 
   bool feedback_is_fresh()
@@ -494,14 +472,6 @@ private:
         "can_id=%d comm fault: no fresh MIT feedback for %d ms; holding motor command at zero",
         can_id_, feedback_timeout_ms_);
     }
-  }
-
-  bool wait_for_feedback(std::chrono::milliseconds timeout)
-  {
-    std::unique_lock<std::mutex> lock(feedback_mutex_);
-    return feedback_cv_.wait_for(lock, timeout, [this]() {
-      return has_feedback_;
-    });
   }
 
   int pack_position_continuous(float p_delta, float v_des, float t_ff, bool force_apply = false) const
@@ -545,17 +515,16 @@ private:
     frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
     frame.data[7] = t_int & 0xFF;
 
-    {
-      std::lock_guard<std::mutex> lock(can_io_mutex_);
-      if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
-        RCLCPP_ERROR_THROTTLE(
-          get_logger(), *get_clock(), 2000,
-          "Failed to send MIT command on can_id=%d.", can_id_);
-        return false;
-      }
+    drain_pending_can_frames();
+
+    if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Failed to send MIT command on can_id=%d.", can_id_);
+      return false;
     }
 
-    drain_can_rx();
+    read_mit_feedback(feedback_poll_ms_);
     return true;
   }
 
@@ -571,7 +540,6 @@ private:
       return false;
     }
 
-    std::lock_guard<std::mutex> lock(can_io_mutex_);
     const ssize_t nbytes = write(can_socket_, &frame, sizeof(frame));
     if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
       RCLCPP_ERROR(
@@ -633,6 +601,7 @@ private:
 
     if (write_control_frame(frame, "set origin")) {
       RCLCPP_INFO(get_logger(), "Set motor origin (current position = 0).");
+      read_mit_feedback(kOriginFeedbackPollMs);
     }
   }
 
@@ -776,7 +745,7 @@ private:
   std::string can_interface_{"can0"};
   double tx_rate_hz_{kDefaultTxRateHz};
   int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
-  int startup_feedback_timeout_ms_{kDefaultStartupFeedbackTimeoutMs};
+  int feedback_poll_ms_{kDefaultMitFeedbackPollMs};
   int startup_delay_ms_{0};
   bool use_can_filters_{false};
 
@@ -786,17 +755,12 @@ private:
   rclcpp::TimerBase::SharedPtr tx_timer_;
 
   int can_socket_{-1};
-  std::atomic<bool> rx_running_{false};
-  std::thread rx_thread_;
-  std::thread startup_thread_;
-  std::mutex can_io_mutex_;
 
   mutable std::mutex command_mutex_;
   motor_interfaces::msg::MotorCommand pending_command_;
   bool has_pending_command_{false};
 
   std::mutex feedback_mutex_;
-  std::condition_variable feedback_cv_;
   SteadyTime last_feedback_time_{};
   bool has_feedback_{false};
   bool comm_fault_{false};

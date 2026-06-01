@@ -111,8 +111,8 @@ def _motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> GroupAction:
                 'feedback_timeout_ms': ParameterValue(
                     LaunchConfiguration('motor_feedback_timeout_ms'), value_type=int
                 ),
-                'startup_feedback_timeout_ms': ParameterValue(
-                    LaunchConfiguration('motor_startup_feedback_timeout_ms'), value_type=int
+                'feedback_poll_ms': ParameterValue(
+                    LaunchConfiguration('motor_feedback_poll_ms'), value_type=int
                 ),
                 'startup_delay_ms': motor_startup_delay_ms,
                 'use_can_filters': False,
@@ -249,9 +249,9 @@ def generate_launch_description():
             description='No fresh feedback for this long (ms) triggers comm fault hold.',
         ),
         DeclareLaunchArgument(
-            'motor_startup_feedback_timeout_ms',
-            default_value='2500',
-            description='Wait for first MIT feedback at startup before motion TX (ms).',
+            'motor_feedback_poll_ms',
+            default_value='5',
+            description='Blocking RX poll after each MIT TX (ms); pre-refactor default was 50.',
         ),
         DeclareLaunchArgument(
             'motor_startup_stagger_ms',
