@@ -115,7 +115,7 @@ def _motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> GroupAction:
                     LaunchConfiguration('motor_feedback_poll_ms'), value_type=int
                 ),
                 'startup_delay_ms': motor_startup_delay_ms,
-                'use_can_filters': False,
+                'use_can_filters': True,
             }],
         ),
         Node(
@@ -240,8 +240,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'motor_tx_rate_hz',
-            default_value='200.0',
-            description='MIT command TX rate per motor_node_continuous (Hz).',
+            default_value='100.0',
+            description='MIT command TX rate per motor_node_continuous (Hz); 100 recommended for 4x on can0.',
         ),
         DeclareLaunchArgument(
             'motor_feedback_timeout_ms',
@@ -250,8 +250,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'motor_feedback_poll_ms',
-            default_value='5',
-            description='Blocking RX poll after each MIT TX (ms); pre-refactor default was 50.',
+            default_value='15',
+            description='Blocking RX poll after each MIT TX (ms); use 15+ with four motors on one bus.',
         ),
         DeclareLaunchArgument(
             'motor_startup_stagger_ms',

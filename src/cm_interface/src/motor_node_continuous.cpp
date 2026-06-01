@@ -36,7 +36,7 @@ constexpr float kSoftReleaseKp = 0.5f;
 constexpr float kDefaultMaxTorqueNm = 10.0f;
 constexpr double kDefaultTxRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
-constexpr int kDefaultMitFeedbackPollMs = 5;
+constexpr int kDefaultMitFeedbackPollMs = 15;
 constexpr int kOriginFeedbackPollMs = 50;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 constexpr int kPositionApplyBit = 0x8000;
@@ -167,7 +167,7 @@ public:
     feedback_poll_ms_ = declare_parameter<int>(
       "feedback_poll_ms", kDefaultMitFeedbackPollMs);
     startup_delay_ms_ = declare_parameter<int>("startup_delay_ms", 0);
-    use_can_filters_ = declare_parameter<bool>("use_can_filters", false);
+    use_can_filters_ = declare_parameter<bool>("use_can_filters", true);
     if (!get_parameter("can_id", can_id_)) {
       throw std::runtime_error("Failed to read can_id parameter");
     }
@@ -237,7 +237,7 @@ public:
     enable_motor();
     std::this_thread::sleep_for(std::chrono::milliseconds(50));
     set_motor_origin();
-    write_mit_frame(0.0f, 0.0f, profile_.mit_kp, profile_.mit_kd, 0.0f, true);
+    write_safe_mit_probe();
   }
 
   ~MotorNodeContinuous() override
@@ -312,6 +312,10 @@ private:
         can_id_, std::strerror(errno));
       return false;
     }
+    RCLCPP_INFO(
+      get_logger(),
+      "can_id=%d CAN RX filter: accept arb_id %d and master %d only.",
+      can_id_, can_id_, kDefaultMasterCanId);
     return true;
   }
 
@@ -348,7 +352,8 @@ private:
     return true;
   }
 
-  void drain_pending_can_frames()
+  // Drain the socket RX queue; keep frames for this drive, ignore others (multi-motor bus).
+  void process_pending_can_rx()
   {
     if (can_socket_ < 0) {
       return;
@@ -364,7 +369,19 @@ private:
       if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
         break;
       }
+      handle_feedback_frame(frame);
     }
+  }
+
+  // Low-authority MIT hold until valid feedback (avoids Kp runaway on AK10-9 wheels).
+  bool write_safe_mit_probe()
+  {
+    return write_mit_frame(0.0f, 0.0f, 0.0f, profile_.mit_kd, 0.0f, true);
+  }
+
+  bool write_safe_zero_hold()
+  {
+    return write_mit_frame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
   }
 
   void read_mit_feedback(int poll_timeout_ms)
@@ -515,7 +532,7 @@ private:
     frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
     frame.data[7] = t_int & 0xFF;
 
-    drain_pending_can_frames();
+    process_pending_can_rx();
 
     if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
       RCLCPP_ERROR_THROTTLE(
@@ -660,14 +677,26 @@ private:
     }
 
     bool had_feedback = false;
+    bool in_comm_fault = false;
     {
       std::lock_guard<std::mutex> lock(feedback_mutex_);
       had_feedback = has_feedback_;
+      in_comm_fault = comm_fault_;
+    }
+
+    if (in_comm_fault) {
+      write_safe_zero_hold();
+      return;
     }
 
     if (had_feedback && !feedback_is_fresh()) {
       mark_comm_fault();
-      write_mit_frame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
+      write_safe_zero_hold();
+      return;
+    }
+
+    if (!had_feedback) {
+      write_safe_mit_probe();
       return;
     }
 
@@ -677,8 +706,7 @@ private:
       return;
     }
 
-    // Bootstrap: drives only reply to MIT traffic; probe until translator commands arrive.
-    write_mit_frame(0.0f, 0.0f, profile_.mit_kp, profile_.mit_kd, 0.0f, true);
+    write_safe_mit_probe();
   }
 
   void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
