@@ -24,7 +24,7 @@ BOOM_MOTOR_STACKS = (
         'ns': 'hip_motor',
         'gear_ratio': 30.0,
         'motor_model': 'ak70_10',
-        'can_id': 0,  # Revert to 3 for testing
+        'can_id': 3,  # Revert to 3 for testing
         'joint_angle_limit_deg': 45.0,
     },
     {
