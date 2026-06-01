@@ -18,7 +18,8 @@ Teleop (joystick)          joint_translator_node          motor_node_continuous
                               motor_unwrapper_node
 ```
 
-- **motor_node_continuous** — Opens a SocketCAN interface, sends MIT frames, publishes `motor_state`, subscribes to `motor_command` (delta position per tick) and `soft_mode`.
+- **can_gateway_node** — (boom stack default) Single SocketCAN socket for all drives; routes RX/TX by `can_id`; same per-namespace topics as `motor_node_continuous`.
+- **motor_node_continuous** — One drive per process (legacy / single-motor benches); opens its own SocketCAN interface.
 - **motor_unwrapper_node** — Integrates wrapped motor position into `motor_total_position` for multi-turn tracking.
 - **joint_translator_node** — Runs a 200 Hz PD loop in motor space: subscribes to `joint_despos`, publishes `joint_curpos` and `motor_command`. Handles goal hold, predictive hold, and optional joint angle limits (hip).
 
@@ -54,6 +55,7 @@ Requires: `rclcpp`, `rclpy`, `std_msgs`, `sensor_msgs`, `motor_interfaces`, `joy
 | **boom_teleop.launch.py** | Single namespaced stack + joy + boom teleop (for one motor at a time). |
 | **motor_stack.launch.py** | Single stack + original `joystick_control` (deadman, right-stick absolute position). |
 | **motor_node_continuous.launch.py** | Motor node only. |
+| **can_gateway.launch.py** | CAN gateway only (boom drive list). |
 | **joint_translator.launch.py** | Translator + unwrapper only (motor node launched separately). |
 | **joystick_teleop.launch.py** / **joystick_control.launch.py** | Teleop nodes only. |
 
@@ -61,6 +63,14 @@ Requires: `rclcpp`, `rclpy`, `std_msgs`, `sensor_msgs`, `motor_interfaces`, `joy
 
 ```bash
 ros2 launch cm_interface boom_stack.launch.py
+```
+
+By default **`use_can_gateway:=true`**: one `can_gateway_node` owns `can0` and talks to all four drives; each namespace still has `motor_unwrapper_node` + `joint_translator_node`. Topics are unchanged (`/<ns>/motor_command`, `/<ns>/motor_state`, etc.).
+
+Legacy four-socket mode:
+
+```bash
+ros2 launch cm_interface boom_stack.launch.py use_can_gateway:=false
 ```
 
 Default motors:

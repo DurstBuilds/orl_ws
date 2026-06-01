@@ -1,5 +1,5 @@
-# Full boom stack: four namespaced motor pipelines + one joy_node + one boom_joystick_control.
-# Equivalent to four boom_teleop motor launches with a single shared teleop node.
+# Full boom stack: single CAN gateway + four translator pipelines + teleop.
+# Set use_can_gateway:=false to use legacy per-motor motor_node_continuous nodes.
 
 import re
 from pathlib import Path
@@ -10,8 +10,6 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 
-# Defaults match:
-#   ros2 launch cm_interface boom_teleop.launch.py ns:=... (per row)
 BOOM_MOTOR_STACKS = (
     {
         'ns': 'knee_motor',
@@ -44,6 +42,8 @@ BOOM_MOTOR_STACKS = (
 )
 
 DEFAULT_NAMESPACES = ','.join(stack['ns'] for stack in BOOM_MOTOR_STACKS)
+DEFAULT_MOTOR_MODELS = ','.join(stack['motor_model'] for stack in BOOM_MOTOR_STACKS)
+DEFAULT_CAN_IDS = ','.join(str(stack['can_id']) for stack in BOOM_MOTOR_STACKS)
 DEFAULT_NAMESPACE_GEAR_RATIOS = ','.join(
     f"{stack['ns']}:{stack['gear_ratio']}" for stack in BOOM_MOTOR_STACKS
 )
@@ -55,8 +55,12 @@ def _logging_enabled(context) -> bool:
     return value in ('true', '1', 'yes')
 
 
+def _use_can_gateway(context) -> bool:
+    value = LaunchConfiguration('use_can_gateway').perform(context).strip().lower()
+    return value in ('true', '1', 'yes')
+
+
 def _collect_bag_indices(base: str, bag_dir: Path) -> list[int]:
-    """Find highest used index from {base}_N.mcap files and {base}_N bag directories."""
     indices: list[int] = []
     escaped = re.escape(base)
 
@@ -91,7 +95,33 @@ def _next_bag_output_uri(base: str, bag_dir: str) -> str:
     return f'{base}_{next_index}'
 
 
-def _motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> GroupAction:
+def _translator_stack_group(stack: dict) -> GroupAction:
+    ns = stack['ns']
+    return GroupAction([
+        PushRosNamespace(ns),
+        Node(
+            package='cm_interface',
+            executable='motor_unwrapper_node',
+            name='motor_unwrapper_node',
+        ),
+        Node(
+            package='cm_interface',
+            executable='joint_translator_node',
+            name='joint_translator_node',
+            parameters=[{
+                'motor_model': stack['motor_model'],
+                'gear_ratio': stack['gear_ratio'],
+                'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
+                'joint_angle_limit_deg': stack['joint_angle_limit_deg'],
+                'motor_error_tolerance': ParameterValue(
+                    LaunchConfiguration('motor_error_tolerance'), value_type=float
+                ),
+            }],
+        ),
+    ])
+
+
+def _legacy_motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> GroupAction:
     ns = stack['ns']
     return GroupAction([
         PushRosNamespace(ns),
@@ -143,6 +173,48 @@ def _motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> GroupAction:
 def _launch_setup(context, *args, **kwargs):
     bag_dir = LaunchConfiguration('bag_output_dir').perform(context)
 
+    actions = []
+
+    if _use_can_gateway(context):
+        actions.append(
+            Node(
+                package='cm_interface',
+                executable='can_gateway_node',
+                name='can_gateway_node',
+                output='screen',
+                parameters=[{
+                    'can_interface': 'can0',
+                    'namespaces': DEFAULT_NAMESPACES,
+                    'motor_models': DEFAULT_MOTOR_MODELS,
+                    'can_ids': DEFAULT_CAN_IDS,
+                    'max_torque': ParameterValue(
+                        LaunchConfiguration('max_torque'), value_type=float
+                    ),
+                    'loop_rate_hz': ParameterValue(
+                        LaunchConfiguration('gateway_loop_rate_hz'), value_type=float
+                    ),
+                    'feedback_timeout_ms': ParameterValue(
+                        LaunchConfiguration('motor_feedback_timeout_ms'), value_type=int
+                    ),
+                    'feedback_poll_ms': ParameterValue(
+                        LaunchConfiguration('motor_feedback_poll_ms'), value_type=int
+                    ),
+                    'startup_stagger_ms': ParameterValue(
+                        LaunchConfiguration('gateway_startup_stagger_ms'), value_type=int
+                    ),
+                }],
+            )
+        )
+        actions.extend(_translator_stack_group(stack) for stack in BOOM_MOTOR_STACKS)
+    else:
+        stagger_ms = int(LaunchConfiguration('motor_startup_stagger_ms').perform(context))
+        if stagger_ms < 0:
+            stagger_ms = 0
+        actions.extend(
+            _legacy_motor_stack_group(stack, index * stagger_ms)
+            for index, stack in enumerate(BOOM_MOTOR_STACKS)
+        )
+
     joy_node = Node(
         package='joy',
         executable='joy_node',
@@ -168,13 +240,6 @@ def _launch_setup(context, *args, **kwargs):
         }],
     )
 
-    stagger_ms = int(LaunchConfiguration('motor_startup_stagger_ms').perform(context))
-    if stagger_ms < 0:
-        stagger_ms = 0
-    actions = [
-        _motor_stack_group(stack, index * stagger_ms)
-        for index, stack in enumerate(BOOM_MOTOR_STACKS)
-    ]
     actions.extend([joy_node, boom_joystick_control_node])
 
     if _logging_enabled(context):
@@ -209,6 +274,11 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
+            'use_can_gateway',
+            default_value='true',
+            description='If true, one can_gateway_node owns can0; if false, four motor_node_continuous.',
+        ),
+        DeclareLaunchArgument(
             'joy_dev',
             default_value='0',
             description='Joystick device index for joy_node.',
@@ -216,7 +286,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'max_torque',
             default_value='10.0',
-            description='Max modeled torque (Nm) for motor_node_continuous.',
+            description='Max modeled torque (Nm) for MIT drives.',
         ),
         DeclareLaunchArgument(
             'omega_max',
@@ -239,9 +309,19 @@ def generate_launch_description():
             description='Motor-space goal/hold tolerance (rad) for joint_translator_node.',
         ),
         DeclareLaunchArgument(
+            'gateway_loop_rate_hz',
+            default_value='100.0',
+            description='can_gateway_node service loop rate (Hz).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_startup_stagger_ms',
+            default_value='200',
+            description='Delay between each drive enable sequence in can_gateway_node (ms).',
+        ),
+        DeclareLaunchArgument(
             'motor_tx_rate_hz',
             default_value='100.0',
-            description='MIT command TX rate per motor_node_continuous (Hz); 100 recommended for 4x on can0.',
+            description='Legacy motor_node_continuous TX rate when use_can_gateway:=false.',
         ),
         DeclareLaunchArgument(
             'motor_feedback_timeout_ms',
@@ -251,15 +331,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'motor_feedback_poll_ms',
             default_value='15',
-            description='Blocking RX poll after each MIT TX (ms); use 15+ with four motors on one bus.',
+            description='Blocking RX poll after each gateway loop (ms).',
         ),
         DeclareLaunchArgument(
             'motor_startup_stagger_ms',
             default_value='800',
-            description=(
-                'Delay between starting each motor_node_continuous (ms). '
-                'knee=0, hip=1*stagger, wheel1=2*stagger, wheel2=3*stagger.'
-            ),
+            description='Legacy per-motor startup delay when use_can_gateway:=false.',
         ),
         DeclareLaunchArgument(
             'namespaces',

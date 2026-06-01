@@ -39,6 +39,13 @@ target_include_directories(motor_node_continuous PUBLIC
 )
 ament_target_dependencies(motor_node_continuous rclcpp std_msgs motor_interfaces)
 
+add_executable(can_gateway_node src/can_gateway_node.cpp)
+target_include_directories(can_gateway_node PUBLIC
+  $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+  $<INSTALL_INTERFACE:include>
+)
+ament_target_dependencies(can_gateway_node rclcpp std_msgs motor_interfaces)
+
 add_executable(motor_unwrapper_node src/motor_unwrapper_node.cpp)
 ament_target_dependencies(motor_unwrapper_node rclcpp std_msgs motor_interfaces)
 
@@ -61,6 +68,7 @@ install(TARGETS
   can_test_node
   motor_node
   motor_node_continuous
+  can_gateway_node
   motor_unwrapper_node
   joint_translator_node
   terminal_position_publisher
