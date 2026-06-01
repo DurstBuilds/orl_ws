@@ -37,7 +37,8 @@ constexpr float kSoftModeKd = 0.025f;
 constexpr float kSoftReleaseKp = 0.5f;
 constexpr float kDefaultMaxTorqueNm = 10.0f;
 constexpr double kDefaultTxRateHz = 200.0;
-constexpr int kDefaultFeedbackTimeoutMs = 100;
+constexpr int kDefaultFeedbackTimeoutMs = 250;
+constexpr int kDefaultStartupFeedbackTimeoutMs = 2500;
 constexpr int kCanRxSocketTimeoutMs = 100;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 constexpr int kPositionApplyBit = 0x8000;
@@ -165,6 +166,9 @@ public:
     tx_rate_hz_ = declare_parameter<double>("tx_rate_hz", kDefaultTxRateHz);
     feedback_timeout_ms_ = declare_parameter<int>(
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
+    startup_feedback_timeout_ms_ = declare_parameter<int>(
+      "startup_feedback_timeout_ms", kDefaultStartupFeedbackTimeoutMs);
+    use_can_filters_ = declare_parameter<bool>("use_can_filters", false);
     if (!get_parameter("can_id", can_id_)) {
       throw std::runtime_error("Failed to read can_id parameter");
     }
@@ -181,6 +185,9 @@ public:
     if (feedback_timeout_ms_ <= 0) {
       throw std::invalid_argument("feedback_timeout_ms must be > 0");
     }
+    if (startup_feedback_timeout_ms_ <= 0) {
+      throw std::invalid_argument("startup_feedback_timeout_ms must be > 0");
+    }
 
     try {
       profile_ = cm_interface::get_motor_mit_profile(motor_model);
@@ -192,15 +199,15 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Motor model: %s | %s | can_id: %d | tx_rate: %.0f Hz | feedback_timeout: %d ms | "
-      "max_torque=%.2f Nm",
+      "startup_feedback_timeout: %d ms | can_rx_filter=%s | max_torque=%.2f Nm",
       profile_.name, can_interface_.c_str(), can_id_, tx_rate_hz_, feedback_timeout_ms_,
-      max_torque_nm_);
+      startup_feedback_timeout_ms_, use_can_filters_ ? "on" : "off", max_torque_nm_);
 
     if (!open_can_socket()) {
       return;
     }
 
-    const auto cmd_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
+    const auto cmd_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
     subscription_ = create_subscription<motor_interfaces::msg::MotorCommand>(
       "motor_command",
       cmd_qos,
@@ -216,13 +223,25 @@ public:
     rx_running_ = true;
     rx_thread_ = std::thread(&MotorNodeContinuous::can_rx_thread_main, this);
 
+    enable_motor();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    set_motor_origin();
+
+    if (wait_for_feedback(std::chrono::milliseconds(startup_feedback_timeout_ms_))) {
+      drive_ready_ = true;
+      RCLCPP_INFO(get_logger(), "can_id=%d initial MIT feedback OK.", can_id_);
+    } else {
+      RCLCPP_WARN(
+        get_logger(),
+        "can_id=%d no MIT feedback within %d ms at startup; motion TX deferred until "
+        "feedback is received.",
+        can_id_, startup_feedback_timeout_ms_);
+    }
+
     const auto tx_period = std::chrono::duration<double>(1.0 / tx_rate_hz_);
     tx_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(tx_period),
       std::bind(&MotorNodeContinuous::tx_timer_callback, this));
-
-    enable_motor();
-    set_motor_origin();
   }
 
   ~MotorNodeContinuous() override
@@ -277,10 +296,12 @@ private:
       return false;
     }
 
-    if (!install_can_filters()) {
-      close(can_socket_);
-      can_socket_ = -1;
-      return false;
+    if (use_can_filters_) {
+      if (!install_can_filters()) {
+        close(can_socket_);
+        can_socket_ = -1;
+        return false;
+      }
     }
 
     return true;
@@ -364,6 +385,11 @@ private:
         has_last_position_ = true;
       }
 
+      if (!drive_ready_.load()) {
+        drive_ready_ = true;
+        RCLCPP_INFO(get_logger(), "can_id=%d MIT feedback active.", can_id_);
+      }
+
       publish_motor_state(fb);
       feedback_cv_.notify_all();
     }
@@ -382,6 +408,9 @@ private:
 
   void mark_comm_fault()
   {
+    if (!drive_ready_.load()) {
+      return;
+    }
     bool was_fault = false;
     {
       std::lock_guard<std::mutex> lock(feedback_mutex_);
@@ -522,12 +551,6 @@ private:
 
     if (write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame))) {
       RCLCPP_INFO(get_logger(), "Set motor origin (current position = 0).");
-      if (!wait_for_feedback(std::chrono::milliseconds(200))) {
-        RCLCPP_WARN(
-          get_logger(),
-          "No MIT feedback after set origin on can_id=%d (RX thread may still be starting).",
-          can_id_);
-      }
     } else {
       RCLCPP_ERROR(get_logger(), "Failed to set motor origin.");
     }
@@ -584,6 +607,10 @@ private:
     }
 
     if (soft_mode_) {
+      return;
+    }
+
+    if (!drive_ready_.load()) {
       return;
     }
 
@@ -665,6 +692,9 @@ private:
   std::string can_interface_{"can0"};
   double tx_rate_hz_{kDefaultTxRateHz};
   int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
+  int startup_feedback_timeout_ms_{kDefaultStartupFeedbackTimeoutMs};
+  bool use_can_filters_{false};
+  std::atomic<bool> drive_ready_{false};
 
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
