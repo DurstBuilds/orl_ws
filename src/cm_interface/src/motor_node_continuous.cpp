@@ -6,8 +6,6 @@
 #include <cmath>
 #include <cerrno>
 #include <cstring>
-#include <iomanip>
-#include <sstream>
 #include <string>
 
 #include <poll.h>
@@ -348,12 +346,6 @@ private:
       return;
     }
 
-    const int apply_bit = (p_int & kPositionApplyBit) ? 1 : 0;
-    RCLCPP_INFO(
-      get_logger(),
-      "Sent MIT cmd: dP=%.3f apply=%d p_packed=0x%04X V=%.3f KP=%.3f KD=%.3f T=%.3f",
-      p_delta_limited, apply_bit, p_int & 0xFFFF, v_des, kp, kd, t_ff);
-
     read_mit_feedback();
   }
 
@@ -445,20 +437,25 @@ private:
 
       MitFeedback fb;
       if (fb.unpack_reply(frame, can_id_, profile_)) {
+        if (fb.error_code != 0) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 5000,
+            "can_id=%d MIT fault: %s (code %d)",
+            can_id_, mit_error_string(fb.error_code), fb.error_code);
+        }
         publish_motor_state(fb);
-        log_mit_feedback(fb);
         return;
       }
     }
 
     if (!saw_any_frame) {
-      RCLCPP_WARN(
-        get_logger(),
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
         "No MIT feedback within %d ms for can_id=%d (no CAN frames on bus).",
         kPollTimeoutMs, can_id_);
     } else {
-      RCLCPP_WARN(
-        get_logger(),
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
         "No MIT feedback within %d ms for can_id=%d. Last frame arb_id=%d data[0]=0x%02X "
         "(feedback may use master ID 0 with motor ID in data[0] low nibble).",
         kPollTimeoutMs, can_id_, last_arb_id, last_data0);
@@ -477,24 +474,6 @@ private:
     state_publisher_->publish(msg);
     last_position_rad_ = fb.position_rad;
     has_last_position_ = true;
-  }
-
-  void log_mit_feedback(const MitFeedback & fb)
-  {
-    const double position_deg = fb.position_rad * 180.0 / M_PI;
-
-    std::ostringstream out;
-    out << std::fixed << std::setprecision(4);
-    out << "\n========== " << profile_.name << " MIT Feedback ==========\n";
-    out << "Drive ID:      " << fb.drive_id << '\n';
-    out << "Position:      " << fb.position_rad << " rad  (" << position_deg << " deg)\n";
-    out << "Velocity:      " << fb.velocity_rad_s << " rad/s\n";
-    out << "Torque:        " << fb.torque_nm << " Nm\n";
-    out << "Temperature:   " << fb.temperature_c << " C\n";
-    out << "Error code:    " << fb.error_code << " (" << mit_error_string(fb.error_code) << ")\n";
-    out << "==========================================";
-
-    RCLCPP_INFO(get_logger(), "%s", out.str().c_str());
   }
 
   void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
@@ -522,7 +501,7 @@ private:
           send_soft_release_hold_command(0.0f);
         }
       }
-      RCLCPP_WARN(
+      RCLCPP_INFO(
         get_logger(),
         "soft_mode=%s; %s",
         soft_mode_ ? "true" : "false",
