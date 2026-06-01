@@ -22,9 +22,9 @@ BOOM_MOTOR_STACKS = (
     },
     {
         'ns': 'hip_motor',
-        'gear_ratio': 30.0,
+        'gear_ratio': 33.0,
         'motor_model': 'ak70_10',
-        'can_id': 3,  # Revert to 3 for testing
+        'can_id': 3,
         'joint_angle_limit_deg': 45.0,
     },
     {
@@ -104,6 +104,12 @@ def _motor_stack_group(stack: dict) -> GroupAction:
                 'can_id': stack['can_id'],
                 'max_torque': ParameterValue(
                     LaunchConfiguration('max_torque'), value_type=float
+                ),
+                'tx_rate_hz': ParameterValue(
+                    LaunchConfiguration('motor_tx_rate_hz'), value_type=float
+                ),
+                'feedback_timeout_ms': ParameterValue(
+                    LaunchConfiguration('motor_feedback_timeout_ms'), value_type=int
                 ),
             }],
         ),
@@ -220,6 +226,16 @@ def generate_launch_description():
             'motor_error_tolerance',
             default_value='0.001',
             description='Motor-space goal/hold tolerance (rad) for joint_translator_node.',
+        ),
+        DeclareLaunchArgument(
+            'motor_tx_rate_hz',
+            default_value='200.0',
+            description='MIT command TX rate per motor_node_continuous (Hz).',
+        ),
+        DeclareLaunchArgument(
+            'motor_feedback_timeout_ms',
+            default_value='100',
+            description='No fresh feedback for this long (ms) triggers comm fault hold.',
         ),
         DeclareLaunchArgument(
             'namespaces',

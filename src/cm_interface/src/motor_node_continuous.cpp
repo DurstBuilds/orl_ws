@@ -1,12 +1,17 @@
 // motor_node_continuous: MIT commands for continuous (delta position) firmware.
 // Position field bit 15: 0 = hold, 1 = apply new command. Lower 15 bits encode delta.
-// Hold when p_delta, v_des, and t_ff are all zero. Sends every motor_command (no dedup).
+// CAN RX runs on a dedicated thread with kernel filters; TX is rate-limited and uses the
+// latest motor_command only (no per-callback blocking read or RX drain).
 
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cerrno>
 #include <cstring>
+#include <mutex>
 #include <string>
+#include <thread>
 
 #include <poll.h>
 #include <unistd.h>
@@ -26,12 +31,15 @@ namespace
 {
 
 constexpr int kDefaultCanId = 0;
+constexpr int kDefaultMasterCanId = 0;
 constexpr float kCmdZeroEps = 1e-6f;
 constexpr float kSoftModeKd = 0.025f;
 constexpr float kSoftReleaseKp = 0.5f;
 constexpr float kDefaultMaxTorqueNm = 10.0f;
-
-// Bit 15 of the 16-bit position field in the MIT command
+constexpr double kDefaultTxRateHz = 200.0;
+constexpr int kDefaultFeedbackTimeoutMs = 100;
+constexpr int kCanRxSocketTimeoutMs = 100;
+constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 constexpr int kPositionApplyBit = 0x8000;
 
 const char * mit_error_string(int code)
@@ -67,7 +75,6 @@ float uint_to_float(int x_int, float x_min, float x_max, int bits)
   return static_cast<float>(x_int) * span / static_cast<float>((1 << bits) - 1) + x_min;
 }
 
-// SocketCAN arbitration ID (standard or extended, flags stripped).
 int arbitration_id_from_frame(const struct can_frame & frame)
 {
   const canid_t raw = frame.can_id;
@@ -77,7 +84,6 @@ int arbitration_id_from_frame(const struct can_frame & frame)
   return static_cast<int>(raw & CAN_SFF_MASK);
 }
 
-// Motor drive ID encoded in MIT feedback DATA[0] (full byte or low nibble + ERR high nibble).
 int motor_id_from_feedback_data(uint8_t data0, int expected_drive_id)
 {
   const int id_low_nibble = static_cast<int>(data0 & 0x0F);
@@ -87,9 +93,6 @@ int motor_id_from_feedback_data(uint8_t data0, int expected_drive_id)
   return static_cast<int>(data0);
 }
 
-// True when this frame is MIT feedback for expected_drive_id.
-// Commands use the motor CAN ID; feedback may use the same ID (AK70-style) or the
-// master ID (default 0) with the motor ID in DATA[0] (GL / AK gimbal-style manual §5.4).
 bool feedback_frame_matches_drive(const struct can_frame & frame, int expected_drive_id)
 {
   if (frame.can_dlc < 7) {
@@ -102,7 +105,6 @@ bool feedback_frame_matches_drive(const struct can_frame & frame, int expected_d
     return false;
   }
 
-  constexpr int kDefaultMasterCanId = 0;
   return arb_id == expected_drive_id || arb_id == kDefaultMasterCanId;
 }
 
@@ -143,6 +145,9 @@ struct MitFeedback
   }
 };
 
+using SteadyClock = std::chrono::steady_clock;
+using SteadyTime = SteadyClock::time_point;
+
 }  // namespace
 
 class MotorNodeContinuous : public rclcpp::Node
@@ -154,8 +159,12 @@ public:
     const std::string motor_model = declare_parameter<std::string>(
       "motor_model", "ak70_10");
     can_id_ = declare_parameter<int>("can_id", kDefaultCanId);
+    can_interface_ = declare_parameter<std::string>("can_interface", "can0");
     max_torque_nm_ = static_cast<float>(declare_parameter<double>(
       "max_torque", static_cast<double>(kDefaultMaxTorqueNm)));
+    tx_rate_hz_ = declare_parameter<double>("tx_rate_hz", kDefaultTxRateHz);
+    feedback_timeout_ms_ = declare_parameter<int>(
+      "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
     if (!get_parameter("can_id", can_id_)) {
       throw std::runtime_error("Failed to read can_id parameter");
     }
@@ -165,6 +174,12 @@ public:
     }
     if (max_torque_nm_ <= 0.0f) {
       throw std::invalid_argument("max_torque must be > 0");
+    }
+    if (tx_rate_hz_ <= 0.0) {
+      throw std::invalid_argument("tx_rate_hz must be > 0");
+    }
+    if (feedback_timeout_ms_ <= 0) {
+      throw std::invalid_argument("feedback_timeout_ms must be > 0");
     }
 
     try {
@@ -176,43 +191,19 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "Motor model: %s | can_id: %d | position [%.3f, %.3f] rad | velocity [%.1f, %.1f] rad/s | "
-      "torque [%.1f, %.1f] Nm | max_torque=%.2f Nm",
-      profile_.name, can_id_, profile_.p_min, profile_.p_max,
-      profile_.v_min, profile_.v_max, profile_.t_min, profile_.t_max, max_torque_nm_);
+      "Motor model: %s | %s | can_id: %d | tx_rate: %.0f Hz | feedback_timeout: %d ms | "
+      "max_torque=%.2f Nm",
+      profile_.name, can_interface_.c_str(), can_id_, tx_rate_hz_, feedback_timeout_ms_,
+      max_torque_nm_);
 
-    can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
-    if (can_socket_ < 0) {
-      RCLCPP_ERROR(get_logger(), "Failed to create CAN socket.");
+    if (!open_can_socket()) {
       return;
     }
 
-    struct ifreq ifr;
-    std::memset(&ifr, 0, sizeof(ifr));
-    std::strncpy(ifr.ifr_name, "can0", IFNAMSIZ - 1);
-
-    if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) {
-      RCLCPP_ERROR(get_logger(), "can0 not found.");
-      close(can_socket_);
-      can_socket_ = -1;
-      return;
-    }
-
-    struct sockaddr_can addr;
-    std::memset(&addr, 0, sizeof(addr));
-    addr.can_family = AF_CAN;
-    addr.can_ifindex = ifr.ifr_ifindex;
-
-    if (bind(can_socket_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
-      RCLCPP_ERROR(get_logger(), "Bind failed.");
-      close(can_socket_);
-      can_socket_ = -1;
-      return;
-    }
-
+    const auto cmd_qos = rclcpp::QoS(rclcpp::KeepLast(1)).best_effort();
     subscription_ = create_subscription<motor_interfaces::msg::MotorCommand>(
       "motor_command",
-      10,
+      cmd_qos,
       std::bind(&MotorNodeContinuous::motor_command_callback, this, std::placeholders::_1));
 
     soft_mode_sub_ = create_subscription<std_msgs::msg::Bool>(
@@ -222,19 +213,197 @@ public:
 
     state_publisher_ = create_publisher<motor_interfaces::msg::MotorState>("motor_state", 10);
 
+    rx_running_ = true;
+    rx_thread_ = std::thread(&MotorNodeContinuous::can_rx_thread_main, this);
+
+    const auto tx_period = std::chrono::duration<double>(1.0 / tx_rate_hz_);
+    tx_timer_ = create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(tx_period),
+      std::bind(&MotorNodeContinuous::tx_timer_callback, this));
+
     enable_motor();
     set_motor_origin();
   }
 
   ~MotorNodeContinuous() override
   {
+    rx_running_ = false;
+    if (can_socket_ >= 0) {
+      shutdown(can_socket_, SHUT_RDWR);
+    }
+    if (rx_thread_.joinable()) {
+      rx_thread_.join();
+    }
     disable_motor();
     if (can_socket_ >= 0) {
       close(can_socket_);
+      can_socket_ = -1;
     }
   }
 
 private:
+  bool open_can_socket()
+  {
+    can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
+    if (can_socket_ < 0) {
+      RCLCPP_ERROR(get_logger(), "Failed to create CAN socket.");
+      return false;
+    }
+
+    const int recv_buf = kDefaultCanRxBufferBytes;
+    setsockopt(
+      can_socket_, SOL_SOCKET, SO_RCVBUF, &recv_buf, sizeof(recv_buf));
+
+    struct ifreq ifr;
+    std::memset(&ifr, 0, sizeof(ifr));
+    std::strncpy(ifr.ifr_name, can_interface_.c_str(), IFNAMSIZ - 1);
+
+    if (ioctl(can_socket_, SIOCGIFINDEX, &ifr) < 0) {
+      RCLCPP_ERROR(get_logger(), "%s not found.", can_interface_.c_str());
+      close(can_socket_);
+      can_socket_ = -1;
+      return false;
+    }
+
+    struct sockaddr_can addr;
+    std::memset(&addr, 0, sizeof(addr));
+    addr.can_family = AF_CAN;
+    addr.can_ifindex = ifr.ifr_ifindex;
+
+    if (bind(can_socket_, reinterpret_cast<struct sockaddr *>(&addr), sizeof(addr)) < 0) {
+      RCLCPP_ERROR(get_logger(), "Bind failed on %s.", can_interface_.c_str());
+      close(can_socket_);
+      can_socket_ = -1;
+      return false;
+    }
+
+    if (!install_can_filters()) {
+      close(can_socket_);
+      can_socket_ = -1;
+      return false;
+    }
+
+    return true;
+  }
+
+  bool install_can_filters()
+  {
+    struct can_filter filters[2];
+    filters[0].can_id = static_cast<canid_t>(can_id_);
+    filters[0].can_mask = CAN_SFF_MASK;
+    filters[1].can_id = static_cast<canid_t>(kDefaultMasterCanId);
+    filters[1].can_mask = CAN_SFF_MASK;
+
+    if (setsockopt(
+        can_socket_, SOL_CAN_RAW, CAN_RAW_FILTER, filters, sizeof(filters)) < 0)
+    {
+      RCLCPP_ERROR(
+        get_logger(), "Failed to set CAN filters for can_id=%d: %s",
+        can_id_, std::strerror(errno));
+      return false;
+    }
+    return true;
+  }
+
+  void can_rx_thread_main()
+  {
+    while (rx_running_) {
+      struct pollfd pfd{};
+      pfd.fd = can_socket_;
+      pfd.events = POLLIN;
+
+      const int poll_result = poll(&pfd, 1, kCanRxSocketTimeoutMs);
+      if (poll_result < 0) {
+        if (errno == EINTR) {
+          continue;
+        }
+        if (rx_running_) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 5000,
+            "CAN RX poll error on can_id=%d: %s", can_id_, std::strerror(errno));
+        }
+        continue;
+      }
+      if (poll_result == 0) {
+        continue;
+      }
+
+      struct can_frame frame{};
+      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
+      if (nbytes < 0) {
+        if (errno == EINTR || !rx_running_) {
+          continue;
+        }
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "CAN RX read error on can_id=%d: %s", can_id_, std::strerror(errno));
+        continue;
+      }
+      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+        continue;
+      }
+
+      MitFeedback fb;
+      if (!fb.unpack_reply(frame, can_id_, profile_)) {
+        continue;
+      }
+
+      if (fb.error_code != 0) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 5000,
+          "can_id=%d MIT fault: %s (code %d)",
+          can_id_, mit_error_string(fb.error_code), fb.error_code);
+      }
+
+      {
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
+        last_feedback_time_ = SteadyClock::now();
+        has_feedback_ = true;
+        comm_fault_ = false;
+        last_position_rad_ = fb.position_rad;
+        has_last_position_ = true;
+      }
+
+      publish_motor_state(fb);
+      feedback_cv_.notify_all();
+    }
+  }
+
+  bool feedback_is_fresh()
+  {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
+    if (!has_feedback_) {
+      return false;
+    }
+    const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      SteadyClock::now() - last_feedback_time_).count();
+    return age_ms <= feedback_timeout_ms_;
+  }
+
+  void mark_comm_fault()
+  {
+    bool was_fault = false;
+    {
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      was_fault = comm_fault_;
+      comm_fault_ = true;
+    }
+    if (!was_fault) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "can_id=%d comm fault: no fresh MIT feedback for %d ms; holding motor command at zero",
+        can_id_, feedback_timeout_ms_);
+    }
+  }
+
+  bool wait_for_feedback(std::chrono::milliseconds timeout)
+  {
+    std::unique_lock<std::mutex> lock(feedback_mutex_);
+    return feedback_cv_.wait_for(lock, timeout, [this]() {
+      return has_feedback_;
+    });
+  }
+
   int pack_position_continuous(float p_delta, float v_des, float t_ff, bool force_apply = false) const
   {
     const bool hold = std::fabs(p_delta) < kCmdZeroEps &&
@@ -246,6 +415,49 @@ private:
       p_int |= kPositionApplyBit;
     }
     return p_int;
+  }
+
+  bool write_mit_frame(
+    float p_delta, float v_des, float kp, float kd, float t_ff, bool force_apply = false)
+  {
+    if (can_socket_ < 0) {
+      return false;
+    }
+
+    const float p_delta_limited = clamp_position_delta_for_torque(p_delta, kp);
+
+    const int p_int = pack_position_continuous(p_delta_limited, v_des, t_ff, force_apply);
+    const int v_int = float_to_uint(v_des, profile_.v_min, profile_.v_max, 12);
+    const int kp_int = float_to_uint(kp, profile_.kp_min, profile_.kp_max, 12);
+    const int kd_int = float_to_uint(kd, profile_.kd_min, profile_.kd_max, 12);
+    const int t_int = float_to_uint(t_ff, profile_.t_min, profile_.t_max, 12);
+
+    struct can_frame frame{};
+    frame.can_id = static_cast<canid_t>(can_id_);
+    frame.can_dlc = 8;
+
+    frame.data[0] = static_cast<uint8_t>(p_int >> 8);
+    frame.data[1] = p_int & 0xFF;
+    frame.data[2] = v_int >> 4;
+    frame.data[3] = ((v_int & 0xF) << 4) | (kp_int >> 8);
+    frame.data[4] = kp_int & 0xFF;
+    frame.data[5] = kd_int >> 4;
+    frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
+    frame.data[7] = t_int & 0xFF;
+
+    if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
+      RCLCPP_ERROR_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Failed to send MIT command on can_id=%d.", can_id_);
+      return false;
+    }
+    return true;
+  }
+
+  void send_mit_command(
+    float p_delta, float v_des, float kp, float kd, float t_ff, bool force_apply = false)
+  {
+    write_mit_frame(p_delta, v_des, kp, kd, t_ff, force_apply);
   }
 
   void enable_motor()
@@ -310,61 +522,14 @@ private:
 
     if (write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame))) {
       RCLCPP_INFO(get_logger(), "Set motor origin (current position = 0).");
-      read_mit_feedback();
+      if (!wait_for_feedback(std::chrono::milliseconds(200))) {
+        RCLCPP_WARN(
+          get_logger(),
+          "No MIT feedback after set origin on can_id=%d (RX thread may still be starting).",
+          can_id_);
+      }
     } else {
       RCLCPP_ERROR(get_logger(), "Failed to set motor origin.");
-    }
-  }
-
-  void send_mit_command(
-    float p_delta, float v_des, float kp, float kd, float t_ff, bool force_apply = false)
-  {
-    drain_pending_can_frames();
-    const float p_delta_limited = clamp_position_delta_for_torque(p_delta, kp);
-
-    const int p_int = pack_position_continuous(p_delta_limited, v_des, t_ff, force_apply);
-    const int v_int = float_to_uint(v_des, profile_.v_min, profile_.v_max, 12);
-    const int kp_int = float_to_uint(kp, profile_.kp_min, profile_.kp_max, 12);
-    const int kd_int = float_to_uint(kd, profile_.kd_min, profile_.kd_max, 12);
-    const int t_int = float_to_uint(t_ff, profile_.t_min, profile_.t_max, 12);
-
-    struct can_frame frame{};
-    frame.can_id = static_cast<canid_t>(can_id_);
-    frame.can_dlc = 8;
-
-    frame.data[0] = static_cast<uint8_t>(p_int >> 8);
-    frame.data[1] = p_int & 0xFF;
-    frame.data[2] = v_int >> 4;
-    frame.data[3] = ((v_int & 0xF) << 4) | (kp_int >> 8);
-    frame.data[4] = kp_int & 0xFF;
-    frame.data[5] = kd_int >> 4;
-    frame.data[6] = ((kd_int & 0xF) << 4) | (t_int >> 8);
-    frame.data[7] = t_int & 0xFF;
-
-    if (write(can_socket_, &frame, sizeof(frame)) != static_cast<ssize_t>(sizeof(frame))) {
-      RCLCPP_ERROR(get_logger(), "Failed to send MIT command.");
-      return;
-    }
-
-    read_mit_feedback();
-  }
-
-  void drain_pending_can_frames()
-  {
-    if (can_socket_ < 0) {
-      return;
-    }
-
-    struct pollfd pfd{};
-    pfd.fd = can_socket_;
-    pfd.events = POLLIN;
-
-    while (poll(&pfd, 1, 0) > 0) {
-      struct can_frame frame{};
-      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
-      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
-        break;
-      }
     }
   }
 
@@ -383,85 +548,6 @@ private:
     return p_delta;
   }
 
-  void read_mit_feedback()
-  {
-    constexpr int kPollTimeoutMs = 50;
-    const auto deadline = std::chrono::steady_clock::now() +
-      std::chrono::milliseconds(kPollTimeoutMs);
-
-    bool saw_any_frame = false;
-    int last_arb_id = -1;
-    uint8_t last_data0 = 0;
-
-    while (rclcpp::ok() && std::chrono::steady_clock::now() < deadline) {
-      const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - std::chrono::steady_clock::now()).count();
-
-      if (remaining_ms <= 0) {
-        break;
-      }
-
-      struct pollfd pfd{};
-      pfd.fd = can_socket_;
-      pfd.events = POLLIN;
-
-      const int poll_result = poll(&pfd, 1, static_cast<int>(remaining_ms));
-      if (poll_result < 0) {
-        if (errno == EINTR) {
-          continue;
-        }
-        RCLCPP_WARN(
-          get_logger(), "poll() while waiting for MIT feedback: %s",
-          std::strerror(errno));
-        return;
-      }
-      if (poll_result == 0) {
-        break;
-      }
-
-      struct can_frame frame{};
-      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
-      if (nbytes < 0) {
-        RCLCPP_WARN(
-          get_logger(), "read() while waiting for MIT feedback: %s",
-          std::strerror(errno));
-        return;
-      }
-      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
-        continue;
-      }
-
-      saw_any_frame = true;
-      last_arb_id = arbitration_id_from_frame(frame);
-      last_data0 = frame.data[0];
-
-      MitFeedback fb;
-      if (fb.unpack_reply(frame, can_id_, profile_)) {
-        if (fb.error_code != 0) {
-          RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 5000,
-            "can_id=%d MIT fault: %s (code %d)",
-            can_id_, mit_error_string(fb.error_code), fb.error_code);
-        }
-        publish_motor_state(fb);
-        return;
-      }
-    }
-
-    if (!saw_any_frame) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 5000,
-        "No MIT feedback within %d ms for can_id=%d (no CAN frames on bus).",
-        kPollTimeoutMs, can_id_);
-    } else {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 5000,
-        "No MIT feedback within %d ms for can_id=%d. Last frame arb_id=%d data[0]=0x%02X "
-        "(feedback may use master ID 0 with motor ID in data[0] low nibble).",
-        kPollTimeoutMs, can_id_, last_arb_id, last_data0);
-    }
-  }
-
   void publish_motor_state(const MitFeedback & fb)
   {
     motor_interfaces::msg::MotorState msg;
@@ -472,8 +558,47 @@ private:
     msg.error_code = fb.error_code;
     msg.drive_id = static_cast<uint8_t>(fb.drive_id);
     state_publisher_->publish(msg);
-    last_position_rad_ = fb.position_rad;
-    has_last_position_ = true;
+  }
+
+  void store_pending_command(const motor_interfaces::msg::MotorCommand & msg)
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    pending_command_ = msg;
+    has_pending_command_ = true;
+  }
+
+  bool get_latest_command(motor_interfaces::msg::MotorCommand & out)
+  {
+    std::lock_guard<std::mutex> lock(command_mutex_);
+    if (!has_pending_command_) {
+      return false;
+    }
+    out = pending_command_;
+    return true;
+  }
+
+  void tx_timer_callback()
+  {
+    if (can_socket_ < 0) {
+      return;
+    }
+
+    if (soft_mode_) {
+      return;
+    }
+
+    if (!feedback_is_fresh()) {
+      mark_comm_fault();
+      write_mit_frame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
+      return;
+    }
+
+    motor_interfaces::msg::MotorCommand cmd;
+    if (!get_latest_command(cmd)) {
+      return;
+    }
+
+    write_mit_frame(cmd.position, cmd.velocity, cmd.kp, cmd.kd, cmd.torque, false);
   }
 
   void motor_command_callback(const motor_interfaces::msg::MotorCommand::SharedPtr msg)
@@ -481,7 +606,7 @@ private:
     if (soft_mode_) {
       return;
     }
-    send_mit_command(msg->position, msg->velocity, msg->kp, msg->kd, msg->torque);
+    store_pending_command(*msg);
   }
 
   void soft_mode_callback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -489,17 +614,28 @@ private:
     if (soft_mode_ != msg->data) {
       soft_mode_ = msg->data;
       if (soft_mode_) {
-        soft_mode_on_position_rad_ = last_position_rad_;
-        has_soft_mode_on_position_ = has_last_position_;
+        {
+          std::lock_guard<std::mutex> lock(feedback_mutex_);
+          soft_mode_on_position_rad_ = last_position_rad_;
+          has_soft_mode_on_position_ = has_last_position_;
+        }
+        {
+          std::lock_guard<std::mutex> lock(command_mutex_);
+          has_pending_command_ = false;
+        }
         send_soft_mode_command();
       } else {
         send_zero_mit_command();
-        if (has_soft_mode_on_position_ && has_last_position_) {
-          const float p_delta = last_position_rad_ - soft_mode_on_position_rad_;
-          send_soft_release_hold_command(p_delta);
-        } else {
-          send_soft_release_hold_command(0.0f);
+        float p_delta = 0.0f;
+        bool use_delta = false;
+        {
+          std::lock_guard<std::mutex> lock(feedback_mutex_);
+          use_delta = has_soft_mode_on_position_ && has_last_position_;
+          if (use_delta) {
+            p_delta = last_position_rad_ - soft_mode_on_position_rad_;
+          }
         }
+        send_soft_release_hold_command(use_delta ? p_delta : 0.0f);
       }
       RCLCPP_INFO(
         get_logger(),
@@ -511,34 +647,49 @@ private:
 
   void send_soft_mode_command()
   {
-    // Force apply so the KD-only frame is latched even with zero delta/velocity/torque.
-    send_mit_command(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, false);
+    write_mit_frame(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, false);
   }
 
   void send_zero_mit_command()
   {
-    // Blank zero MIT message requested on soft-mode OFF transition.
-    send_mit_command(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
+    write_mit_frame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
   }
 
   void send_soft_release_hold_command(float p_delta)
   {
-    // Re-acquire hold by shifting target using observed movement during soft mode.
-    // Low Kp avoids snapping back aggressively.
-    send_mit_command(p_delta, 0.0f, kSoftReleaseKp, 0.0f, 0.0f, true);
+    write_mit_frame(p_delta, 0.0f, kSoftReleaseKp, 0.0f, 0.0f, true);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   int can_id_{kDefaultCanId};
+  std::string can_interface_{"can0"};
+  double tx_rate_hz_{kDefaultTxRateHz};
+  int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
+
   rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr subscription_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_publisher_;
+  rclcpp::TimerBase::SharedPtr tx_timer_;
+
   int can_socket_{-1};
-  bool soft_mode_{false};
+  std::atomic<bool> rx_running_{false};
+  std::thread rx_thread_;
+
+  mutable std::mutex command_mutex_;
+  motor_interfaces::msg::MotorCommand pending_command_;
+  bool has_pending_command_{false};
+
+  std::mutex feedback_mutex_;
+  std::condition_variable feedback_cv_;
+  SteadyTime last_feedback_time_{};
+  bool has_feedback_{false};
+  bool comm_fault_{false};
   float last_position_rad_{0.0f};
   bool has_last_position_{false};
   float soft_mode_on_position_rad_{0.0f};
   bool has_soft_mode_on_position_{false};
+
+  bool soft_mode_{false};
   float max_torque_nm_{kDefaultMaxTorqueNm};
 };
 

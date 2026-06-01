@@ -151,8 +151,11 @@ Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to cur
 
 ## motor_node_continuous
 
-- **Parameters**: `motor_model`, `can_id`, `max_torque` (Nm; clamps `|kp * deltaP|`).
-- Expects CAN interface up (e.g. `can0`) and drives configured for MIT mode.
+- **Parameters**: `motor_model`, `can_id`, `can_interface` (default `can0`), `max_torque` (Nm; clamps `|kp * deltaP|`), `tx_rate_hz` (default 200), `feedback_timeout_ms` (default 100).
+- Dedicated CAN RX thread with kernel filters (only this drive’s ID + master ID 0).
+- `motor_command` uses QoS depth 1; TX timer sends the latest command (no blocking feedback read per callback).
+- On comm fault (stale feedback), commands are forced to zero until feedback recovers.
+- Expects CAN interface up and drives configured for MIT mode.
 
 ## Logging (boom_stack)
 
