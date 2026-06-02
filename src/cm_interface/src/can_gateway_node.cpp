@@ -89,6 +89,7 @@ public:
     bool has_last_position{false};
     float soft_mode_on_position_rad{0.0f};
     bool has_soft_mode_on_position{false};
+    bool pending_soft_origin_reset{false};
   };
 
   CanGatewayNode()
@@ -394,6 +395,20 @@ private:
     write_frame(frame);
   }
 
+  void process_pending_soft_origin_resets()
+  {
+    for (auto & ch : drives_) {
+      if (!ch.pending_soft_origin_reset) {
+        continue;
+      }
+      ch.pending_soft_origin_reset = false;
+      send_set_origin(ch, startup_origin_poll_ms_);
+      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+      RCLCPP_INFO(
+        get_logger(), "[%s] soft_mode off: origin reset at current position", ch.ns.c_str());
+    }
+  }
+
   bool send_set_origin(DriveChannel & ch, int feedback_poll_ms = kOriginFeedbackPollMs)
   {
     struct can_frame frame{};
@@ -535,6 +550,7 @@ private:
     }
 
     process_pending_rx();
+    process_pending_soft_origin_resets();
 
     for (auto & ch : drives_) {
       service_drive_tx(ch);
@@ -569,6 +585,7 @@ private:
       send_mit(*ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
     } else {
       ch->has_pending_command = false;
+      ch->pending_soft_origin_reset = true;
       send_mit(*ch, 0.0f, 0.0f, 0.0f, ch->profile.mit_kd, 0.0f, true);
     }
 

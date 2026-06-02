@@ -6,6 +6,7 @@
 #include "rclcpp/rclcpp.hpp"
 #include "motor_interfaces/msg/motor_state.hpp"
 #include "motor_interfaces/msg/motor_total_position.hpp"
+#include "std_msgs/msg/bool.hpp"
 
 namespace
 {
@@ -33,19 +34,45 @@ public:
       10,
       std::bind(&MotorUnwrapperNode::motor_state_callback, this, std::placeholders::_1));
 
+    soft_mode_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "soft_mode",
+      10,
+      std::bind(&MotorUnwrapperNode::soft_mode_callback, this, std::placeholders::_1));
+
     publisher_ = create_publisher<motor_interfaces::msg::MotorTotalPosition>(
       "motor_total_position", 10);
 
     RCLCPP_INFO(
       get_logger(),
-      "Subscribed to motor_state; publishing motor_total_position "
+      "Subscribed to motor_state and soft_mode; publishing motor_total_position "
       "(unwrap range [-pi, pi]).");
   }
 
 private:
+  void soft_mode_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (soft_mode_ && !msg->data) {
+      reset_total_on_next_feedback_ = true;
+    }
+    soft_mode_ = msg->data;
+  }
+
   void motor_state_callback(const motor_interfaces::msg::MotorState::SharedPtr msg)
   {
     const float new_wrapped = msg->position;
+
+    if (reset_total_on_next_feedback_) {
+      reset_total_on_next_feedback_ = false;
+      total_position_ = new_wrapped;
+      last_wrapped_ = new_wrapped;
+      has_last_ = true;
+      RCLCPP_INFO(
+        get_logger(),
+        "soft_mode off: reset total position to wrapped %.4f rad",
+        new_wrapped);
+      publish_total(new_wrapped);
+      return;
+    }
 
     if (has_last_ && std::fabs(new_wrapped - last_wrapped_) < kPositionEps) {
       return;
@@ -72,16 +99,24 @@ private:
       last_wrapped_ = new_wrapped;
     }
 
+    publish_total(new_wrapped);
+  }
+
+  void publish_total(float wrapped_position)
+  {
     motor_interfaces::msg::MotorTotalPosition out;
-    out.wrapped_position = new_wrapped;
+    out.wrapped_position = wrapped_position;
     out.total_position = total_position_;
     publisher_->publish(out);
   }
 
   rclcpp::Subscription<motor_interfaces::msg::MotorState>::SharedPtr subscription_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorTotalPosition>::SharedPtr publisher_;
 
   bool has_last_{false};
+  bool soft_mode_{false};
+  bool reset_total_on_next_feedback_{false};
   float last_wrapped_{0.0f};
   float total_position_{0.0f};
 };

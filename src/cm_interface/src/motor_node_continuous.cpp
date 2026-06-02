@@ -736,6 +736,7 @@ private:
           std::lock_guard<std::mutex> lock(command_mutex_);
           has_pending_command_ = false;
         }
+        set_motor_origin();
         write_mit_frame(0.0f, 0.0f, 0.0f, profile_.mit_kd, 0.0f, true);
       }
       RCLCPP_INFO(
@@ -743,7 +744,7 @@ private:
         "soft_mode=%s; %s",
         soft_mode_ ? "true" : "false",
         soft_mode_ ? "ignoring motor_command and sending KD only" :
-        "hold at current position; awaiting new command");
+        "origin reset at current position; awaiting new command");
     }
   }
 

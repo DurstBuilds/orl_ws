@@ -145,6 +145,7 @@ private:
     bool has_velocity{false};
     bool has_despos{false};
     bool at_goal_latched{false};
+    bool awaiting_post_soft_latch{false};
   };
 
   ControlState read_state()
@@ -153,7 +154,7 @@ private:
     return ControlState{
       total_position_, motor_velocity_, joint_despos_, soft_mode_, hold_joint_,
       has_hold_joint_, has_total_position_, has_motor_velocity_, has_joint_despos_,
-      at_goal_latched_};
+      at_goal_latched_, awaiting_post_soft_latch_};
   }
 
   void motor_total_position_callback(
@@ -165,6 +166,18 @@ private:
       std::lock_guard<std::mutex> lock(state_mutex_);
       total_position_ = msg->total_position;
       has_total_position_ = true;
+      if (awaiting_post_soft_latch_ && !soft_mode_) {
+        joint_despos_ = clamp_joint_despos(
+          total_position_ / static_cast<float>(gear_ratio_));
+        has_joint_despos_ = true;
+        at_goal_latched_ = true;
+        awaiting_post_soft_latch_ = false;
+        has_prev_motor_error_ = false;
+        RCLCPP_INFO(
+          get_logger(),
+          "soft_mode off: latched joint_despos=%.4f at current position",
+          joint_despos_);
+      }
     }
 
     std_msgs::msg::Float32 out;
@@ -234,11 +247,10 @@ private:
     if (soft_mode_ != msg->data) {
       const bool was_soft_mode = soft_mode_;
       soft_mode_ = msg->data;
-      if (was_soft_mode && !soft_mode_ && has_total_position_) {
-        joint_despos_ = clamp_joint_despos(
-          total_position_ / static_cast<float>(gear_ratio_));
-        has_joint_despos_ = true;
-        at_goal_latched_ = true;
+      if (was_soft_mode && !soft_mode_) {
+        awaiting_post_soft_latch_ = true;
+        has_prev_motor_error_ = false;
+        reset_velocity_ramp();
       }
       RCLCPP_INFO(get_logger(), "soft_mode=%s", soft_mode_ ? "true" : "false");
     }
@@ -400,12 +412,29 @@ private:
     motor_command_pub_->publish(cmd);
   }
 
+  void publish_motor_damping_hold()
+  {
+    motor_interfaces::msg::MotorCommand cmd;
+    cmd.position = 0.0f;
+    cmd.velocity = 0.0f;
+    cmd.torque = 0.0f;
+    cmd.kp = 0.0f;
+    cmd.kd = clamp(static_cast<float>(mit_kd_), 0.0f, kMitKdMax);
+    motor_command_pub_->publish(cmd);
+  }
+
   void loop_timer_callback()
   {
     const auto state = read_state();
 
     if (state.soft_mode) {
       reset_velocity_ramp();
+      return;
+    }
+
+    if (state.awaiting_post_soft_latch) {
+      reset_velocity_ramp();
+      publish_motor_damping_hold();
       return;
     }
 
@@ -529,6 +558,7 @@ private:
   bool has_motor_velocity_{false};
   bool has_joint_despos_{false};
   bool at_goal_latched_{false};
+  bool awaiting_post_soft_latch_{false};
   float prev_motor_error_{0.0f};
   bool has_prev_motor_error_{false};
 
