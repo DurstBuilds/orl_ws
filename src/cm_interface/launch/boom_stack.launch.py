@@ -202,6 +202,18 @@ def _launch_setup(context, *args, **kwargs):
                     'startup_stagger_ms': ParameterValue(
                         LaunchConfiguration('gateway_startup_stagger_ms'), value_type=int
                     ),
+                    'enable_settle_ms': ParameterValue(
+                        LaunchConfiguration('gateway_enable_settle_ms'), value_type=int
+                    ),
+                    'ak80_enable_settle_ms': ParameterValue(
+                        LaunchConfiguration('gateway_ak80_enable_settle_ms'), value_type=int
+                    ),
+                    'startup_origin_poll_ms': ParameterValue(
+                        LaunchConfiguration('gateway_startup_origin_poll_ms'), value_type=int
+                    ),
+                    'bus_warmup_ms': ParameterValue(
+                        LaunchConfiguration('gateway_bus_warmup_ms'), value_type=int
+                    ),
                 }],
             )
         )
@@ -317,6 +329,26 @@ def generate_launch_description():
             'gateway_startup_stagger_ms',
             default_value='200',
             description='Delay between each drive enable sequence in can_gateway_node (ms).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_enable_settle_ms',
+            default_value='100',
+            description='Post-enable delay for hip/wheel drives (ms).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_ak80_enable_settle_ms',
+            default_value='250',
+            description='Post-enable delay for knee AK80-64 (ms).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_startup_origin_poll_ms',
+            default_value='100',
+            description='Feedback poll after set-origin during startup (ms).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_bus_warmup_ms',
+            default_value='100',
+            description='Delay after CAN bind before first enable (ms).',
         ),
         DeclareLaunchArgument(
             'motor_tx_rate_hz',

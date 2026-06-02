@@ -1,6 +1,8 @@
 // can_gateway_node: one SocketCAN interface, multiple MIT drives.
 // Replaces one motor_node_continuous per namespace for multi-motor stacks.
 
+#include <algorithm>
+#include <numeric>
 #include <chrono>
 #include <cerrno>
 #include <cstring>
@@ -36,7 +38,10 @@ constexpr double kDefaultLoopRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
 constexpr int kDefaultFeedbackPollMs = 15;
 constexpr int kOriginFeedbackPollMs = 50;
-constexpr int kEnableSettleMs = 50;
+constexpr int kDefaultEnableSettleMs = 100;
+constexpr int kDefaultAk80EnableSettleMs = 250;
+constexpr int kDefaultStartupOriginPollMs = 100;
+constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kDefaultStartupStaggerMs = 200;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 
@@ -99,6 +104,12 @@ public:
     feedback_poll_ms_ = declare_parameter<int>("feedback_poll_ms", kDefaultFeedbackPollMs);
     startup_stagger_ms_ = declare_parameter<int>(
       "startup_stagger_ms", kDefaultStartupStaggerMs);
+    enable_settle_ms_ = declare_parameter<int>("enable_settle_ms", kDefaultEnableSettleMs);
+    ak80_enable_settle_ms_ = declare_parameter<int>(
+      "ak80_enable_settle_ms", kDefaultAk80EnableSettleMs);
+    startup_origin_poll_ms_ = declare_parameter<int>(
+      "startup_origin_poll_ms", kDefaultStartupOriginPollMs);
+    bus_warmup_ms_ = declare_parameter<int>("bus_warmup_ms", kDefaultBusWarmupMs);
 
     const auto namespaces = split_csv(
       declare_parameter<std::string>(
@@ -357,15 +368,23 @@ private:
     return true;
   }
 
-  bool send_enable(const DriveChannel & ch)
+  bool send_enable(const DriveChannel & ch, const char * phase = nullptr)
   {
     struct can_frame frame{};
     cm_interface::pack_control_frame(frame, ch.can_id, 0xFC);
     if (write_frame(frame)) {
-      RCLCPP_INFO(get_logger(), "[%s] can_id=%d enable sent.", ch.ns.c_str(), ch.can_id);
+      if (phase != nullptr && phase[0] != '\0') {
+        RCLCPP_INFO(
+          get_logger(), "[STARTUP] [%s] can_id=%d enable sent (%s).",
+          ch.ns.c_str(), ch.can_id, phase);
+      } else {
+        RCLCPP_INFO(
+          get_logger(), "[STARTUP] [%s] can_id=%d enable sent.",
+          ch.ns.c_str(), ch.can_id);
+      }
       return true;
     }
-    RCLCPP_ERROR(get_logger(), "[%s] can_id=%d enable failed.", ch.ns.c_str(), ch.can_id);
+    RCLCPP_ERROR(get_logger(), "[STARTUP] [%s] can_id=%d enable failed.", ch.ns.c_str(), ch.can_id);
     return false;
   }
 
@@ -376,32 +395,85 @@ private:
     write_frame(frame);
   }
 
-  bool send_set_origin(DriveChannel & ch)
+  bool send_set_origin(DriveChannel & ch, int feedback_poll_ms = kOriginFeedbackPollMs)
   {
     struct can_frame frame{};
     cm_interface::pack_control_frame(frame, ch.can_id, 0xFE);
     if (!write_frame(frame)) {
-      RCLCPP_ERROR(get_logger(), "[%s] set origin failed.", ch.ns.c_str());
+      RCLCPP_ERROR(get_logger(), "[STARTUP] [%s] set origin failed.", ch.ns.c_str());
       return false;
     }
-    RCLCPP_INFO(get_logger(), "[%s] set motor origin.", ch.ns.c_str());
-    poll_bus_feedback(kOriginFeedbackPollMs);
+    RCLCPP_INFO(get_logger(), "[STARTUP] [%s] set motor origin.", ch.ns.c_str());
+    poll_bus_feedback(feedback_poll_ms);
     return true;
+  }
+
+  bool is_ak80_drive(const DriveChannel & ch) const
+  {
+    return std::strcmp(ch.profile.name, "AK80-64") == 0;
+  }
+
+  int enable_settle_ms_for(const DriveChannel & ch) const
+  {
+    return is_ak80_drive(ch) ? ak80_enable_settle_ms_ : enable_settle_ms_;
+  }
+
+  void startup_one_drive(DriveChannel & ch)
+  {
+    const int settle_ms = enable_settle_ms_for(ch);
+    send_enable(ch);
+    std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+    send_set_origin(ch, startup_origin_poll_ms_);
+    send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+    poll_bus_feedback(feedback_poll_ms_);
   }
 
   void startup_all_drives()
   {
-    for (size_t i = 0; i < drives_.size(); ++i) {
+    if (bus_warmup_ms_ > 0) {
+      RCLCPP_INFO(
+        get_logger(), "[STARTUP] Waiting %d ms for %s to settle before enable.",
+        bus_warmup_ms_, can_interface_.c_str());
+      std::this_thread::sleep_for(std::chrono::milliseconds(bus_warmup_ms_));
+    }
+
+    std::vector<size_t> order(drives_.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(), [this](size_t a, size_t b) {
+      return drives_[a].can_id < drives_[b].can_id;
+    });
+
+    std::string order_log;
+    for (size_t i = 0; i < order.size(); ++i) {
+      if (i > 0) {
+        order_log += " -> ";
+      }
+      const auto & ch = drives_[order[i]];
+      order_log += ch.ns + "(can_id=" + std::to_string(ch.can_id) + ")";
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "[STARTUP] Enable order by can_id (knee/AK80-64 last): %s", order_log.c_str());
+
+    for (size_t i = 0; i < order.size(); ++i) {
       if (i > 0 && startup_stagger_ms_ > 0) {
         std::this_thread::sleep_for(std::chrono::milliseconds(startup_stagger_ms_));
       }
-      auto & ch = drives_[i];
-      send_enable(ch);
-      std::this_thread::sleep_for(std::chrono::milliseconds(kEnableSettleMs));
-      send_set_origin(ch);
-      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+      startup_one_drive(drives_[order[i]]);
     }
-    poll_bus_feedback(feedback_poll_ms_);
+
+    for (auto & ch : drives_) {
+      if (!ch.has_feedback) {
+        RCLCPP_WARN(
+          get_logger(),
+          "[STARTUP] [%s] can_id=%d no MIT feedback yet; retrying enable sequence.",
+          ch.ns.c_str(), ch.can_id);
+        startup_one_drive(ch);
+      }
+      RCLCPP_INFO(
+        get_logger(), "[STARTUP] %s can_id=%d feedback=%s",
+        ch.ns.c_str(), ch.can_id, ch.has_feedback ? "active" : "missing");
+    }
   }
 
   bool feedback_is_fresh(const DriveChannel & ch) const
@@ -514,6 +586,10 @@ private:
   int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
   int feedback_poll_ms_{kDefaultFeedbackPollMs};
   int startup_stagger_ms_{kDefaultStartupStaggerMs};
+  int enable_settle_ms_{kDefaultEnableSettleMs};
+  int ak80_enable_settle_ms_{kDefaultAk80EnableSettleMs};
+  int startup_origin_poll_ms_{kDefaultStartupOriginPollMs};
+  int bus_warmup_ms_{kDefaultBusWarmupMs};
   float max_torque_nm_{kDefaultMaxTorqueNm};
 
   std::vector<DriveChannel> drives_;
