@@ -16,10 +16,10 @@
 //
 // Startup: enables drives sorted by can_id (AK80/knee last). Retries enable if
 // no feedback. Soft-mode off triggers set-origin + Kd hold on that drive.
-// loop_timer_callback: routes RX by can_id; re-sends last motor_command each tick
-// until a new command arrives (has_pending_command is not cleared after TX).
-// Staggered startup can leave early-enabled drives with stale last_feedback_time;
-// refresh_all_drive_feedback() runs before the service loop arms comm-fault checks.
+// loop_timer_callback: drain RX, poll for feedback, then service_drive_tx (MIT TX).
+// Comm-fault uses last_feedback_time from the pre-service poll, not from TX this tick.
+// refresh_all_drive_feedback() ends with a final MIT ping + short poll so timestamps
+// are fresh when comm-fault checks arm.
 
 #include <algorithm>
 #include <numeric>
@@ -531,21 +531,30 @@ private:
     refresh_all_drive_feedback();
   }
 
+  void ping_all_drives_for_feedback()
+  {
+    for (auto & ch : drives_) {
+      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+    }
+  }
+
   void refresh_all_drive_feedback()
   {
     // Staggered per-drive startup can age feedback on early drives beyond
-    // feedback_timeout_ms before the first loop tick. Ping all drives and poll
-    // before arming comm-fault detection.
+    // feedback_timeout_ms before the first loop tick. Ping all drives, poll,
+    // then ping again with a short poll so last_feedback_time is current when
+    // the service loop arms comm-fault checks.
     RCLCPP_INFO(
       get_logger(),
       "[STARTUP] Refreshing MIT feedback from all drives before service loop.");
 
-    for (auto & ch : drives_) {
-      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
-    }
+    ping_all_drives_for_feedback();
+    const int discovery_poll_ms = std::max(feedback_timeout_ms_, startup_origin_poll_ms_);
+    poll_bus_feedback(discovery_poll_ms);
+    process_pending_rx();
 
-    const int poll_ms = std::max(feedback_timeout_ms_, startup_origin_poll_ms_);
-    poll_bus_feedback(poll_ms);
+    ping_all_drives_for_feedback();
+    poll_bus_feedback(feedback_poll_ms_);
     process_pending_rx();
 
     bool all_initiated = !drives_.empty();
@@ -560,8 +569,8 @@ private:
         all_initiated = false;
         RCLCPP_WARN(
           get_logger(),
-          "[STARTUP] [%s] can_id=%d feedback not fresh after %d ms poll.",
-          ch.ns.c_str(), ch.can_id, poll_ms);
+          "[STARTUP] [%s] can_id=%d feedback not fresh after final %d ms poll.",
+          ch.ns.c_str(), ch.can_id, feedback_poll_ms_);
       }
     }
 
@@ -633,12 +642,12 @@ private:
 
     process_pending_rx();
     process_pending_soft_origin_resets();
+    // Poll before service_drive_tx so freshness reflects replies to recent MIT TX.
+    poll_bus_feedback(feedback_poll_ms_);
 
     for (auto & ch : drives_) {
       service_drive_tx(ch);
     }
-
-    poll_bus_feedback(feedback_poll_ms_);
   }
 
   void on_motor_command(

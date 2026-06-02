@@ -279,7 +279,7 @@ Defaults are imported from `boom_motor_config.py`.
 | Gateway exits immediately | CAN interface down or wrong name | Check `ip link`; set `can_interface:=...` |
 | `Duplicate can_id` fatal | Config error | Fix `BOOM_MOTOR_STACKS` |
 | `comm fault` on one drive | No feedback, wrong ID, cable | Check `can_id`, power, termination |
-| `comm fault` on hip/wheels right after startup (knee OK) | Was stale feedback from staggered enable; gateway now refreshes all drives before fault checks | Rebuild `cm_interface`; if it persists, increase `motor_feedback_timeout_ms` or `gateway_startup_stagger_ms` |
+| `comm fault` immediately after `All motors successfully initiated` | Service loop was checking feedback before polling; refresh timestamps aged during a long poll | Rebuild `cm_interface` (gateway polls RX before each service tick; startup ends with a final MIT ping + short poll) |
 | Motor moves but wrong joint | CAN ID collision or mismatch | Verify unique IDs and wiring |
 | No joystick motion on new motor | Namespace lacks `knee`/`wheel`/`hip` | Rename or extend teleop script |
 | `No motor_total_position` warn at start | Startup race | Wait for gateway feedback; usually clears |
