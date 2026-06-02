@@ -1,9 +1,20 @@
 #!/usr/bin/env python3
-# Publishes joint_despos increments from joystick by namespace role:
-# - right stick X drives namespaces containing "knee"
-# - left stick X drives namespaces containing "wheel"
-# - button 4 (held) negative / button 5 (held) positive for namespaces containing "hip"
-# Also publishes soft_mode toggle and hold_joint (false while controlling, true on release).
+"""Boom teleop: incremental joint_despos from joystick, per namespace.
+
+Namespace substring rules (case-insensitive):
+  'knee'  — right stick X
+  'wheel' — left stick X (both wheel motors share the same stick)
+  'hip'   — buttons 4/5 (neg/pos); joint_despos clamped to hip_angle_limit_deg
+
+All listed namespaces receive soft_mode (button 1 edge) and hold_joint on input release.
+Namespaces without knee/wheel/hip still get soft_mode/hold_joint but no stick motion.
+
+TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
+  knee_velocity_constant, wheel_velocity_constant, hip_velocity_constant
+  right_stick_x_axis, left_stick_x_axis, stick_deadzone
+  soft_mode_button_index, hip_neg_button_index, hip_pos_button_index
+  namespaces, namespace_gear_ratios, publish_hz, hip_angle_limit_deg
+"""
 
 import math
 import threading
@@ -16,10 +27,12 @@ from std_msgs.msg import Bool, Float32
 
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
+    """Clamp desired hip position to ±limit_rad."""
     return max(-limit_rad, min(limit_rad, despos))
 
 
 class JoyState:
+    """Thread-safe cache of latest joystick axes and button edges."""
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._right_x = 0.0
@@ -161,22 +174,24 @@ class NamespaceTarget:
 
 
 class BoomJoystickControl(Node):
+    """ROS node: /joy in, per-namespace joint_despos / hold_joint / soft_mode out."""
+
     def __init__(self) -> None:
         super().__init__('boom_joystick_control_node')
 
         self.declare_parameter('joy_topic', '/joy')
-        self.declare_parameter('publish_hz', 50.0)
-        self.declare_parameter('gear_ratio', 1.0)
-        self.declare_parameter('right_stick_x_axis', 3)
-        self.declare_parameter('left_stick_x_axis', 0)
-        self.declare_parameter('soft_mode_button_index', 1)
-        self.declare_parameter('hip_neg_button_index', 5)
-        self.declare_parameter('hip_pos_button_index', 4)
-        self.declare_parameter('knee_velocity_constant', 1.0)
-        self.declare_parameter('wheel_velocity_constant', 1.0)
-        self.declare_parameter('hip_velocity_constant', 1.0)
-        self.declare_parameter('hip_angle_limit_deg', 45.0)
-        self.declare_parameter('stick_deadzone', 0.15)
+        self.declare_parameter('publish_hz', 50.0)  # TWEAK: teleop timer rate
+        self.declare_parameter('gear_ratio', 1.0)  # TWEAK: fallback if ns not in namespace_gear_ratios
+        self.declare_parameter('right_stick_x_axis', 3)  # TWEAK: knee axis index
+        self.declare_parameter('left_stick_x_axis', 0)  # TWEAK: wheel axis index
+        self.declare_parameter('soft_mode_button_index', 1)  # TWEAK: toggle on rising edge
+        self.declare_parameter('hip_neg_button_index', 5)  # TWEAK
+        self.declare_parameter('hip_pos_button_index', 4)  # TWEAK
+        self.declare_parameter('knee_velocity_constant', 1.0)  # TWEAK: rad per tick before /gear_ratio
+        self.declare_parameter('wheel_velocity_constant', 1.0)  # TWEAK
+        self.declare_parameter('hip_velocity_constant', 1.0)  # TWEAK
+        self.declare_parameter('hip_angle_limit_deg', 45.0)  # TWEAK: teleop clamp (translator uses launch)
+        self.declare_parameter('stick_deadzone', 0.15)  # TWEAK
         self.declare_parameter('namespaces', '')
         self.declare_parameter('namespace_gear_ratios', '')
 
@@ -283,6 +298,7 @@ class BoomJoystickControl(Node):
         )
 
     def _publish_timer_callback(self) -> None:
+        """Map cached joy state to despos deltas; hold_joint when not actively driving."""
         right_x, left_x, soft_mode, hip_neg, hip_pos = self._state.get_state()
 
         soft_msg = Bool()

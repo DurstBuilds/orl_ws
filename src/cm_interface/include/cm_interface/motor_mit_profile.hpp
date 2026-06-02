@@ -1,6 +1,16 @@
 #ifndef CM_INTERFACE__MOTOR_MIT_PROFILE_HPP_
 #define CM_INTERFACE__MOTOR_MIT_PROFILE_HPP_
 
+// Motor-specific scaling and control defaults for MIT CAN and joint_translator_node.
+// TWEAK: add new motors here and in get_motor_mit_profile(); rebuild required.
+//
+// Fields:
+//   name          — human-readable label (logged by nodes)
+//   p_min..kd_max — CAN MIT pack/unpack ranges
+//   pd_kp, pd_kd   — joint_translator outer-loop gains (per tick at loop_hz)
+//   omega_max     — max motor velocity command (rad/s); caps per-tick delta
+//   mit_kp, mit_kd — default MIT stiffness on motor_command messages
+
 #include <cmath>
 #include <stdexcept>
 #include <string>

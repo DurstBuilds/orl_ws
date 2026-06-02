@@ -1,5 +1,10 @@
 // motor_unwrapper_node: accumulates unwrapped position from motor_state feedback.
 // Wrapped feedback is in [-pi, pi]; deltas are unwrapped and summed across rotations.
+//
+// No ROS parameters. Subscribes motor_state, soft_mode; publishes motor_total_position.
+// On soft_mode false→true: no change. On true→false: next motor_state resets total to
+// wrapped position (coordinates with gateway set-origin on soft_mode off).
+// kOriginJumpThreshold: large single-step delta resets total (set-origin / glitch).
 
 #include <cmath>
 

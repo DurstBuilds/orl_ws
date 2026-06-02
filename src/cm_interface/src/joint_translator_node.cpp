@@ -1,6 +1,20 @@
 // joint_translator_node: maps motor total position to joint space and commands
 // motor deltas via PD control at loop_hz (default 200 Hz). Hold (deltaP=0) when
 // hold_joint is true (teleop release), goal/limit latched, or predictive motor hold.
+//
+// Parameters (TWEAK):
+//   motor_model            — ak70_10 | ak10_9 | ak80_64 (sets PD + MIT defaults)
+//   gear_ratio             — motor rad per joint rad (> 0)
+//   loop_hz                — control loop rate (default 200)
+//   motor_error_tolerance  — motor-space goal/hold tolerance (rad)
+//   joint_angle_limit_deg  — 0 disables; else clamp ±limit in joint space
+//   omega_max              — "auto" or max motor speed (rad/s) for delta cap
+//   mit_kp, mit_kd         — override profile MIT gains on motor_command
+//
+// Subscribes (relative to namespace): motor_total_position, motor_state,
+// joint_despos, soft_mode, hold_joint. Publishes joint_curpos, motor_command.
+// Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
+// reset before tracking joint_despos again.
 
 #include <cmath>
 #include <mutex>

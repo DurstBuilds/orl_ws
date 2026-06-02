@@ -1,5 +1,23 @@
 // can_gateway_node: one SocketCAN interface, multiple MIT drives.
 // Replaces one motor_node_continuous per namespace for multi-motor stacks.
+//
+// Parameters (TWEAK via launch or ros2 param):
+//   can_interface          — SocketCAN device (e.g. can0)
+//   namespaces,motor_models,can_ids — comma-separated lists, same length
+//   max_torque             — MIT torque scale (Nm)
+//   loop_rate_hz           — TX/RX service rate (default 200)
+//   feedback_timeout_ms    — stale feedback → comm fault zero-hold
+//   feedback_poll_ms       — blocking RX poll each loop iteration
+//   startup_stagger_ms     — delay between per-drive enable sequences
+//   enable_settle_ms       — post-enable wait (non-AK80 drives)
+//   ak80_enable_settle_ms  — post-enable wait for AK80-64 knee
+//   startup_origin_poll_ms — RX wait after set-origin (0xFE)
+//   bus_warmup_ms          — delay after bind before first enable
+//
+// Startup: enables drives sorted by can_id (AK80/knee last). Retries enable if
+// no feedback. Soft-mode off triggers set-origin + Kd hold on that drive.
+// loop_timer_callback: routes RX by can_id; re-sends last motor_command each tick
+// until a new command arrives (has_pending_command is not cleared after TX).
 
 #include <algorithm>
 #include <numeric>
@@ -132,19 +150,38 @@ public:
     }
 
     drives_.reserve(namespaces.size());
+    std::vector<int> seen_can_ids;
+    seen_can_ids.reserve(namespaces.size());
     for (size_t i = 0; i < namespaces.size(); ++i) {
       DriveChannel ch;
       ch.ns = namespaces[i];
-      ch.can_id = std::stoi(can_ids_str[i]);
-      if (ch.can_id < 0 || ch.can_id > 0x7FF) {
-        throw std::invalid_argument("can_ids entries must be in [0, 2047]");
+      try {
+        ch.can_id = std::stoi(can_ids_str[i]);
+      } catch (const std::exception &) {
+        throw std::invalid_argument(
+          "can_ids[" + std::to_string(i) + "] for namespace '" + ch.ns +
+          "': invalid integer '" + can_ids_str[i] + "'");
       }
+      if (ch.can_id < 0 || ch.can_id > 0x7FF) {
+        throw std::invalid_argument(
+          "can_ids[" + std::to_string(i) + "] for namespace '" + ch.ns +
+          "': must be in [0, 2047]");
+      }
+      for (size_t j = 0; j < seen_can_ids.size(); ++j) {
+        if (seen_can_ids[j] == ch.can_id) {
+          throw std::invalid_argument(
+            "Duplicate can_id " + std::to_string(ch.can_id) + " for namespaces '" +
+            drives_[j].ns + "' and '" + ch.ns + "'");
+        }
+      }
+      seen_can_ids.push_back(ch.can_id);
       ch.profile = cm_interface::get_motor_mit_profile(motor_models[i]);
       drives_.push_back(std::move(ch));
     }
 
     if (!open_can_socket()) {
-      return;
+      throw std::runtime_error(
+        "Failed to open CAN interface '" + can_interface_ + "'; gateway cannot start");
     }
 
     const auto cmd_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();

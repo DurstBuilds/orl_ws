@@ -65,37 +65,9 @@ Requires: `rclcpp`, `rclpy`, `std_msgs`, `sensor_msgs`, `motor_interfaces`, `joy
 ros2 launch cm_interface boom_stack.launch.py
 ```
 
-By default **`use_can_gateway:=true`**: one `can_gateway_node` owns `can0` and talks to all four drives; each namespace still has `motor_unwrapper_node` + `joint_translator_node`. Topics are unchanged (`/<ns>/motor_command`, `/<ns>/motor_state`, etc.).
+**See [docs/BOOM_STACK.md](docs/BOOM_STACK.md)** for architecture, adding motors (`launch/boom_motor_config.py`), launch arguments, teleop controls, tuning, and troubleshooting.
 
-Legacy four-socket mode:
-
-```bash
-ros2 launch cm_interface boom_stack.launch.py use_can_gateway:=false
-```
-
-Default motors:
-
-| Namespace      | Motor model | CAN ID | Gear ratio | Joint limit |
-|----------------|-------------|--------|------------|-------------|
-| `knee_motor`   | ak80_64     | 4      | 1.6        | —           |
-| `hip_motor`    | ak70_10     | 0*     | 30         | ±45°        |
-| `wheel_motor1` | ak10_9      | 1      | 1.0        | —           |
-| `wheel_motor2` | ak10_9      | 2      | 1.0        | —           |
-
-\* Hip `can_id` in launch file may differ on your bench; override as needed.
-
-CAN MIT rate uses **`gateway_loop_rate_hz`** (default 200), not `motor_tx_rate_hz` (legacy per-motor nodes only).
-
-Useful arguments:
-
-```bash
-ros2 launch cm_interface boom_stack.launch.py enable_logging:=true
-ros2 launch cm_interface boom_stack.launch.py joy_dev:=0 publish_hz:=50
-ros2 launch cm_interface boom_stack.launch.py bag_output_dir:=./bags
-ros2 launch cm_interface boom_stack.launch.py gateway_loop_rate_hz:=200.0 motor_feedback_poll_ms:=5
-```
-
-Verify at runtime: gateway logs `loop 200 Hz`; or `ros2 param get /can_gateway_node loop_rate_hz`.
+Default: `use_can_gateway:=true` (one gateway on `can0`) and four drives from `boom_motor_config.py` (knee, hip, two wheels). Legacy per-motor CAN: `use_can_gateway:=false`.
 
 ### Single motor (boom teleop)
 
@@ -128,7 +100,7 @@ Requires deadman held; right stick sets absolute `joint_despos`.
 
 Hip `joint_despos` is clamped to ±`hip_angle_limit_deg` (default 45°) in teleop. The translator applies the same limit and limit-hold logic for the hip namespace.
 
-Per-motor gear ratios in **boom_stack** use `namespace_gear_ratios`, e.g. `knee_motor:1.6,hip_motor:30,...`.
+Per-motor gear ratios in **boom_stack** use `namespace_gear_ratios`, e.g. `knee_motor:1.6,hip_motor:33,...` (defaults from `boom_motor_config.py`).
 
 ## Topics (per namespace `/{ns}/`)
 
@@ -174,17 +146,7 @@ Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to cur
 
 ## Logging (boom_stack)
 
-```bash
-ros2 launch cm_interface boom_stack.launch.py enable_logging:=true
-```
-
-Records all stack `motor_state` topics. Bags auto-increment: `boom_stack_bag_0`, `boom_stack_bag_1`, … under `bag_output_dir` (default: launch working directory).
-
-| Argument | Default | Description |
-|----------|---------|-------------|
-| `bag_output_uri` | `boom_stack_bag` | Base name for numbered bags |
-| `bag_output_dir` | `.` | Directory to scan and write bags |
-| `bag_storage_id` | `mcap` | Rosbag storage format |
+See [docs/BOOM_STACK.md](docs/BOOM_STACK.md#logging) for `enable_logging`, bag paths, and recorded topics.
 
 ## Other executables
 
@@ -208,10 +170,11 @@ ros2 topic hz /hip_motor/motor_state
 
 ```text
 cm_interface/
+├── docs/BOOM_STACK.md
 ├── include/cm_interface/motor_mit_profile.hpp
-├── launch/          # boom_stack, boom_teleop, motor_stack, ...
+├── launch/          # boom_stack, boom_motor_config, boom_teleop, ...
 ├── scripts/         # boom_joystick_control.py, joystick_control.py, keyboard_command.py
-└── src/             # motor_node_continuous, joint_translator_node, motor_unwrapper_node, ...
+└── src/             # can_gateway_node, joint_translator_node, motor_unwrapper_node, ...
 ```
 
 ## Troubleshooting

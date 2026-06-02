@@ -1,8 +1,33 @@
-# Full boom stack: single CAN gateway + four translator pipelines + teleop.
-# Set use_can_gateway:=false to use legacy per-motor motor_node_continuous nodes.
+"""Full boom stack: CAN gateway (or legacy per-motor nodes) + translator pipelines + teleop.
+
+Motor list lives in boom_motor_config.BOOM_MOTOR_STACKS (single source of truth).
+Edit that file to add/remove drives; defaults for gateway, teleop, and bag topics
+are derived from it automatically.
+
+Modes:
+  use_can_gateway:=true  (default) — one can_gateway_node on can_interface; per-ns
+                           motor_unwrapper_node + joint_translator_node.
+  use_can_gateway:=false — legacy motor_node_continuous per namespace (debug only;
+                           multiple sockets on one bus can conflict).
+"""
 
 import re
+import sys
 from pathlib import Path
+
+# Allow importing boom_motor_config from this directory when installed under share/.
+_launch_dir = Path(__file__).resolve().parent
+if str(_launch_dir) not in sys.path:
+    sys.path.insert(0, str(_launch_dir))
+
+from boom_motor_config import (  # noqa: E402
+    BOOM_MOTOR_STACKS,
+    DEFAULT_CAN_IDS,
+    DEFAULT_MOTOR_MODELS,
+    DEFAULT_NAMESPACES,
+    DEFAULT_NAMESPACE_GEAR_RATIOS,
+    MOTOR_STATE_TOPICS,
+)
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, GroupAction, OpaqueFunction
@@ -10,57 +35,35 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 
-BOOM_MOTOR_STACKS = (
-    {
-        'ns': 'knee_motor',
-        'gear_ratio': 1.6,
-        'motor_model': 'ak80_64',
-        'can_id': 4,
-        'joint_angle_limit_deg': 0.0,
-    },
-    {
-        'ns': 'hip_motor',
-        'gear_ratio': 33.0,
-        'motor_model': 'ak70_10',
-        'can_id': 3,
-        'joint_angle_limit_deg': 45.0,
-    },
-    {
-        'ns': 'wheel_motor1',
-        'gear_ratio': 1.0,
-        'motor_model': 'ak10_9',
-        'can_id': 1,
-        'joint_angle_limit_deg': 0.0,
-    },
-    {
-        'ns': 'wheel_motor2',
-        'gear_ratio': 1.0,
-        'motor_model': 'ak10_9',
-        'can_id': 2,
-        'joint_angle_limit_deg': 0.0,
-    },
-)
-
-DEFAULT_NAMESPACES = ','.join(stack['ns'] for stack in BOOM_MOTOR_STACKS)
-DEFAULT_MOTOR_MODELS = ','.join(stack['motor_model'] for stack in BOOM_MOTOR_STACKS)
-DEFAULT_CAN_IDS = ','.join(str(stack['can_id']) for stack in BOOM_MOTOR_STACKS)
-DEFAULT_NAMESPACE_GEAR_RATIOS = ','.join(
-    f"{stack['ns']}:{stack['gear_ratio']}" for stack in BOOM_MOTOR_STACKS
-)
-MOTOR_STATE_TOPICS = [f'/{stack["ns"]}/motor_state' for stack in BOOM_MOTOR_STACKS]
-
 
 def _logging_enabled(context) -> bool:
+    """True when enable_logging launch arg is true/1/yes."""
     value = LaunchConfiguration('enable_logging').perform(context).strip().lower()
     return value in ('true', '1', 'yes')
 
 
 def _use_can_gateway(context) -> bool:
+    """True when use_can_gateway launch arg is true/1/yes."""
     value = LaunchConfiguration('use_can_gateway').perform(context).strip().lower()
     return value in ('true', '1', 'yes')
 
 
+def _parse_hip_angle_limit_deg(context) -> float:
+    """Parse and validate hip_angle_limit_deg (must be >= 0)."""
+    raw = LaunchConfiguration('hip_angle_limit_deg').perform(context).strip()
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"hip_angle_limit_deg must be a number, got '{raw}'"
+        ) from exc
+    if value < 0.0:
+        raise RuntimeError(f'hip_angle_limit_deg must be >= 0, got {value}')
+    return value
+
+
 def _collect_bag_indices(base: str, bag_dir: Path) -> list[int]:
+    """Find existing bag index suffixes for auto-increment naming."""
     indices: list[int] = []
     escaped = re.escape(base)
 
@@ -88,6 +91,7 @@ def _collect_bag_indices(base: str, bag_dir: Path) -> list[int]:
 
 
 def _next_bag_output_uri(base: str, bag_dir: str) -> str:
+    """Return next bag folder name base_N under bag_dir."""
     root = Path(bag_dir).expanduser().resolve()
     root.mkdir(parents=True, exist_ok=True)
     indices = _collect_bag_indices(base, root)
@@ -96,16 +100,17 @@ def _next_bag_output_uri(base: str, bag_dir: str) -> str:
 
 
 def _joint_angle_limit_for_stack(stack: dict, hip_angle_limit_deg: float) -> float:
-    if stack['ns'] == 'hip_motor':
+    """Joint limit (deg) for joint_translator_node; hip namespaces use launch hip limit."""
+    if 'hip' in stack['ns']:
         return hip_angle_limit_deg
     return stack['joint_angle_limit_deg']
 
 
 def _translator_stack_group(stack: dict, hip_angle_limit_deg: float) -> GroupAction:
-    ns = stack['ns']
+    """Per-motor pipeline when can_gateway owns CAN: unwrapper + joint translator."""
     joint_angle_limit_deg = _joint_angle_limit_for_stack(stack, hip_angle_limit_deg)
     return GroupAction([
-        PushRosNamespace(ns),
+        PushRosNamespace(stack['ns']),
         Node(
             package='cm_interface',
             executable='motor_unwrapper_node',
@@ -131,10 +136,10 @@ def _translator_stack_group(stack: dict, hip_angle_limit_deg: float) -> GroupAct
 def _legacy_motor_stack_group(
     stack: dict, motor_startup_delay_ms: int, hip_angle_limit_deg: float
 ) -> GroupAction:
-    ns = stack['ns']
+    """Per-motor pipeline in legacy mode: motor_node_continuous + unwrapper + translator."""
     joint_angle_limit_deg = _joint_angle_limit_for_stack(stack, hip_angle_limit_deg)
     return GroupAction([
-        PushRosNamespace(ns),
+        PushRosNamespace(stack['ns']),
         Node(
             package='cm_interface',
             executable='motor_node_continuous',
@@ -142,6 +147,7 @@ def _legacy_motor_stack_group(
             parameters=[{
                 'motor_model': stack['motor_model'],
                 'can_id': stack['can_id'],
+                'can_interface': LaunchConfiguration('can_interface'),
                 'max_torque': ParameterValue(
                     LaunchConfiguration('max_torque'), value_type=float
                 ),
@@ -181,10 +187,9 @@ def _legacy_motor_stack_group(
 
 
 def _launch_setup(context, *args, **kwargs):
+    """Build node list from BOOM_MOTOR_STACKS and launch arguments."""
     bag_dir = LaunchConfiguration('bag_output_dir').perform(context)
-    hip_angle_limit_deg = float(
-        LaunchConfiguration('hip_angle_limit_deg').perform(context)
-    )
+    hip_angle_limit_deg = _parse_hip_angle_limit_deg(context)
 
     actions = []
 
@@ -196,7 +201,7 @@ def _launch_setup(context, *args, **kwargs):
                 name='can_gateway_node',
                 output='screen',
                 parameters=[{
-                    'can_interface': 'can0',
+                    'can_interface': LaunchConfiguration('can_interface'),
                     'namespaces': DEFAULT_NAMESPACES,
                     'motor_models': DEFAULT_MOTOR_MODELS,
                     'can_ids': DEFAULT_CAN_IDS,
@@ -262,9 +267,7 @@ def _launch_setup(context, *args, **kwargs):
             'namespaces': LaunchConfiguration('namespaces'),
             'namespace_gear_ratios': LaunchConfiguration('namespace_gear_ratios'),
             'publish_hz': ParameterValue(LaunchConfiguration('publish_hz'), value_type=float),
-            'hip_angle_limit_deg': ParameterValue(
-                LaunchConfiguration('hip_angle_limit_deg'), value_type=float
-            ),
+            'hip_angle_limit_deg': hip_angle_limit_deg,
         }],
     )
 
@@ -304,7 +307,12 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'use_can_gateway',
             default_value='true',
-            description='If true, one can_gateway_node owns can0; if false, four motor_node_continuous.',
+            description='If true, one can_gateway_node owns CAN; if false, per-motor motor_node_continuous.',
+        ),
+        DeclareLaunchArgument(
+            'can_interface',
+            default_value='can0',
+            description='SocketCAN interface name for gateway and legacy motor nodes.',
         ),
         DeclareLaunchArgument(
             'joy_dev',
@@ -329,7 +337,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'hip_angle_limit_deg',
             default_value='45.0',
-            description='Hip joint limit (deg) for boom_joystick_control and hip joint_translator_node.',
+            description='Hip joint limit (deg) for teleop and hip joint_translator_node.',
         ),
         DeclareLaunchArgument(
             'motor_error_tolerance',
@@ -369,7 +377,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'motor_tx_rate_hz',
             default_value='200.0',
-            description='Legacy motor_node_continuous TX rate when use_can_gateway:=false (ignored when gateway is on).',
+            description='Legacy motor_node_continuous TX rate when use_can_gateway:=false.',
         ),
         DeclareLaunchArgument(
             'motor_feedback_timeout_ms',
@@ -389,7 +397,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'namespaces',
             default_value=DEFAULT_NAMESPACES,
-            description='Comma-separated namespaces for boom_joystick_control.',
+            description='Comma-separated namespaces for boom_joystick_control (gateway list is always BOOM_MOTOR_STACKS).',
         ),
         DeclareLaunchArgument(
             'namespace_gear_ratios',
@@ -404,10 +412,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'bag_output_uri',
             default_value='boom_stack_bag',
-            description=(
-                'Base name for bags; auto-increments to boom_stack_bag_0, '
-                'boom_stack_bag_1, ... when prior bags exist.'
-            ),
+            description='Base name for bags; auto-increments when prior bags exist.',
         ),
         DeclareLaunchArgument(
             'bag_output_dir',

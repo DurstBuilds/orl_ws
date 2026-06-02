@@ -1,7 +1,16 @@
 // motor_node_continuous: MIT commands for continuous (delta position) firmware.
 // Position field bit 15: 0 = hold, 1 = apply new command. Lower 15 bits encode delta.
 // TX timer sends latest motor_command (QoS depth 1). After each CAN TX, blocking RX
-// poll (pre-CAN-refactor path) — no separate RX thread.
+// poll — no separate RX thread. Legacy boom_stack path (one socket per node).
+//
+// Parameters (TWEAK):
+//   can_interface, can_id     — SocketCAN binding
+//   motor_model               — ak70_10 | ak10_9 | ak80_64
+//   max_torque, tx_rate_hz    — MIT scale and command rate
+//   feedback_timeout_ms       — stale feedback → comm fault hold
+//   feedback_poll_ms          — RX poll after each TX
+//   startup_delay_ms          — stagger before opening CAN (multi-motor legacy)
+//   use_can_filters           — RX filter to this can_id + master id
 
 #include <chrono>
 #include <cmath>
