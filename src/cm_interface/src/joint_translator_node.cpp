@@ -254,7 +254,7 @@ private:
         at_goal_latched_ = false;
         has_prev_motor_error_ = false;
       }
-      RCLCPP_INFO(get_logger(), "hold_joint=%s", hold_joint_ ? "true" : "false");
+      RCLCPP_DEBUG(get_logger(), "hold_joint=%s", hold_joint_ ? "true" : "false");
     }
   }
 
