@@ -310,7 +310,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'gateway_loop_rate_hz',
-            default_value='100.0',
+            default_value='200.0',
             description='can_gateway_node service loop rate (Hz).',
         ),
         DeclareLaunchArgument(
@@ -320,8 +320,8 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'motor_tx_rate_hz',
-            default_value='100.0',
-            description='Legacy motor_node_continuous TX rate when use_can_gateway:=false.',
+            default_value='200.0',
+            description='Legacy motor_node_continuous TX rate when use_can_gateway:=false (ignored when gateway is on).',
         ),
         DeclareLaunchArgument(
             'motor_feedback_timeout_ms',
@@ -330,7 +330,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'motor_feedback_poll_ms',
-            default_value='15',
+            default_value='5',
             description='Blocking RX poll after each gateway loop (ms).',
         ),
         DeclareLaunchArgument(

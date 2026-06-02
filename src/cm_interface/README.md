@@ -84,13 +84,18 @@ Default motors:
 
 \* Hip `can_id` in launch file may differ on your bench; override as needed.
 
+CAN MIT rate uses **`gateway_loop_rate_hz`** (default 200), not `motor_tx_rate_hz` (legacy per-motor nodes only).
+
 Useful arguments:
 
 ```bash
 ros2 launch cm_interface boom_stack.launch.py enable_logging:=true
 ros2 launch cm_interface boom_stack.launch.py joy_dev:=0 publish_hz:=50
 ros2 launch cm_interface boom_stack.launch.py bag_output_dir:=./bags
+ros2 launch cm_interface boom_stack.launch.py gateway_loop_rate_hz:=200.0 motor_feedback_poll_ms:=5
 ```
+
+Verify at runtime: gateway logs `loop 200 Hz`; or `ros2 param get /can_gateway_node loop_rate_hz`.
 
 ### Single motor (boom teleop)
 
