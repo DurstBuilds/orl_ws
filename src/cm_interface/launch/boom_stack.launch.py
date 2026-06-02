@@ -1,8 +1,8 @@
 """Full boom stack: CAN gateway (or legacy per-motor nodes) + translator pipelines + teleop.
 
 Motor list lives in boom_motor_config.BOOM_MOTOR_STACKS (single source of truth).
-Edit that file to add/remove drives; defaults for gateway, teleop, and bag topics
-are derived from it automatically.
+Edit that file to add/remove drives; defaults for gateway, teleop, bag topics, and
+namespace_omega_max are derived from it automatically.
 
 Modes:
   use_can_gateway:=true  (default) — one can_gateway_node on can_interface; per-ns
@@ -26,7 +26,10 @@ from boom_motor_config import (  # noqa: E402
     DEFAULT_MOTOR_MODELS,
     DEFAULT_NAMESPACES,
     DEFAULT_NAMESPACE_GEAR_RATIOS,
+    DEFAULT_NAMESPACE_OMEGA_MAX,
     MOTOR_STATE_TOPICS,
+    omega_max_for_namespace,
+    parse_namespace_omega_max,
 )
 
 from launch import LaunchDescription
@@ -46,6 +49,16 @@ def _use_can_gateway(context) -> bool:
     """True when use_can_gateway launch arg is true/1/yes."""
     value = LaunchConfiguration('use_can_gateway').perform(context).strip().lower()
     return value in ('true', '1', 'yes')
+
+
+def _parse_namespace_omega_max(context) -> dict[str, str]:
+    """Parse namespace_omega_max launch arg; omega_max is fallback for unlisted namespaces."""
+    default = LaunchConfiguration('omega_max').perform(context).strip()
+    param = LaunchConfiguration('namespace_omega_max').perform(context).strip()
+    try:
+        return parse_namespace_omega_max(param, default)
+    except ValueError as exc:
+        raise RuntimeError(str(exc)) from exc
 
 
 def _parse_hip_angle_limit_deg(context) -> float:
@@ -106,7 +119,9 @@ def _joint_angle_limit_for_stack(stack: dict, hip_angle_limit_deg: float) -> flo
     return stack['joint_angle_limit_deg']
 
 
-def _translator_stack_group(stack: dict, hip_angle_limit_deg: float) -> GroupAction:
+def _translator_stack_group(
+    stack: dict, hip_angle_limit_deg: float, omega_max: str
+) -> GroupAction:
     """Per-motor pipeline when can_gateway owns CAN: unwrapper + joint translator."""
     joint_angle_limit_deg = _joint_angle_limit_for_stack(stack, hip_angle_limit_deg)
     return GroupAction([
@@ -123,7 +138,7 @@ def _translator_stack_group(stack: dict, hip_angle_limit_deg: float) -> GroupAct
             parameters=[{
                 'motor_model': stack['motor_model'],
                 'gear_ratio': stack['gear_ratio'],
-                'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
+                'omega_max': omega_max,
                 'joint_angle_limit_deg': joint_angle_limit_deg,
                 'motor_error_tolerance': ParameterValue(
                     LaunchConfiguration('motor_error_tolerance'), value_type=float
@@ -134,7 +149,10 @@ def _translator_stack_group(stack: dict, hip_angle_limit_deg: float) -> GroupAct
 
 
 def _legacy_motor_stack_group(
-    stack: dict, motor_startup_delay_ms: int, hip_angle_limit_deg: float
+    stack: dict,
+    motor_startup_delay_ms: int,
+    hip_angle_limit_deg: float,
+    omega_max: str,
 ) -> GroupAction:
     """Per-motor pipeline in legacy mode: motor_node_continuous + unwrapper + translator."""
     joint_angle_limit_deg = _joint_angle_limit_for_stack(stack, hip_angle_limit_deg)
@@ -176,7 +194,7 @@ def _legacy_motor_stack_group(
             parameters=[{
                 'motor_model': stack['motor_model'],
                 'gear_ratio': stack['gear_ratio'],
-                'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
+                'omega_max': omega_max,
                 'joint_angle_limit_deg': joint_angle_limit_deg,
                 'motor_error_tolerance': ParameterValue(
                     LaunchConfiguration('motor_error_tolerance'), value_type=float
@@ -190,6 +208,11 @@ def _launch_setup(context, *args, **kwargs):
     """Build node list from BOOM_MOTOR_STACKS and launch arguments."""
     bag_dir = LaunchConfiguration('bag_output_dir').perform(context)
     hip_angle_limit_deg = _parse_hip_angle_limit_deg(context)
+    omega_max_default = LaunchConfiguration('omega_max').perform(context).strip()
+    namespace_omega_max = _parse_namespace_omega_max(context)
+
+    def _stack_omega_max(stack: dict) -> str:
+        return omega_max_for_namespace(stack['ns'], namespace_omega_max, omega_max_default)
 
     actions = []
 
@@ -236,7 +259,7 @@ def _launch_setup(context, *args, **kwargs):
             )
         )
         actions.extend(
-            _translator_stack_group(stack, hip_angle_limit_deg)
+            _translator_stack_group(stack, hip_angle_limit_deg, _stack_omega_max(stack))
             for stack in BOOM_MOTOR_STACKS
         )
     else:
@@ -244,7 +267,9 @@ def _launch_setup(context, *args, **kwargs):
         if stagger_ms < 0:
             stagger_ms = 0
         actions.extend(
-            _legacy_motor_stack_group(stack, index * stagger_ms, hip_angle_limit_deg)
+            _legacy_motor_stack_group(
+                stack, index * stagger_ms, hip_angle_limit_deg, _stack_omega_max(stack)
+            )
             for index, stack in enumerate(BOOM_MOTOR_STACKS)
         )
 
@@ -327,7 +352,15 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'omega_max',
             default_value='auto',
-            description='joint_translator omega_max (auto uses motor profile).',
+            description=(
+                'Default joint_translator omega_max for namespaces not listed in '
+                'namespace_omega_max (auto = motor profile rad/s cap).'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'namespace_omega_max',
+            default_value=DEFAULT_NAMESPACE_OMEGA_MAX,
+            description='Per-namespace omega_max for joint_translator (ns:auto|rad_per_s,...).',
         ),
         DeclareLaunchArgument(
             'publish_hz',

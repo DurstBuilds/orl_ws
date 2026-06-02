@@ -133,7 +133,7 @@ Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to cur
   - `motor_model`, `gear_ratio`, `loop_hz` (default 200)
   - `motor_error_tolerance` (motor rad, default 0.001)
   - `joint_angle_limit_deg` (0 = disabled; hip stack uses 45°)
-  - `omega_max` (`auto` or rad/s cap on per-tick delta)
+  - `omega_max` (`auto` or rad/s cap on per-tick delta). In **boom_stack**, use `namespace_omega_max` for per-namespace values (see [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).
   - `mit_kp`, `mit_kd` (override profile defaults)
 
 ## motor_node_continuous

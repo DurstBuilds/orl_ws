@@ -96,6 +96,7 @@ Edit [`launch/boom_motor_config.py`](../launch/boom_motor_config.py) — **`BOOM
 | `motor_model` | `ak70_10`, `ak10_9`, or `ak80_64` |
 | `can_id` | Unique standard CAN ID [0, 2047] |
 | `joint_angle_limit_deg` | Translator clamp; `0` disables. Namespaces containing `hip` also use launch arg `hip_angle_limit_deg`. |
+| `omega_max` | Optional per-motor default for translator speed cap: `auto` (profile) or motor rad/s. Overridable at launch via `namespace_omega_max`. |
 
 Default stack:
 
@@ -116,8 +117,9 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
    - `knee` in name → right stick X
    - `wheel` in name → left stick X
    - `hip` in name → buttons 4/5
-4. Add `namespace_gear_ratios` entry automatically via defaults, or pass at launch.
-5. Wire the drive on the bench and launch.
+4. Set `omega_max` in the stack entry (or rely on launch `namespace_omega_max` / `omega_max` default).
+5. Add `namespace_gear_ratios` and `namespace_omega_max` entries automatically via defaults, or pass at launch.
+6. Wire the drive on the bench and launch.
 
 **Important:** The `namespaces` launch argument only affects **teleop**. The gateway always uses the full `BOOM_MOTOR_STACKS` list. Overriding `namespaces:=foo` without editing the config leaves other drives on CAN but not on the joystick.
 
@@ -144,13 +146,27 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
 | `motor_feedback_timeout_ms` | 250 | Stale feedback → comm fault zero-hold |
 | `motor_feedback_poll_ms` | 5 | Blocking RX poll each gateway loop |
 
-### Translator (all motors)
+### Translator (per namespace)
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `omega_max` | `auto` | Per-tick speed cap (`auto` = motor profile) |
-| `motor_error_tolerance` | 0.001 | Motor-space goal/hold tolerance (rad) |
+| `namespace_omega_max` | from `boom_motor_config.py` | Per-namespace cap: `ns:auto` or `ns:<rad/s>`, comma-separated (e.g. `knee_motor:4.0,hip_motor:auto,wheel_motor1:15.0,wheel_motor2:15.0`) |
+| `omega_max` | `auto` | Fallback for any namespace not listed in `namespace_omega_max` (`auto` uses each motor profile’s `omega_max`) |
+| `motor_error_tolerance` | 0.001 | Motor-space goal/hold tolerance (rad), all translators |
 | `hip_angle_limit_deg` | 45.0 | Hip teleop clamp and hip translator limit |
+
+Example — slower knee, profile-default hip, faster wheels:
+
+```bash
+ros2 launch cm_interface boom_stack.launch.py \
+  namespace_omega_max:="knee_motor:3.0,hip_motor:auto,wheel_motor1:20.0,wheel_motor2:20.0"
+```
+
+Check a running translator:
+
+```bash
+ros2 param get /knee_motor/joint_translator_node omega_max
+```
 
 ### Teleop
 
@@ -253,7 +269,7 @@ Defaults are imported from `boom_motor_config.py`.
 | Finer position hold | Lower `motor_error_tolerance` |
 | Hip travel limit | `hip_angle_limit_deg` (launch) |
 | Bus timing / enable issues | `gateway_*_ms` arguments |
-| Translator speed cap | `omega_max` or profile `omega_max` in `motor_mit_profile.hpp` |
+| Translator speed cap (per motor) | `namespace_omega_max` at launch, or `omega_max` in `BOOM_MOTOR_STACKS` / profile in `motor_mit_profile.hpp` |
 | MIT stiffness | Profile `mit_kp`/`mit_kd` or translator overrides |
 
 ## Troubleshooting
