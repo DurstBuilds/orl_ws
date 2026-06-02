@@ -574,7 +574,19 @@ private:
       }
     }
 
-    if (all_initiated) {
+    bool any_feedback = false;
+    for (const auto & ch : drives_) {
+      if (ch.has_feedback) {
+        any_feedback = true;
+        break;
+      }
+    }
+
+    if (!any_feedback && !drives_.empty()) {
+      RCLCPP_ERROR(
+        get_logger(),
+        "[STARTUP] Motor initilization failed, check power and CAN wiring.");
+    } else if (all_initiated) {
       RCLCPP_INFO(get_logger(), "[STARTUP] All motors successfully initiated.");
     }
 

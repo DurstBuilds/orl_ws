@@ -277,6 +277,7 @@ Defaults are imported from `boom_motor_config.py`.
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
 | Gateway exits immediately | CAN interface down or wrong name | Check `ip link`; set `can_interface:=...` |
+| `Motor initilization failed, check power and CAN wiring` | No MIT feedback from any drive after startup | Power, CAN bitrate, termination, `can_interface`, drive IDs |
 | `Duplicate can_id` fatal | Config error | Fix `BOOM_MOTOR_STACKS` |
 | `comm fault` on one drive | No feedback, wrong ID, cable | Check `can_id`, power, termination |
 | `comm fault` immediately after `All motors successfully initiated` | Service loop was checking feedback before polling; refresh timestamps aged during a long poll | Rebuild `cm_interface` (gateway polls RX before each service tick; startup ends with a final MIT ping + short poll) |
