@@ -18,6 +18,8 @@
 // no feedback. Soft-mode off triggers set-origin + Kd hold on that drive.
 // loop_timer_callback: routes RX by can_id; re-sends last motor_command each tick
 // until a new command arrives (has_pending_command is not cleared after TX).
+// Staggered startup can leave early-enabled drives with stale last_feedback_time;
+// refresh_all_drive_feedback() runs before the service loop arms comm-fault checks.
 
 #include <algorithm>
 #include <numeric>
@@ -525,6 +527,49 @@ private:
         get_logger(), "[STARTUP] %s can_id=%d feedback=%s",
         ch.ns.c_str(), ch.can_id, ch.has_feedback ? "active" : "missing");
     }
+
+    refresh_all_drive_feedback();
+  }
+
+  void refresh_all_drive_feedback()
+  {
+    // Staggered per-drive startup can age feedback on early drives beyond
+    // feedback_timeout_ms before the first loop tick. Ping all drives and poll
+    // before arming comm-fault detection.
+    RCLCPP_INFO(
+      get_logger(),
+      "[STARTUP] Refreshing MIT feedback from all drives before service loop.");
+
+    for (auto & ch : drives_) {
+      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+    }
+
+    const int poll_ms = std::max(feedback_timeout_ms_, startup_origin_poll_ms_);
+    poll_bus_feedback(poll_ms);
+    process_pending_rx();
+
+    bool all_initiated = !drives_.empty();
+    for (const auto & ch : drives_) {
+      if (!ch.has_feedback) {
+        all_initiated = false;
+        RCLCPP_WARN(
+          get_logger(),
+          "[STARTUP] [%s] can_id=%d still no MIT feedback after refresh poll.",
+          ch.ns.c_str(), ch.can_id);
+      } else if (!feedback_is_fresh(ch)) {
+        all_initiated = false;
+        RCLCPP_WARN(
+          get_logger(),
+          "[STARTUP] [%s] can_id=%d feedback not fresh after %d ms poll.",
+          ch.ns.c_str(), ch.can_id, poll_ms);
+      }
+    }
+
+    if (all_initiated) {
+      RCLCPP_INFO(get_logger(), "[STARTUP] All motors successfully initiated.");
+    }
+
+    comm_fault_checks_armed_ = true;
   }
 
   bool feedback_is_fresh(const DriveChannel & ch) const
@@ -560,7 +605,7 @@ private:
       return;
     }
 
-    if (ch.has_feedback && !feedback_is_fresh(ch)) {
+    if (comm_fault_checks_armed_ && ch.has_feedback && !feedback_is_fresh(ch)) {
       mark_comm_fault(ch);
       send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
       return;
@@ -644,6 +689,7 @@ private:
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};
   rclcpp::TimerBase::SharedPtr loop_timer_;
+  bool comm_fault_checks_armed_{false};
 };
 
 int main(int argc, char ** argv)
