@@ -32,7 +32,6 @@ constexpr int kDefaultCanId = 0;
 constexpr int kDefaultMasterCanId = 0;
 constexpr float kCmdZeroEps = 1e-6f;
 constexpr float kSoftModeKd = 0.025f;
-constexpr float kSoftReleaseKp = 0.5f;
 constexpr float kDefaultMaxTorqueNm = 10.0f;
 constexpr double kDefaultTxRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
@@ -733,39 +732,24 @@ private:
         }
         send_soft_mode_command();
       } else {
-        send_zero_mit_command();
-        float p_delta = 0.0f;
-        bool use_delta = false;
         {
-          std::lock_guard<std::mutex> lock(feedback_mutex_);
-          use_delta = has_soft_mode_on_position_ && has_last_position_;
-          if (use_delta) {
-            p_delta = last_position_rad_ - soft_mode_on_position_rad_;
-          }
+          std::lock_guard<std::mutex> lock(command_mutex_);
+          has_pending_command_ = false;
         }
-        send_soft_release_hold_command(use_delta ? p_delta : 0.0f);
+        write_mit_frame(0.0f, 0.0f, 0.0f, profile_.mit_kd, 0.0f, true);
       }
       RCLCPP_INFO(
         get_logger(),
         "soft_mode=%s; %s",
         soft_mode_ ? "true" : "false",
-        soft_mode_ ? "ignoring motor_command and sending KD only" : "normal command flow resumed");
+        soft_mode_ ? "ignoring motor_command and sending KD only" :
+        "hold at current position; awaiting new command");
     }
   }
 
   void send_soft_mode_command()
   {
     write_mit_frame(0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
-  }
-
-  void send_zero_mit_command()
-  {
-    write_mit_frame(0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
-  }
-
-  void send_soft_release_hold_command(float p_delta)
-  {
-    write_mit_frame(p_delta, 0.0f, kSoftReleaseKp, 0.0f, 0.0f, true);
   }
 
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};

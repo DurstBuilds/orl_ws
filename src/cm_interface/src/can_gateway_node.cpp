@@ -32,7 +32,6 @@ namespace
 {
 
 constexpr float kSoftModeKd = 0.025f;
-constexpr float kSoftReleaseKp = 0.5f;
 constexpr float kDefaultMaxTorqueNm = 10.0f;
 constexpr double kDefaultLoopRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
@@ -569,12 +568,8 @@ private:
       ch->has_pending_command = false;
       send_mit(*ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
     } else {
-      send_mit(*ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, false);
-      float p_delta = 0.0f;
-      if (ch->has_soft_mode_on_position && ch->has_last_position) {
-        p_delta = ch->last_position_rad - ch->soft_mode_on_position_rad;
-      }
-      send_mit(*ch, p_delta, 0.0f, kSoftReleaseKp, 0.0f, 0.0f, true);
+      ch->has_pending_command = false;
+      send_mit(*ch, 0.0f, 0.0f, 0.0f, ch->profile.mit_kd, 0.0f, true);
     }
 
     RCLCPP_INFO(

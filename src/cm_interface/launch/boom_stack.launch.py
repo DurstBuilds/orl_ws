@@ -95,8 +95,15 @@ def _next_bag_output_uri(base: str, bag_dir: str) -> str:
     return f'{base}_{next_index}'
 
 
-def _translator_stack_group(stack: dict) -> GroupAction:
+def _joint_angle_limit_for_stack(stack: dict, hip_angle_limit_deg: float) -> float:
+    if stack['ns'] == 'hip_motor':
+        return hip_angle_limit_deg
+    return stack['joint_angle_limit_deg']
+
+
+def _translator_stack_group(stack: dict, hip_angle_limit_deg: float) -> GroupAction:
     ns = stack['ns']
+    joint_angle_limit_deg = _joint_angle_limit_for_stack(stack, hip_angle_limit_deg)
     return GroupAction([
         PushRosNamespace(ns),
         Node(
@@ -112,7 +119,7 @@ def _translator_stack_group(stack: dict) -> GroupAction:
                 'motor_model': stack['motor_model'],
                 'gear_ratio': stack['gear_ratio'],
                 'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
-                'joint_angle_limit_deg': stack['joint_angle_limit_deg'],
+                'joint_angle_limit_deg': joint_angle_limit_deg,
                 'motor_error_tolerance': ParameterValue(
                     LaunchConfiguration('motor_error_tolerance'), value_type=float
                 ),
@@ -121,8 +128,11 @@ def _translator_stack_group(stack: dict) -> GroupAction:
     ])
 
 
-def _legacy_motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> GroupAction:
+def _legacy_motor_stack_group(
+    stack: dict, motor_startup_delay_ms: int, hip_angle_limit_deg: float
+) -> GroupAction:
     ns = stack['ns']
+    joint_angle_limit_deg = _joint_angle_limit_for_stack(stack, hip_angle_limit_deg)
     return GroupAction([
         PushRosNamespace(ns),
         Node(
@@ -161,7 +171,7 @@ def _legacy_motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> Group
                 'motor_model': stack['motor_model'],
                 'gear_ratio': stack['gear_ratio'],
                 'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
-                'joint_angle_limit_deg': stack['joint_angle_limit_deg'],
+                'joint_angle_limit_deg': joint_angle_limit_deg,
                 'motor_error_tolerance': ParameterValue(
                     LaunchConfiguration('motor_error_tolerance'), value_type=float
                 ),
@@ -172,6 +182,9 @@ def _legacy_motor_stack_group(stack: dict, motor_startup_delay_ms: int) -> Group
 
 def _launch_setup(context, *args, **kwargs):
     bag_dir = LaunchConfiguration('bag_output_dir').perform(context)
+    hip_angle_limit_deg = float(
+        LaunchConfiguration('hip_angle_limit_deg').perform(context)
+    )
 
     actions = []
 
@@ -217,13 +230,16 @@ def _launch_setup(context, *args, **kwargs):
                 }],
             )
         )
-        actions.extend(_translator_stack_group(stack) for stack in BOOM_MOTOR_STACKS)
+        actions.extend(
+            _translator_stack_group(stack, hip_angle_limit_deg)
+            for stack in BOOM_MOTOR_STACKS
+        )
     else:
         stagger_ms = int(LaunchConfiguration('motor_startup_stagger_ms').perform(context))
         if stagger_ms < 0:
             stagger_ms = 0
         actions.extend(
-            _legacy_motor_stack_group(stack, index * stagger_ms)
+            _legacy_motor_stack_group(stack, index * stagger_ms, hip_angle_limit_deg)
             for index, stack in enumerate(BOOM_MOTOR_STACKS)
         )
 
@@ -313,7 +329,7 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'hip_angle_limit_deg',
             default_value='45.0',
-            description='Hip joint_despos clamp in boom_joystick_control (deg).',
+            description='Hip joint limit (deg) for boom_joystick_control and hip joint_translator_node.',
         ),
         DeclareLaunchArgument(
             'motor_error_tolerance',
