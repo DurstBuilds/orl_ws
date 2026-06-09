@@ -348,12 +348,17 @@ class BoomJoystickControl(Node):
                 target.control_was_active = False
                 continue
 
-            if not has_curpos and not target.warned_no_curpos:
-                topic_name = target.despos_publisher.topic_name
-                self.get_logger().warn(
-                    f'No joint_curpos received yet for {topic_name}; using 0.0 fallback'
-                )
-                target.warned_no_curpos = True
+            if not has_curpos:
+                hold_joint_msg.data = True
+                target.hold_joint_publisher.publish(hold_joint_msg)
+                if not target.warned_no_curpos:
+                    topic_name = target.despos_publisher.topic_name
+                    self.get_logger().warn(
+                        f'No joint_curpos received yet for {topic_name}; holding until feedback'
+                    )
+                    target.warned_no_curpos = True
+                target.control_was_active = False
+                continue
 
             self._publish_despos(target, curpos + delta)
             target.control_was_active = True

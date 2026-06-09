@@ -4,7 +4,6 @@
 // Parameters (TWEAK via launch or ros2 param):
 //   can_interface          — SocketCAN device (e.g. can0)
 //   namespaces,motor_models,can_ids — comma-separated lists, same length
-//   max_torque             — MIT torque scale (Nm)
 //   loop_rate_hz           — TX/RX service rate (default 200)
 //   feedback_timeout_ms    — stale feedback → comm fault zero-hold
 //   feedback_poll_ms       — blocking RX poll each loop iteration
@@ -52,7 +51,6 @@ namespace
 {
 
 constexpr float kSoftModeKd = 0.025f;
-constexpr float kDefaultMaxTorqueNm = 10.0f;
 constexpr double kDefaultLoopRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
 constexpr int kDefaultFeedbackPollMs = 15;
@@ -116,8 +114,6 @@ public:
   : Node("can_gateway_node")
   {
     can_interface_ = declare_parameter<std::string>("can_interface", "can0");
-    max_torque_nm_ = static_cast<float>(declare_parameter<double>(
-      "max_torque", static_cast<double>(kDefaultMaxTorqueNm)));
     loop_rate_hz_ = declare_parameter<double>("loop_rate_hz", kDefaultLoopRateHz);
     feedback_timeout_ms_ = declare_parameter<int>(
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
@@ -397,7 +393,7 @@ private:
   {
     struct can_frame frame{};
     cm_interface::pack_mit_command_frame(
-      frame, ch.can_id, p_delta, v_des, kp, kd, t_ff, ch.profile, max_torque_nm_, force_apply);
+      frame, ch.can_id, p_delta, v_des, kp, kd, t_ff, ch.profile, force_apply);
     if (!write_frame(frame)) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 2000,
@@ -618,6 +614,7 @@ private:
   void service_drive_tx(DriveChannel & ch)
   {
     if (ch.soft_mode) {
+      send_mit(ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
       return;
     }
 
@@ -705,7 +702,6 @@ private:
   int ak80_enable_settle_ms_{kDefaultAk80EnableSettleMs};
   int startup_origin_poll_ms_{kDefaultStartupOriginPollMs};
   int bus_warmup_ms_{kDefaultBusWarmupMs};
-  float max_torque_nm_{kDefaultMaxTorqueNm};
 
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};

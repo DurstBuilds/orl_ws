@@ -1,17 +1,92 @@
 import os
+import sys
+from pathlib import Path
 
 from ament_index_python.packages import get_package_share_directory
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription
+from launch.actions import DeclareLaunchArgument, GroupAction, IncludeLaunchDescription, OpaqueFunction
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 
+_launch_dir = Path(__file__).resolve().parent
+if str(_launch_dir) not in sys.path:
+    sys.path.insert(0, str(_launch_dir))
+
+from boom_motor_config import (  # noqa: E402
+    DEFAULT_MOTOR_ERROR_TOLERANCE,
+    DEFAULT_MOTOR_FEEDBACK_POLL_MS,
+    DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS,
+    origin_jump_threshold_for_motor_model,
+)
+
+
+def _launch_setup(context, *args, **kwargs):
+    motor_model = LaunchConfiguration('motor_model').perform(context).strip()
+    origin_jump_threshold = origin_jump_threshold_for_motor_model(motor_model)
+
+    motor_node_continuous = Node(
+        package='cm_interface',
+        executable='motor_node_continuous',
+        name='motor_node_continuous',
+        parameters=[{
+            'motor_model': LaunchConfiguration('motor_model'),
+            'can_id': ParameterValue(LaunchConfiguration('can_id'), value_type=int),
+            'feedback_timeout_ms': ParameterValue(
+                LaunchConfiguration('feedback_timeout_ms'), value_type=int
+            ),
+            'feedback_poll_ms': ParameterValue(
+                LaunchConfiguration('feedback_poll_ms'), value_type=int
+            ),
+        }],
+    )
+
+    motor_unwrapper_node = Node(
+        package='cm_interface',
+        executable='motor_unwrapper_node',
+        name='motor_unwrapper_node',
+        parameters=[{
+            'origin_jump_threshold': origin_jump_threshold,
+        }],
+    )
+
+    joint_translator_node = Node(
+        package='cm_interface',
+        executable='joint_translator_node',
+        name='joint_translator_node',
+        parameters=[{
+            'motor_model': LaunchConfiguration('motor_model'),
+            'gear_ratio': LaunchConfiguration('gear_ratio'),
+            'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
+            'motor_error_tolerance': ParameterValue(
+                LaunchConfiguration('motor_error_tolerance'), value_type=float
+            ),
+        }],
+    )
+
+    namespaced_group = GroupAction([
+        PushRosNamespace(LaunchConfiguration('ns')),
+        motor_node_continuous,
+        motor_unwrapper_node,
+        joint_translator_node,
+    ])
+
+    pkg_share = get_package_share_directory('cm_interface')
+    joystick_teleop = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            os.path.join(pkg_share, 'launch', 'joystick_teleop.launch.py'),
+        ),
+        launch_arguments={
+            'joy_dev': LaunchConfiguration('joy_dev'),
+            'namespaces': LaunchConfiguration('ns'),
+        }.items(),
+    )
+
+    return [namespaced_group, joystick_teleop]
+
 
 def generate_launch_description():
-    pkg_share = get_package_share_directory('cm_interface')
-
     ns_arg = DeclareLaunchArgument(
         'ns',
         default_value='',
@@ -35,11 +110,6 @@ def generate_launch_description():
         default_value='0',
         description='CAN drive ID for motor_node_continuous (MIT command and feedback).',
     )
-    max_torque_arg = DeclareLaunchArgument(
-        'max_torque',
-        default_value='10.0',
-        description='Max modeled torque (Nm) used for deltaP clamp in motor_node_continuous.',
-    )
 
     joy_dev_arg = DeclareLaunchArgument(
         'joy_dev',
@@ -51,50 +121,20 @@ def generate_launch_description():
         default_value='auto',
         description='Optional max motor speed (rad/s) for joint_translator_node; auto uses motor profile.',
     )
-
-    motor_node_continuous = Node(
-        package='cm_interface',
-        executable='motor_node_continuous',
-        name='motor_node_continuous',
-        parameters=[{
-            'motor_model': LaunchConfiguration('motor_model'),
-            'can_id': ParameterValue(LaunchConfiguration('can_id'), value_type=int),
-            'max_torque': ParameterValue(LaunchConfiguration('max_torque'), value_type=float),
-        }],
+    feedback_timeout_ms_arg = DeclareLaunchArgument(
+        'feedback_timeout_ms',
+        default_value=DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS,
+        description='No fresh feedback for this long (ms) triggers comm fault hold.',
     )
-
-    motor_unwrapper_node = Node(
-        package='cm_interface',
-        executable='motor_unwrapper_node',
-        name='motor_unwrapper_node',
+    feedback_poll_ms_arg = DeclareLaunchArgument(
+        'feedback_poll_ms',
+        default_value=DEFAULT_MOTOR_FEEDBACK_POLL_MS,
+        description='Blocking RX poll after each MIT TX (ms).',
     )
-
-    joint_translator_node = Node(
-        package='cm_interface',
-        executable='joint_translator_node',
-        name='joint_translator_node',
-        parameters=[{
-            'motor_model': LaunchConfiguration('motor_model'),
-            'gear_ratio': LaunchConfiguration('gear_ratio'),
-            'omega_max': ParameterValue(LaunchConfiguration('omega_max'), value_type=str),
-        }],
-    )
-
-    namespaced_group = GroupAction([
-        PushRosNamespace(LaunchConfiguration('ns')),
-        motor_node_continuous,
-        motor_unwrapper_node,
-        joint_translator_node,
-    ])
-
-    joystick_teleop = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(
-            os.path.join(pkg_share, 'launch', 'joystick_teleop.launch.py'),
-        ),
-        launch_arguments={
-            'joy_dev': LaunchConfiguration('joy_dev'),
-            'namespaces': LaunchConfiguration('ns'),
-        }.items(),
+    motor_error_tolerance_arg = DeclareLaunchArgument(
+        'motor_error_tolerance',
+        default_value=DEFAULT_MOTOR_ERROR_TOLERANCE,
+        description='Motor-space goal/hold tolerance (rad) for joint_translator_node.',
     )
 
     return LaunchDescription([
@@ -102,9 +142,10 @@ def generate_launch_description():
         gear_ratio_arg,
         motor_model_arg,
         can_id_arg,
-        max_torque_arg,
         joy_dev_arg,
         omega_max_arg,
-        namespaced_group,
-        joystick_teleop,
+        feedback_timeout_ms_arg,
+        feedback_poll_ms_arg,
+        motor_error_tolerance_arg,
+        OpaqueFunction(function=_launch_setup),
     ])

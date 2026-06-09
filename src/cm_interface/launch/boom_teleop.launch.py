@@ -4,6 +4,20 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node, PushRosNamespace
 from launch_ros.parameter_descriptions import ParameterValue
 
+import sys
+from pathlib import Path
+
+_launch_dir = Path(__file__).resolve().parent
+if str(_launch_dir) not in sys.path:
+    sys.path.insert(0, str(_launch_dir))
+
+from boom_motor_config import (  # noqa: E402
+    DEFAULT_MOTOR_ERROR_TOLERANCE,
+    DEFAULT_MOTOR_FEEDBACK_POLL_MS,
+    DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS,
+    origin_jump_threshold_for_motor_model,
+)
+
 
 def _joint_angle_limit_for_ns(context, *, launch_config_name: str) -> float:
     limit_deg = float(LaunchConfiguration(launch_config_name).perform(context))
@@ -25,14 +39,25 @@ def _launch_setup(context, *args, **kwargs):
         parameters=[{
             'motor_model': LaunchConfiguration('motor_model'),
             'can_id': ParameterValue(LaunchConfiguration('can_id'), value_type=int),
-            'max_torque': ParameterValue(LaunchConfiguration('max_torque'), value_type=float),
+            'feedback_timeout_ms': ParameterValue(
+                LaunchConfiguration('feedback_timeout_ms'), value_type=int
+            ),
+            'feedback_poll_ms': ParameterValue(
+                LaunchConfiguration('feedback_poll_ms'), value_type=int
+            ),
         }],
     )
+
+    motor_model = LaunchConfiguration('motor_model').perform(context).strip()
+    origin_jump_threshold = origin_jump_threshold_for_motor_model(motor_model)
 
     motor_unwrapper_node = Node(
         package='cm_interface',
         executable='motor_unwrapper_node',
         name='motor_unwrapper_node',
+        parameters=[{
+            'origin_jump_threshold': origin_jump_threshold,
+        }],
     )
 
     joint_translator_node = Node(
@@ -113,11 +138,6 @@ def generate_launch_description():
         default_value='0',
         description='CAN drive ID for motor_node_continuous (MIT command and feedback).',
     )
-    max_torque_arg = DeclareLaunchArgument(
-        'max_torque',
-        default_value='10.0',
-        description='Max modeled torque (Nm) used for deltaP clamp in motor_node_continuous.',
-    )
 
     joy_dev_arg = DeclareLaunchArgument(
         'joy_dev',
@@ -141,8 +161,18 @@ def generate_launch_description():
     )
     motor_error_tolerance_arg = DeclareLaunchArgument(
         'motor_error_tolerance',
-        default_value='0.001',
+        default_value=DEFAULT_MOTOR_ERROR_TOLERANCE,
         description='Motor-space goal/hold tolerance (rad) for joint_translator_node.',
+    )
+    feedback_timeout_ms_arg = DeclareLaunchArgument(
+        'feedback_timeout_ms',
+        default_value=DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS,
+        description='No fresh feedback for this long (ms) triggers comm fault hold.',
+    )
+    feedback_poll_ms_arg = DeclareLaunchArgument(
+        'feedback_poll_ms',
+        default_value=DEFAULT_MOTOR_FEEDBACK_POLL_MS,
+        description='Blocking RX poll after each MIT TX (ms).',
     )
 
     return LaunchDescription([
@@ -150,11 +180,12 @@ def generate_launch_description():
         gear_ratio_arg,
         motor_model_arg,
         can_id_arg,
-        max_torque_arg,
         joy_dev_arg,
         omega_max_arg,
         publish_hz_arg,
         joint_angle_limit_deg_arg,
         motor_error_tolerance_arg,
+        feedback_timeout_ms_arg,
+        feedback_poll_ms_arg,
         OpaqueFunction(function=_launch_setup),
     ])

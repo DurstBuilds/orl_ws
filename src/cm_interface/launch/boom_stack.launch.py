@@ -27,8 +27,11 @@ from boom_motor_config import (  # noqa: E402
     DEFAULT_NAMESPACES,
     DEFAULT_NAMESPACE_GEAR_RATIOS,
     DEFAULT_NAMESPACE_OMEGA_MAX,
+    JOINT_CURPOS_TOPICS,
+    MOTOR_COMMAND_TOPICS,
     MOTOR_STATE_TOPICS,
     omega_max_for_namespace,
+    origin_jump_threshold_for_stack,
     parse_namespace_omega_max,
 )
 
@@ -42,6 +45,12 @@ from launch_ros.parameter_descriptions import ParameterValue
 def _logging_enabled(context) -> bool:
     """True when enable_logging launch arg is true/1/yes."""
     value = LaunchConfiguration('enable_logging').perform(context).strip().lower()
+    return value in ('true', '1', 'yes')
+
+
+def _bag_record_control_topics(context) -> bool:
+    """True when bag_record_control_topics launch arg is true/1/yes."""
+    value = LaunchConfiguration('bag_record_control_topics').perform(context).strip().lower()
     return value in ('true', '1', 'yes')
 
 
@@ -130,6 +139,9 @@ def _translator_stack_group(
             package='cm_interface',
             executable='motor_unwrapper_node',
             name='motor_unwrapper_node',
+            parameters=[{
+                'origin_jump_threshold': origin_jump_threshold_for_stack(stack),
+            }],
         ),
         Node(
             package='cm_interface',
@@ -166,9 +178,6 @@ def _legacy_motor_stack_group(
                 'motor_model': stack['motor_model'],
                 'can_id': stack['can_id'],
                 'can_interface': LaunchConfiguration('can_interface'),
-                'max_torque': ParameterValue(
-                    LaunchConfiguration('max_torque'), value_type=float
-                ),
                 'tx_rate_hz': ParameterValue(
                     LaunchConfiguration('motor_tx_rate_hz'), value_type=float
                 ),
@@ -186,6 +195,9 @@ def _legacy_motor_stack_group(
             package='cm_interface',
             executable='motor_unwrapper_node',
             name='motor_unwrapper_node',
+            parameters=[{
+                'origin_jump_threshold': origin_jump_threshold_for_stack(stack),
+            }],
         ),
         Node(
             package='cm_interface',
@@ -228,9 +240,6 @@ def _launch_setup(context, *args, **kwargs):
                     'namespaces': DEFAULT_NAMESPACES,
                     'motor_models': DEFAULT_MOTOR_MODELS,
                     'can_ids': DEFAULT_CAN_IDS,
-                    'max_torque': ParameterValue(
-                        LaunchConfiguration('max_torque'), value_type=float
-                    ),
                     'loop_rate_hz': ParameterValue(
                         LaunchConfiguration('gateway_loop_rate_hz'), value_type=float
                     ),
@@ -303,6 +312,10 @@ def _launch_setup(context, *args, **kwargs):
         storage = LaunchConfiguration('bag_storage_id').perform(context)
         bag_uri = _next_bag_output_uri(base, bag_dir)
         bag_root = str(Path(bag_dir).expanduser().resolve())
+        bag_topics = list(MOTOR_STATE_TOPICS)
+        if _bag_record_control_topics(context):
+            bag_topics.extend(JOINT_CURPOS_TOPICS)
+            bag_topics.extend(MOTOR_COMMAND_TOPICS)
         print(
             f'[boom_stack] enable_logging: recording to {bag_root}/{bag_uri} '
             f'({bag_uri}_0.mcap inside bag directory when using mcap)'
@@ -317,7 +330,7 @@ def _launch_setup(context, *args, **kwargs):
                     bag_uri,
                     '-s',
                     storage,
-                    *MOTOR_STATE_TOPICS,
+                    *bag_topics,
                 ],
                 cwd=bag_root,
                 output='screen',
@@ -343,11 +356,6 @@ def generate_launch_description():
             'joy_dev',
             default_value='0',
             description='Joystick device index for joy_node.',
-        ),
-        DeclareLaunchArgument(
-            'max_torque',
-            default_value='10.0',
-            description='Max modeled torque (Nm) for MIT drives.',
         ),
         DeclareLaunchArgument(
             'omega_max',
@@ -441,6 +449,14 @@ def generate_launch_description():
             'enable_logging',
             default_value='false',
             description='If true, run ros2 bag record on all stack motor_state topics.',
+        ),
+        DeclareLaunchArgument(
+            'bag_record_control_topics',
+            default_value='false',
+            description=(
+                'When enable_logging is true, also record joint_curpos and motor_command '
+                'for all stack namespaces.'
+            ),
         ),
         DeclareLaunchArgument(
             'bag_output_uri',

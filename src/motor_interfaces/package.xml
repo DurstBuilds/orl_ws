@@ -3,9 +3,9 @@
 <package format="3">
   <name>motor_interfaces</name>
   <version>0.0.0</version>
-  <description>TODO: Package description</description>
-  <maintainer email="jdurst2000@gmail.com">jdurs</maintainer>
-  <license>TODO: License declaration</license>
+  <description>ROS 2 message definitions for motor state, commands, and unwrapped position.</description>
+  <maintainer email="jdurst2000@gmail.com">jdurst</maintainer>
+  <license>MIT</license>
 
   <buildtool_depend>ament_cmake</buildtool_depend>
   <buildtool_depend>rosidl_default_generators</buildtool_depend>

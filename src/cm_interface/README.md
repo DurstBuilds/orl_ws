@@ -57,7 +57,7 @@ Requires: `rclcpp`, `rclpy`, `std_msgs`, `sensor_msgs`, `motor_interfaces`, `joy
 | **motor_node_continuous.launch.py** | Motor node only. |
 | **can_gateway.launch.py** | CAN gateway only (boom drive list). |
 | **joint_translator.launch.py** | Translator + unwrapper only (motor node launched separately). |
-| **joystick_teleop.launch.py** / **joystick_control.launch.py** | Teleop nodes only. |
+| **joystick_teleop.launch.py** | Teleop nodes only (deadman + right-stick absolute position). |
 
 ### Full boom stack (recommended)
 
@@ -140,9 +140,9 @@ Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to cur
 
 ## motor_node_continuous
 
-- **Parameters**: `motor_model`, `can_id`, `can_interface` (default `can0`), `max_torque` (Nm; clamps `|kp * deltaP|`), `tx_rate_hz` (default 200), `feedback_timeout_ms` (default 100).
-- Dedicated CAN RX thread with kernel filters (only this drive’s ID + master ID 0).
-- `motor_command` uses QoS depth 1; TX timer sends the latest command (no blocking feedback read per callback).
+- **Parameters**: `motor_model`, `can_id`, `can_interface` (default `can0`), `tx_rate_hz` (default 200), `feedback_timeout_ms` (default 250), `feedback_poll_ms` (default 5).
+- Opens one SocketCAN socket per process; optional kernel filters for this drive’s ID.
+- TX timer sends the latest `motor_command` each tick; each TX is followed by a blocking feedback poll (capped at the TX period).
 - On comm fault (stale feedback), commands are forced to zero until feedback recovers.
 - Expects CAN interface up and drives configured for MIT mode.
 
@@ -154,11 +154,14 @@ See [docs/BOOM_STACK.md](docs/BOOM_STACK.md#logging) for `enable_logging`, bag p
 
 | Node / script | Role |
 |---------------|------|
-| `motor_node` | Legacy/alternate motor node |
-| `can_test_node` | CAN bring-up / test |
 | `keyboard_command` | Numpad absolute position commands via `motor_command` |
-| `terminal_motor_command` / `terminal_position_publisher` | Simple CLI publishers |
 | `joystick_control_node` | Deadman teleop with right-stick absolute angle |
+
+Manual keyboard teleop (remap namespace as needed):
+
+```bash
+ros2 run cm_interface keyboard_command --ros-args -r __ns:=/hip_motor
+```
 
 ## Example: monitor hip
 
@@ -184,4 +187,4 @@ cm_interface/
 - **No `joint_curpos`**: Ensure `motor_total_position` is publishing (unwrapper needs `motor_state`).
 - **Motor does not move**: Check `hold_joint`, `soft_mode`, and that `joint_despos` differs from `joint_curpos` beyond `motor_error_tolerance`.
 - **Hip overshoot at limit**: Confirm `joint_angle_limit_deg` on hip translator and `hip_angle_limit_deg` on teleop; reduce `hip_velocity_constant` or increase `publish_hz`.
-- **CAN errors**: Verify `can_id`, interface name in motor node source, and drive power/enable.
+- **CAN errors**: Verify `can_id`, interface name, drive power/enable, and that `can0` has `restart-ms 100` (see `can0_up.sh` and [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).

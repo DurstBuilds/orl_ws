@@ -134,31 +134,13 @@ inline int pack_position_continuous(
   return p_int;
 }
 
-inline float clamp_position_delta_for_torque(
-  float p_delta, float kp, float max_torque_nm)
-{
-  if (kp <= kCmdZeroEps) {
-    return p_delta;
-  }
-  const float max_abs_delta = max_torque_nm / kp;
-  if (p_delta > max_abs_delta) {
-    return max_abs_delta;
-  }
-  if (p_delta < -max_abs_delta) {
-    return -max_abs_delta;
-  }
-  return p_delta;
-}
-
 inline void pack_mit_command_frame(
   struct can_frame & frame,
   int can_id,
   float p_delta, float v_des, float kp, float kd, float t_ff,
-  const MotorMitProfile & profile, float max_torque_nm, bool force_apply = false)
+  const MotorMitProfile & profile, bool force_apply = false)
 {
-  const float p_delta_limited = clamp_position_delta_for_torque(p_delta, kp, max_torque_nm);
-
-  const int p_int = pack_position_continuous(p_delta_limited, v_des, t_ff, profile, force_apply);
+  const int p_int = pack_position_continuous(p_delta, v_des, t_ff, profile, force_apply);
   const int v_int = float_to_uint(v_des, profile.v_min, profile.v_max, 12);
   const int kp_int = float_to_uint(kp, profile.kp_min, profile.kp_max, 12);
   const int kd_int = float_to_uint(kd, profile.kd_min, profile.kd_max, 12);

@@ -46,7 +46,10 @@ For package-wide topics, other launch files, and single-motor benches, see the [
 
 ## Quick start
 
+On Raspberry Pi / MCP251x, bring up CAN with auto-restart before launch:
+
 ```bash
+ros2 run cm_interface can0_up.sh
 ros2 launch cm_interface boom_stack.launch.py
 ```
 
@@ -161,7 +164,6 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
 | `gateway_ak80_enable_settle_ms` | 250 | Post-enable wait for AK80-64 knee |
 | `gateway_startup_origin_poll_ms` | 100 | RX poll after set-origin at startup |
 | `gateway_bus_warmup_ms` | 100 | Delay after CAN bind before first enable |
-| `max_torque` | 10.0 | MIT torque scale (Nm) |
 | `motor_feedback_timeout_ms` | 250 | Stale feedback → comm fault zero-hold |
 | `motor_feedback_poll_ms` | 5 | Blocking RX poll each gateway loop |
 
@@ -215,6 +217,7 @@ ros2 param set /boom_joystick_control_node stick_deadzone 0.2
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `enable_logging` | `false` | Record all stack `motor_state` topics |
+| `bag_record_control_topics` | `false` | When logging, also record `joint_curpos` and `motor_command` |
 | `bag_output_uri` | `boom_stack_bag` | Base name; auto-increments `_0`, `_1`, … |
 | `bag_output_dir` | `.` | Directory for bag output |
 | `bag_storage_id` | `mcap` | Rosbag storage plugin |

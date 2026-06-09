@@ -9,6 +9,14 @@ if str(_launch_dir) not in sys.path:
 
 from boom_motor_config import (  # noqa: E402
     DEFAULT_CAN_IDS,
+    DEFAULT_GATEWAY_AK80_ENABLE_SETTLE_MS,
+    DEFAULT_GATEWAY_BUS_WARMUP_MS,
+    DEFAULT_GATEWAY_ENABLE_SETTLE_MS,
+    DEFAULT_GATEWAY_LOOP_RATE_HZ,
+    DEFAULT_GATEWAY_STARTUP_ORIGIN_POLL_MS,
+    DEFAULT_GATEWAY_STARTUP_STAGGER_MS,
+    DEFAULT_MOTOR_FEEDBACK_POLL_MS,
+    DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS,
     DEFAULT_MOTOR_MODELS,
     DEFAULT_NAMESPACES,
 )
@@ -23,11 +31,22 @@ from launch.substitutions import LaunchConfiguration
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('can_interface', default_value='can0'),
-        DeclareLaunchArgument('max_torque', default_value='10.0'),
-        DeclareLaunchArgument('loop_rate_hz', default_value='200.0'),
-        DeclareLaunchArgument('feedback_timeout_ms', default_value='250'),
-        DeclareLaunchArgument('feedback_poll_ms', default_value='5'),
-        DeclareLaunchArgument('startup_stagger_ms', default_value='200'),
+        DeclareLaunchArgument('loop_rate_hz', default_value=DEFAULT_GATEWAY_LOOP_RATE_HZ),
+        DeclareLaunchArgument(
+            'feedback_timeout_ms', default_value=DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS
+        ),
+        DeclareLaunchArgument('feedback_poll_ms', default_value=DEFAULT_MOTOR_FEEDBACK_POLL_MS),
+        DeclareLaunchArgument(
+            'startup_stagger_ms', default_value=DEFAULT_GATEWAY_STARTUP_STAGGER_MS
+        ),
+        DeclareLaunchArgument('enable_settle_ms', default_value=DEFAULT_GATEWAY_ENABLE_SETTLE_MS),
+        DeclareLaunchArgument(
+            'ak80_enable_settle_ms', default_value=DEFAULT_GATEWAY_AK80_ENABLE_SETTLE_MS
+        ),
+        DeclareLaunchArgument(
+            'startup_origin_poll_ms', default_value=DEFAULT_GATEWAY_STARTUP_ORIGIN_POLL_MS
+        ),
+        DeclareLaunchArgument('bus_warmup_ms', default_value=DEFAULT_GATEWAY_BUS_WARMUP_MS),
         DeclareLaunchArgument('namespaces', default_value=DEFAULT_NAMESPACES),
         DeclareLaunchArgument('motor_models', default_value=DEFAULT_MOTOR_MODELS),
         DeclareLaunchArgument('can_ids', default_value=DEFAULT_CAN_IDS),
@@ -41,7 +60,6 @@ def generate_launch_description():
                 'namespaces': LaunchConfiguration('namespaces'),
                 'motor_models': LaunchConfiguration('motor_models'),
                 'can_ids': LaunchConfiguration('can_ids'),
-                'max_torque': ParameterValue(LaunchConfiguration('max_torque'), value_type=float),
                 'loop_rate_hz': ParameterValue(LaunchConfiguration('loop_rate_hz'), value_type=float),
                 'feedback_timeout_ms': ParameterValue(
                     LaunchConfiguration('feedback_timeout_ms'), value_type=int
@@ -51,6 +69,18 @@ def generate_launch_description():
                 ),
                 'startup_stagger_ms': ParameterValue(
                     LaunchConfiguration('startup_stagger_ms'), value_type=int
+                ),
+                'enable_settle_ms': ParameterValue(
+                    LaunchConfiguration('enable_settle_ms'), value_type=int
+                ),
+                'ak80_enable_settle_ms': ParameterValue(
+                    LaunchConfiguration('ak80_enable_settle_ms'), value_type=int
+                ),
+                'startup_origin_poll_ms': ParameterValue(
+                    LaunchConfiguration('startup_origin_poll_ms'), value_type=int
+                ),
+                'bus_warmup_ms': ParameterValue(
+                    LaunchConfiguration('bus_warmup_ms'), value_type=int
                 ),
             }],
         ),

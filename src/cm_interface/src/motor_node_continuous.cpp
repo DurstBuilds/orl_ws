@@ -6,12 +6,13 @@
 // Parameters (TWEAK):
 //   can_interface, can_id     — SocketCAN binding
 //   motor_model               — ak70_10 | ak10_9 | ak80_64
-//   max_torque, tx_rate_hz    — MIT scale and command rate
+//   tx_rate_hz                — MIT command rate
 //   feedback_timeout_ms       — stale feedback → comm fault hold
 //   feedback_poll_ms          — RX poll after each TX
 //   startup_delay_ms          — stagger before opening CAN (multi-motor legacy)
 //   use_can_filters           — RX filter to this can_id + master id
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cerrno>
@@ -41,10 +42,9 @@ constexpr int kDefaultCanId = 0;
 constexpr int kDefaultMasterCanId = 0;
 constexpr float kCmdZeroEps = 1e-6f;
 constexpr float kSoftModeKd = 0.025f;
-constexpr float kDefaultMaxTorqueNm = 10.0f;
 constexpr double kDefaultTxRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
-constexpr int kDefaultMitFeedbackPollMs = 15;
+constexpr int kDefaultMitFeedbackPollMs = 5;
 constexpr int kOriginFeedbackPollMs = 50;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 constexpr int kPositionApplyBit = 0x8000;
@@ -167,8 +167,6 @@ public:
       "motor_model", "ak70_10");
     can_id_ = declare_parameter<int>("can_id", kDefaultCanId);
     can_interface_ = declare_parameter<std::string>("can_interface", "can0");
-    max_torque_nm_ = static_cast<float>(declare_parameter<double>(
-      "max_torque", static_cast<double>(kDefaultMaxTorqueNm)));
     tx_rate_hz_ = declare_parameter<double>("tx_rate_hz", kDefaultTxRateHz);
     feedback_timeout_ms_ = declare_parameter<int>(
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
@@ -182,9 +180,6 @@ public:
 
     if (can_id_ < 0 || can_id_ > 0x7FF) {
       throw std::invalid_argument("can_id must be in [0, 2047] for standard CAN");
-    }
-    if (max_torque_nm_ <= 0.0f) {
-      throw std::invalid_argument("max_torque must be > 0");
     }
     if (tx_rate_hz_ <= 0.0) {
       throw std::invalid_argument("tx_rate_hz must be > 0");
@@ -209,9 +204,9 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Motor model: %s | %s | can_id: %d | tx_rate: %.0f Hz | feedback_timeout: %d ms | "
-      "feedback_poll: %d ms | can_rx_filter=%s | max_torque=%.2f Nm",
+      "feedback_poll: %d ms | can_rx_filter=%s",
       profile_.name, can_interface_.c_str(), can_id_, tx_rate_hz_, feedback_timeout_ms_,
-      feedback_poll_ms_, use_can_filters_ ? "on" : "off", max_torque_nm_);
+      feedback_poll_ms_, use_can_filters_ ? "on" : "off");
 
     if (startup_delay_ms_ > 0) {
       RCLCPP_INFO(
@@ -221,7 +216,8 @@ public:
     }
 
     if (!open_can_socket()) {
-      return;
+      throw std::runtime_error(
+        "Failed to open CAN interface '" + can_interface_ + "'; motor node cannot start");
     }
 
     const auto cmd_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
@@ -519,9 +515,7 @@ private:
       return false;
     }
 
-    const float p_delta_limited = clamp_position_delta_for_torque(p_delta, kp);
-
-    const int p_int = pack_position_continuous(p_delta_limited, v_des, t_ff, force_apply);
+    const int p_int = pack_position_continuous(p_delta, v_des, t_ff, force_apply);
     const int v_int = float_to_uint(v_des, profile_.v_min, profile_.v_max, 12);
     const int kp_int = float_to_uint(kp, profile_.kp_min, profile_.kp_max, 12);
     const int kd_int = float_to_uint(kd, profile_.kd_min, profile_.kd_max, 12);
@@ -549,8 +543,17 @@ private:
       return false;
     }
 
-    read_mit_feedback(feedback_poll_ms_);
+    read_mit_feedback(effective_feedback_poll_ms());
     return true;
+  }
+
+  int effective_feedback_poll_ms() const
+  {
+    const int tx_period_ms = static_cast<int>(std::ceil(1000.0 / tx_rate_hz_));
+    if (tx_period_ms <= 0) {
+      return feedback_poll_ms_;
+    }
+    return std::min(feedback_poll_ms_, tx_period_ms);
   }
 
   void send_mit_command(
@@ -628,21 +631,6 @@ private:
       RCLCPP_INFO(get_logger(), "Set motor origin (current position = 0).");
       read_mit_feedback(kOriginFeedbackPollMs);
     }
-  }
-
-  float clamp_position_delta_for_torque(float p_delta, float kp) const
-  {
-    if (kp <= kCmdZeroEps) {
-      return p_delta;
-    }
-    const float max_abs_delta = max_torque_nm_ / kp;
-    if (p_delta > max_abs_delta) {
-      return max_abs_delta;
-    }
-    if (p_delta < -max_abs_delta) {
-      return -max_abs_delta;
-    }
-    return p_delta;
   }
 
   void publish_motor_state(const MitFeedback & fb)
@@ -792,7 +780,6 @@ private:
   bool has_soft_mode_on_position_{false};
 
   bool soft_mode_{false};
-  float max_torque_nm_{kDefaultMaxTorqueNm};
 };
 
 int main(int argc, char ** argv)

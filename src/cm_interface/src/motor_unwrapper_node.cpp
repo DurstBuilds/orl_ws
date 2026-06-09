@@ -5,8 +5,10 @@
 // On soft_mode false→true: no change. On true→false: next motor_state resets total to
 // wrapped position (coordinates with gateway set-origin on soft_mode off).
 // kOriginJumpThreshold: large single-step delta resets total (set-origin / glitch).
+// Configurable via origin_jump_threshold (AK80 knee uses a higher default in launch).
 
 #include <cmath>
+#include <stdexcept>
 
 #include "rclcpp/rclcpp.hpp"
 #include "motor_interfaces/msg/motor_state.hpp"
@@ -17,8 +19,7 @@ namespace
 {
 
 constexpr float kPositionEps = 1e-6f;
-// Single-step unwrapped delta above this is treated as set-origin / telemetry reset.
-constexpr float kOriginJumpThreshold = 2.0f;
+constexpr float kDefaultOriginJumpThreshold = 2.0f;
 
 // Shortest signed delta in (-pi, pi], handles pi <-> -pi boundary crossings.
 float unwrap_delta(float prev_wrapped, float new_wrapped)
@@ -34,6 +35,12 @@ class MotorUnwrapperNode : public rclcpp::Node
 public:
   MotorUnwrapperNode() : Node("motor_unwrapper_node")
   {
+    origin_jump_threshold_ = declare_parameter<double>(
+      "origin_jump_threshold", kDefaultOriginJumpThreshold);
+    if (origin_jump_threshold_ <= 0.0) {
+      throw std::invalid_argument("origin_jump_threshold must be > 0");
+    }
+
     subscription_ = create_subscription<motor_interfaces::msg::MotorState>(
       "motor_state",
       10,
@@ -92,7 +99,7 @@ private:
 
       // Do not use raw (new - prev) for jump detection: crossing pi->-pi gives
       // |raw| ~ 2*pi even though unwrapped delta is small.
-      if (std::fabs(delta) > kOriginJumpThreshold) {
+      if (std::fabs(delta) > origin_jump_threshold_) {
         RCLCPP_WARN(
           get_logger(),
           "Large unwrapped step (%.4f rad); resetting total to %.4f",
@@ -124,6 +131,7 @@ private:
   bool reset_total_on_next_feedback_{false};
   float last_wrapped_{0.0f};
   float total_position_{0.0f};
+  double origin_jump_threshold_{kDefaultOriginJumpThreshold};
 };
 
 int main(int argc, char ** argv)

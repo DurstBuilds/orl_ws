@@ -54,6 +54,36 @@ DEFAULT_NAMESPACE_OMEGA_MAX = ','.join(
     f"{stack['ns']}:{stack.get('omega_max', 'auto')}" for stack in BOOM_MOTOR_STACKS
 )
 MOTOR_STATE_TOPICS = [f'/{stack["ns"]}/motor_state' for stack in BOOM_MOTOR_STACKS]
+JOINT_CURPOS_TOPICS = [f'/{stack["ns"]}/joint_curpos' for stack in BOOM_MOTOR_STACKS]
+MOTOR_COMMAND_TOPICS = [f'/{stack["ns"]}/motor_command' for stack in BOOM_MOTOR_STACKS]
+
+# Shared launch defaults (boom_stack, can_gateway, motor_stack, boom_teleop).
+DEFAULT_MOTOR_ERROR_TOLERANCE = '0.001'
+DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS = '250'
+DEFAULT_MOTOR_FEEDBACK_POLL_MS = '5'
+DEFAULT_GATEWAY_LOOP_RATE_HZ = '200.0'
+DEFAULT_GATEWAY_STARTUP_STAGGER_MS = '200'
+DEFAULT_GATEWAY_ENABLE_SETTLE_MS = '100'
+DEFAULT_GATEWAY_AK80_ENABLE_SETTLE_MS = '250'
+DEFAULT_GATEWAY_STARTUP_ORIGIN_POLL_MS = '100'
+DEFAULT_GATEWAY_BUS_WARMUP_MS = '100'
+
+DEFAULT_ORIGIN_JUMP_THRESHOLD = 2.0
+DEFAULT_AK80_ORIGIN_JUMP_THRESHOLD = 4.0
+
+
+def origin_jump_threshold_for_stack(stack: dict) -> float:
+    """Unwrapper jump-reset threshold (rad); AK80 knee uses a higher cap."""
+    if stack.get('motor_model') == 'ak80_64':
+        return DEFAULT_AK80_ORIGIN_JUMP_THRESHOLD
+    return DEFAULT_ORIGIN_JUMP_THRESHOLD
+
+
+def origin_jump_threshold_for_motor_model(motor_model: str) -> float:
+    """Unwrapper jump-reset threshold for single-motor bench launches."""
+    if motor_model.strip() == 'ak80_64':
+        return DEFAULT_AK80_ORIGIN_JUMP_THRESHOLD
+    return DEFAULT_ORIGIN_JUMP_THRESHOLD
 
 
 def parse_namespace_omega_max(param: str, default: str = 'auto') -> dict[str, str]:
