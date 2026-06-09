@@ -67,6 +67,8 @@ ros2 launch cm_interface boom_stack.launch.py
 
 **See [docs/BOOM_STACK.md](docs/BOOM_STACK.md)** for architecture, adding motors (`launch/boom_motor_config.py`), launch arguments, teleop controls, tuning, and troubleshooting.
 
+On Raspberry Pi / MCP251x, bring up CAN with auto-restart before launch: `ros2 run cm_interface can0_up.sh` (sets `restart-ms 100`).
+
 Default: `use_can_gateway:=true` (one gateway on `can0`) and four drives from `boom_motor_config.py` (knee, hip, two wheels). Legacy per-motor CAN: `use_can_gateway:=false`.
 
 ### Single motor (boom teleop)

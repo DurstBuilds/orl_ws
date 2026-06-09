@@ -94,6 +94,11 @@ install(PROGRAMS
   RENAME boom_joystick_control_node
 )
 
+install(PROGRAMS
+  scripts/can0_up.sh
+  DESTINATION lib/${PROJECT_NAME}
+)
+
 install(DIRECTORY launch
   DESTINATION share/${PROJECT_NAME}
 )

@@ -17,8 +17,27 @@ For package-wide topics, other launch files, and single-motor benches, see the [
 2. Bring up SocketCAN (example):
 
    ```bash
-   sudo ip link set can0 type can bitrate 1000000
+   sudo ip link set can0 down
+   sudo ip link set can0 type can bitrate 1000000 restart-ms 100
    sudo ip link set can0 up
+   ```
+
+   **`restart-ms 100`** (recommended on Raspberry Pi + MCP251x): after a bus-off, the kernel
+   auto-restarts the controller ~100 ms later. Without it (`restart-ms 0`, common default),
+   `can0` stays **BUS-OFF** until manual `down`/`up`, the gateway sees no feedback on any drive,
+   and you get comm faults on all motors. With `restart-ms=100`, hard knee runs can recover
+   invisibly on the bus while motion continues.
+
+   Verify:
+
+   ```bash
+   ip -details link show can0 | grep -E 'restart-ms|can state'
+   ```
+
+   Optional helper (same commands):
+
+   ```bash
+   ros2 run cm_interface can0_up.sh
    ```
 
 3. Install the `joy` package (`sudo apt install ros-${ROS_DISTRO}-joy` or from source).
@@ -272,10 +291,32 @@ Defaults are imported from `boom_motor_config.py`.
 | Translator speed cap (per motor) | `namespace_omega_max` at launch, or `omega_max` in `BOOM_MOTOR_STACKS` / profile in `motor_mit_profile.hpp` |
 | MIT stiffness | Profile `mit_kp`/`mit_kd` or translator overrides |
 
+## CAN bus-off and auto-restart (Pi / MCP251x)
+
+Under high knee torque and impacts, the adapter can enter **BUS-OFF** (`can state BUS-OFF` in
+`ip -details link show can0`). The ROS gateway does not run `ip link` for you.
+
+| Setup | Behavior |
+|-------|----------|
+| `restart-ms 0` | Bus stays off; manual `sudo ip link set can0 down/up` required; all motors comm-fault |
+| `restart-ms 100` | Kernel auto-restarts from bus-off; often no visible issue; motors keep running |
+
+Monitor auto-restarts:
+
+```bash
+watch -n0.5 'grep -E "restarts|busoff" /proc/net/can/stats'
+```
+
+The **`restarts`** counter increments on each automatic recovery. **`busoff`** counts bus-off events.
+If both climb quickly during testing, fix termination, ground, and power — do not rely on restart alone.
+
+Live error frames: `candump -ta -e can0` (second terminal while running).
+
 ## Troubleshooting
 
 | Symptom | Likely cause | What to do |
 |---------|--------------|------------|
+| `can state BUS-OFF`, all motors comm fault | Host adapter left bus; `restart-ms 0` | `restart-ms 100` on `can0`; check wiring/power; `candump -e can0` |
 | Gateway exits immediately | CAN interface down or wrong name | Check `ip link`; set `can_interface:=...` |
 | `Motor initilization failed, check power and CAN wiring` | No MIT feedback from any drive after startup | Power, CAN bitrate, termination, `can_interface`, drive IDs |
 | `Duplicate can_id` fatal | Config error | Fix `BOOM_MOTOR_STACKS` |
