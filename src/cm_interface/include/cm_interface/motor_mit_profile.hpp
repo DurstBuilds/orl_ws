@@ -61,7 +61,7 @@ inline constexpr MotorMitProfile kAk10_9{
   0.0f, 5.0f,    // kd_min, kd_max
   0.1f, 0.0f,    // pd_kp, pd_kd
   5.0f,         // omega_max (rad/s)
-  100.0f, 0.1f,   // mit_kp, mit_kd (Nm/rad)
+  500.0f, 0.1f,   // mit_kp, mit_kd (Nm/rad)
 };
 
 inline constexpr MotorMitProfile kAk80_64{
