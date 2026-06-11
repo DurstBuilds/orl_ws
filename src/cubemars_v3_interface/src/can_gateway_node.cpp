@@ -32,6 +32,7 @@
 
 #include "cubemars_v3_interface/mit_can_codec.hpp"
 #include "cubemars_v3_interface/motor_mit_profile.hpp"
+#include "rcl_interfaces/msg/parameter_descriptor.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "motor_interfaces/msg/motor_command.hpp"
 #include "motor_interfaces/msg/motor_state.hpp"
@@ -62,6 +63,27 @@ std::vector<std::string> split_csv(const std::string & value)
     parts.push_back(item.substr(start, end - start + 1));
   }
   return parts;
+}
+
+// Launch may pass can_ids:=1 as integer; node expects a CSV string.
+std::string csv_param_as_string(
+  rclcpp::Node & node,
+  const std::string & name,
+  const std::string & default_value)
+{
+  rcl_interfaces::msg::ParameterDescriptor descriptor;
+  descriptor.dynamic_typing = true;
+  node.declare_parameter(name, default_value, descriptor);
+  const rclcpp::Parameter param = node.get_parameter(name);
+  switch (param.get_type()) {
+    case rclcpp::ParameterType::PARAMETER_STRING:
+      return param.as_string();
+    case rclcpp::ParameterType::PARAMETER_INTEGER:
+      return std::to_string(param.as_int());
+    default:
+      throw std::invalid_argument(
+        "parameter '" + name + "' must be a comma-separated string or integer");
+  }
 }
 
 }  // namespace
@@ -95,12 +117,9 @@ public:
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
     bus_warmup_ms_ = declare_parameter<int>("bus_warmup_ms", kDefaultBusWarmupMs);
 
-    const auto namespaces = split_csv(
-      declare_parameter<std::string>("namespaces", "motor"));
-    const auto motor_models = split_csv(
-      declare_parameter<std::string>("motor_models", "ak60_6"));
-    const auto drive_ids_str = split_csv(
-      declare_parameter<std::string>("can_ids", "1"));
+    const auto namespaces = split_csv(csv_param_as_string(*this, "namespaces", "motor"));
+    const auto motor_models = split_csv(csv_param_as_string(*this, "motor_models", "ak60_6"));
+    const auto drive_ids_str = split_csv(csv_param_as_string(*this, "can_ids", "1"));
 
     if (namespaces.size() != motor_models.size() || namespaces.size() != drive_ids_str.size()) {
       throw std::invalid_argument(
