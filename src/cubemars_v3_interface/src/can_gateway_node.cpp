@@ -3,16 +3,18 @@
 // Parameters:
 //   can_interface          — SocketCAN device (e.g. can0)
 //   namespaces,motor_models,can_ids — comma-separated lists, same length
-//   loop_rate_hz           — MIT command TX rate (default 200)
+//   loop_rate_hz           — comm-fault watchdog rate (default 200)
 //   feedback_timeout_ms    — stale streaming feedback → comm fault zero-hold
-//   bus_warmup_ms          — delay after bind before first MIT command
+//   bus_warmup_ms          — delay after bind before waiting for feedback
+//   log_unmatched_frames   — throttle-log extended frames that are not feedback
 //
-// V3 drives stream MIT feedback at a fixed rate (not request-response). A background
-// RX thread publishes motor_state on every feedback frame; the TX loop only sends
-// motor_command. MotorCommand.position is absolute position (rad), not per-tick delta.
+// V3 drives stream feedback on ID (0x29 << 8) | drive_id. MIT commands use
+// (0x08 << 8) | drive_id and are sent only when motor_command changes.
+// MotorCommand.position is absolute position (rad), not per-tick delta.
 
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cerrno>
 #include <cstring>
 #include <memory>
@@ -45,6 +47,7 @@ constexpr int kDefaultFeedbackTimeoutMs = 250;
 constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kRxPollTimeoutMs = 5;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
+constexpr float kCmdZeroEps = 1e-6f;
 
 using SteadyClock = std::chrono::steady_clock;
 using SteadyTime = SteadyClock::time_point;
@@ -91,6 +94,16 @@ std::string csv_param_as_string(
 class CanGatewayNode : public rclcpp::Node
 {
 public:
+  struct MitCommandSnapshot
+  {
+    float p{0.0f};
+    float v{0.0f};
+    float kp{0.0f};
+    float kd{0.0f};
+    float t{0.0f};
+    bool valid{false};
+  };
+
   struct DriveChannel
   {
     std::string ns;
@@ -102,10 +115,12 @@ public:
 
     motor_interfaces::msg::MotorCommand pending_command;
     bool has_pending_command{false};
+    MitCommandSnapshot last_sent_;
 
     SteadyTime last_feedback_time{};
     bool has_feedback{false};
     bool comm_fault{false};
+    bool zero_hold_sent{false};
   };
 
   CanGatewayNode()
@@ -116,6 +131,7 @@ public:
     feedback_timeout_ms_ = declare_parameter<int>(
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
     bus_warmup_ms_ = declare_parameter<int>("bus_warmup_ms", kDefaultBusWarmupMs);
+    log_unmatched_frames_ = declare_parameter<bool>("log_unmatched_frames", false);
 
     const auto namespaces = split_csv(csv_param_as_string(*this, "namespaces", "motor"));
     const auto motor_models = split_csv(csv_param_as_string(*this, "motor_models", "ak60_6"));
@@ -181,23 +197,25 @@ public:
         });
 
       RCLCPP_INFO(
-        get_logger(), "Drive %s: %s drive_id=%d arb=0x%03X",
+        get_logger(),
+        "Drive %s: %s drive_id=%d cmd=0x%03X fb=0x%03X",
         ch.ns.c_str(), ch.profile.name, ch.drive_id,
-        cubemars_v3_interface::make_mit_arbitration_id(ch.drive_id));
+        cubemars_v3_interface::make_mit_arbitration_id(ch.drive_id),
+        cubemars_v3_interface::make_feedback_arbitration_id(ch.drive_id));
     }
 
     RCLCPP_INFO(
       get_logger(),
-      "%s | %zu drives | TX %.0f Hz | streaming feedback | feedback_timeout %d ms",
+      "%s | %zu drives | TX on command change | watchdog %.0f Hz | feedback_timeout %d ms",
       can_interface_.c_str(), drives_.size(), loop_rate_hz_, feedback_timeout_ms_);
 
     start_rx_thread();
     startup_all_drives();
 
     const auto period = std::chrono::duration<double>(1.0 / loop_rate_hz_);
-    loop_timer_ = create_wall_timer(
+    watchdog_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(period),
-      std::bind(&CanGatewayNode::loop_timer_callback, this));
+      std::bind(&CanGatewayNode::watchdog_callback, this));
   }
 
   ~CanGatewayNode() override
@@ -308,11 +326,13 @@ private:
 
   bool route_feedback_frame(const struct can_frame & frame)
   {
+    bool matched = false;
     for (auto & ch : drives_) {
       cubemars_v3_interface::MitFeedback fb;
       if (!fb.unpack_reply(frame, ch.drive_id)) {
         continue;
       }
+      matched = true;
 
       if (fb.error_code != 0) {
         RCLCPP_WARN_THROTTLE(
@@ -323,12 +343,19 @@ private:
       }
 
       bool first = false;
+      bool recovered = false;
       {
         std::lock_guard<std::mutex> lock(feedback_mutex_);
         first = !ch.has_feedback;
+        recovered = ch.comm_fault;
         ch.last_feedback_time = SteadyClock::now();
         ch.has_feedback = true;
         ch.comm_fault = false;
+        ch.zero_hold_sent = false;
+      }
+
+      if (recovered) {
+        ch.last_sent_.valid = false;
       }
 
       if (first) {
@@ -339,6 +366,13 @@ private:
 
       publish_state(ch, fb);
       return true;
+    }
+
+    if (!matched && log_unmatched_frames_ && (frame.can_id & CAN_EFF_FLAG) != 0) {
+      RCLCPP_DEBUG_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "Unmatched extended frame id=0x%03X dlc=%d",
+        static_cast<unsigned>(frame.can_id & CAN_EFF_MASK), frame.can_dlc);
     }
     return false;
   }
@@ -355,19 +389,41 @@ private:
     ch.state_pub->publish(msg);
   }
 
-  bool send_mit(
-    const DriveChannel & ch,
-    float p_des, float v_des, float kp, float kd, float t_ff)
+  static bool mit_command_equal(
+    const MitCommandSnapshot & a,
+    float p, float v, float kp, float kd, float t)
   {
+    if (!a.valid) {
+      return false;
+    }
+    return std::fabs(a.p - p) < kCmdZeroEps &&
+           std::fabs(a.v - v) < kCmdZeroEps &&
+           std::fabs(a.kp - kp) < kCmdZeroEps &&
+           std::fabs(a.kd - kd) < kCmdZeroEps &&
+           std::fabs(a.t - t) < kCmdZeroEps;
+  }
+
+  bool send_mit(
+    DriveChannel & ch,
+    float p_des, float v_des, float kp, float kd, float t_ff,
+    bool force = false)
+  {
+    if (!force && mit_command_equal(ch.last_sent_, p_des, v_des, kp, kd, t_ff)) {
+      return true;
+    }
+
     struct can_frame frame{};
     cubemars_v3_interface::pack_mit_command_frame(
       frame, ch.drive_id, p_des, v_des, kp, kd, t_ff, ch.profile);
     if (!write_frame(frame)) {
       RCLCPP_ERROR_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "[%s] MIT TX failed on drive_id=%d.", ch.ns.c_str(), ch.drive_id);
+        "[%s] MIT TX failed on drive_id=%d: %s",
+        ch.ns.c_str(), ch.drive_id, std::strerror(errno));
       return false;
     }
+
+    ch.last_sent_ = {p_des, v_des, kp, kd, t_ff, true};
     return true;
   }
 
@@ -378,10 +434,6 @@ private:
         get_logger(), "[STARTUP] Waiting %d ms for %s to settle.",
         bus_warmup_ms_, can_interface_.c_str());
       std::this_thread::sleep_for(std::chrono::milliseconds(bus_warmup_ms_));
-    }
-
-    for (auto & ch : drives_) {
-      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f);
     }
 
     const auto deadline = SteadyClock::now() +
@@ -441,62 +493,56 @@ private:
     return age_ms <= feedback_timeout_ms_;
   }
 
-  void mark_comm_fault(DriveChannel & ch)
+  bool mark_comm_fault(DriveChannel & ch)
   {
     std::lock_guard<std::mutex> lock(feedback_mutex_);
     if (!ch.has_feedback || ch.comm_fault) {
-      return;
+      return false;
     }
     ch.comm_fault = true;
+    ch.zero_hold_sent = false;
     RCLCPP_ERROR(
       get_logger(),
       "[%s] drive_id=%d comm fault: no fresh MIT feedback for %d ms; zero hold",
       ch.ns.c_str(), ch.drive_id, feedback_timeout_ms_);
+    return true;
   }
 
-  void service_drive_tx(DriveChannel & ch)
+  void send_zero_hold_once(DriveChannel & ch)
   {
-    bool comm_fault = false;
-    bool has_feedback = false;
-    {
-      std::lock_guard<std::mutex> lock(feedback_mutex_);
-      comm_fault = ch.comm_fault;
-      has_feedback = ch.has_feedback;
-    }
-
-    if (comm_fault) {
-      send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
+    if (ch.zero_hold_sent) {
       return;
     }
-
-    if (comm_fault_checks_armed_ && has_feedback && !feedback_is_fresh(ch)) {
-      mark_comm_fault(ch);
-      send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
-      return;
+    if (send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true)) {
+      ch.zero_hold_sent = true;
     }
-
-    if (!has_feedback) {
-      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f);
-      return;
-    }
-
-    if (ch.has_pending_command) {
-      const auto & cmd = ch.pending_command;
-      send_mit(ch, cmd.position, cmd.velocity, cmd.kp, cmd.kd, cmd.torque);
-      return;
-    }
-
-    send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f);
   }
 
-  void loop_timer_callback()
+  void watchdog_callback()
   {
-    if (can_socket_ < 0) {
+    if (can_socket_ < 0 || !comm_fault_checks_armed_) {
       return;
     }
 
     for (auto & ch : drives_) {
-      service_drive_tx(ch);
+      bool comm_fault = false;
+      bool has_feedback = false;
+      {
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
+        comm_fault = ch.comm_fault;
+        has_feedback = ch.has_feedback;
+      }
+
+      if (comm_fault) {
+        send_zero_hold_once(ch);
+        continue;
+      }
+
+      if (has_feedback && !feedback_is_fresh(ch)) {
+        if (mark_comm_fault(ch)) {
+          send_zero_hold_once(ch);
+        }
+      }
     }
   }
 
@@ -507,18 +553,33 @@ private:
     if (ch == nullptr) {
       return;
     }
+
+    {
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      if (ch->comm_fault) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "[%s] Ignoring motor_command while comm fault is active.",
+          ch->ns.c_str());
+        return;
+      }
+    }
+
     ch->pending_command = *msg;
     ch->has_pending_command = true;
+    send_mit(
+      *ch, msg->position, msg->velocity, msg->kp, msg->kd, msg->torque);
   }
 
   std::string can_interface_{"can0"};
   double loop_rate_hz_{kDefaultLoopRateHz};
   int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
   int bus_warmup_ms_{kDefaultBusWarmupMs};
+  bool log_unmatched_frames_{false};
 
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};
-  rclcpp::TimerBase::SharedPtr loop_timer_;
+  rclcpp::TimerBase::SharedPtr watchdog_timer_;
   bool comm_fault_checks_armed_{false};
 
   std::atomic<bool> rx_running_{false};

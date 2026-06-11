@@ -1,8 +1,9 @@
 #ifndef CUBEMARS_V3_INTERFACE__MIT_CAN_CODEC_HPP_
 #define CUBEMARS_V3_INTERFACE__MIT_CAN_CODEC_HPP_
 
-// V3 firmware MIT codec (AK 3.0 manual section 4.2).
-// Extended CAN ID: (control_mode << 8) | drive_id, MIT control mode = 8.
+// V3 firmware MIT codec (AK 3.0 manual sections 4.2 and 4.3.1).
+// MIT commands: extended ID (control_mode << 8) | drive_id, control mode = 8.
+// Periodic feedback: extended ID (0x29 << 8) | drive_id (streaming upload).
 
 #include <cstdint>
 
@@ -14,6 +15,7 @@ namespace cubemars_v3_interface
 {
 
 inline constexpr uint32_t kMitControlModeId = 8;
+inline constexpr uint32_t kFeedbackFunctionId = 0x29;
 
 inline const char * mit_error_string(int code)
 {
@@ -52,6 +54,11 @@ inline uint32_t make_mit_arbitration_id(int drive_id)
   return (kMitControlModeId << 8) | static_cast<uint32_t>(drive_id & 0xFF);
 }
 
+inline uint32_t make_feedback_arbitration_id(int drive_id)
+{
+  return (kFeedbackFunctionId << 8) | static_cast<uint32_t>(drive_id & 0xFF);
+}
+
 inline canid_t make_extended_can_id(int drive_id)
 {
   return static_cast<canid_t>(make_mit_arbitration_id(drive_id) | CAN_EFF_FLAG);
@@ -76,7 +83,7 @@ inline bool feedback_frame_matches_drive(const struct can_frame & frame, int exp
   }
 
   const uint32_t arb_id = static_cast<uint32_t>(frame.can_id & CAN_EFF_MASK);
-  const uint32_t expected_arb = make_mit_arbitration_id(expected_drive_id);
+  const uint32_t expected_arb = make_feedback_arbitration_id(expected_drive_id);
   return arb_id == expected_arb;
 }
 

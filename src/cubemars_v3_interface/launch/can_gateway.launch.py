@@ -28,6 +28,9 @@ def _launch_setup(context, *args, **kwargs):
                     LaunchConfiguration('feedback_timeout_ms').perform(context)
                 ),
                 'bus_warmup_ms': int(LaunchConfiguration('bus_warmup_ms').perform(context)),
+                'log_unmatched_frames': LaunchConfiguration(
+                    'log_unmatched_frames'
+                ).perform(context).strip().lower() in ('true', '1', 'yes'),
             }],
         ),
     ]
@@ -36,11 +39,20 @@ def _launch_setup(context, *args, **kwargs):
 def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument('can_interface', default_value='can0'),
-        DeclareLaunchArgument('loop_rate_hz', default_value='200.0'),
+        DeclareLaunchArgument(
+            'loop_rate_hz',
+            default_value='200.0',
+            description='Comm-fault watchdog rate (Hz); MIT TX is on motor_command change only.',
+        ),
         DeclareLaunchArgument('feedback_timeout_ms', default_value='250'),
         DeclareLaunchArgument('bus_warmup_ms', default_value='100'),
         DeclareLaunchArgument('namespaces', default_value='motor'),
         DeclareLaunchArgument('motor_models', default_value='ak60_6'),
         DeclareLaunchArgument('can_ids', default_value='1'),
+        DeclareLaunchArgument(
+            'log_unmatched_frames',
+            default_value='false',
+            description='Throttle-log extended CAN frames that are not periodic feedback.',
+        ),
         OpaqueFunction(function=_launch_setup),
     ])
