@@ -41,8 +41,8 @@ def generate_launch_description():
         DeclareLaunchArgument('can_interface', default_value='can0'),
         DeclareLaunchArgument(
             'loop_rate_hz',
-            default_value='200.0',
-            description='Comm-fault watchdog rate (Hz); MIT TX is on motor_command change only.',
+            default_value='100.0',
+            description='MIT hold refresh and comm-fault watchdog rate (Hz).',
         ),
         DeclareLaunchArgument('feedback_timeout_ms', default_value='250'),
         DeclareLaunchArgument('bus_warmup_ms', default_value='100'),

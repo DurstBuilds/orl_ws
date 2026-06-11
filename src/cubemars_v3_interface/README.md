@@ -55,7 +55,7 @@ ros2 topic echo /motor/motor_state
 
 `MotorCommand.position` is **absolute position in rad**, not a per-tick delta.
 
-MIT commands are sent **only when `motor_command` changes** (not retransmitted at a fixed rate).
+MIT commands are sent when `motor_command` changes and **re-sent at `loop_rate_hz` (default 100 Hz) while held**. The drive requires periodic MIT refresh to stay engaged; idle drives receive no commands.
 
 ## Topics (per namespace)
 

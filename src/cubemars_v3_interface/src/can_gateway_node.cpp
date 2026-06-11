@@ -3,13 +3,14 @@
 // Parameters:
 //   can_interface          — SocketCAN device (e.g. can0)
 //   namespaces,motor_models,can_ids — comma-separated lists, same length
-//   loop_rate_hz           — comm-fault watchdog rate (default 200)
+//   loop_rate_hz           — refresh rate for active MIT hold + comm-fault watchdog (default 100)
 //   feedback_timeout_ms    — stale streaming feedback → comm fault zero-hold
 //   bus_warmup_ms          — delay after bind before waiting for feedback
 //   log_unmatched_frames   — throttle-log extended frames that are not feedback
 //
 // V3 drives stream feedback on ID (0x29 << 8) | drive_id. MIT commands use
-// (0x08 << 8) | drive_id and are sent only when motor_command changes.
+// (0x08 << 8) | drive_id. Commands are sent on motor_command change and re-sent at
+// loop_rate_hz while a command is held (drive requires periodic MIT refresh).
 // MotorCommand.position is absolute position (rad), not per-tick delta.
 
 #include <atomic>
@@ -42,7 +43,7 @@
 namespace
 {
 
-constexpr double kDefaultLoopRateHz = 200.0;
+constexpr double kDefaultLoopRateHz = 100.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
 constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kRxPollTimeoutMs = 5;
@@ -206,7 +207,7 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "%s | %zu drives | TX on command change | watchdog %.0f Hz | feedback_timeout %d ms",
+      "%s | %zu drives | hold refresh %.0f Hz | feedback_timeout %d ms",
       can_interface_.c_str(), drives_.size(), loop_rate_hz_, feedback_timeout_ms_);
 
     start_rx_thread();
@@ -518,6 +519,15 @@ private:
     }
   }
 
+  void refresh_pending_command(DriveChannel & ch)
+  {
+    if (!ch.has_pending_command) {
+      return;
+    }
+    const auto & cmd = ch.pending_command;
+    send_mit(ch, cmd.position, cmd.velocity, cmd.kp, cmd.kd, cmd.torque, true);
+  }
+
   void watchdog_callback()
   {
     if (can_socket_ < 0 || !comm_fault_checks_armed_) {
@@ -542,7 +552,10 @@ private:
         if (mark_comm_fault(ch)) {
           send_zero_hold_once(ch);
         }
+        continue;
       }
+
+      refresh_pending_command(ch);
     }
   }
 
