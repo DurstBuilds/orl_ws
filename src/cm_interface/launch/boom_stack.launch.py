@@ -48,12 +48,6 @@ def _logging_enabled(context) -> bool:
     return value in ('true', '1', 'yes')
 
 
-def _bag_record_control_topics(context) -> bool:
-    """True when bag_record_control_topics launch arg is true/1/yes."""
-    value = LaunchConfiguration('bag_record_control_topics').perform(context).strip().lower()
-    return value in ('true', '1', 'yes')
-
-
 def _use_can_gateway(context) -> bool:
     """True when use_can_gateway launch arg is true/1/yes."""
     value = LaunchConfiguration('use_can_gateway').perform(context).strip().lower()
@@ -313,9 +307,8 @@ def _launch_setup(context, *args, **kwargs):
         bag_uri = _next_bag_output_uri(base, bag_dir)
         bag_root = str(Path(bag_dir).expanduser().resolve())
         bag_topics = list(MOTOR_STATE_TOPICS)
-        if _bag_record_control_topics(context):
-            bag_topics.extend(JOINT_CURPOS_TOPICS)
-            bag_topics.extend(MOTOR_COMMAND_TOPICS)
+        bag_topics.extend(MOTOR_COMMAND_TOPICS)
+        bag_topics.extend(JOINT_CURPOS_TOPICS)
         print(
             f'[boom_stack] enable_logging: recording to {bag_root}/{bag_uri} '
             f'({bag_uri}_0.mcap inside bag directory when using mcap)'
@@ -448,14 +441,9 @@ def generate_launch_description():
         DeclareLaunchArgument(
             'enable_logging',
             default_value='false',
-            description='If true, run ros2 bag record on all stack motor_state topics.',
-        ),
-        DeclareLaunchArgument(
-            'bag_record_control_topics',
-            default_value='false',
             description=(
-                'When enable_logging is true, also record joint_curpos and motor_command '
-                'for all stack namespaces.'
+                'If true, run ros2 bag record on all stack motor_state, motor_command, '
+                'and joint_curpos topics.'
             ),
         ),
         DeclareLaunchArgument(

@@ -22,10 +22,53 @@ from boom_motor_config import (  # noqa: E402
 )
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument
+from launch.actions import DeclareLaunchArgument, OpaqueFunction
 from launch_ros.actions import Node
-from launch_ros.parameter_descriptions import ParameterValue
 from launch.substitutions import LaunchConfiguration
+
+
+def _launch_setup(context, *args, **kwargs):
+    # perform() + str() so CLI args like can_ids:=1 are not sent as integer parameters.
+    namespaces = str(LaunchConfiguration('namespaces').perform(context)).strip()
+    motor_models = str(LaunchConfiguration('motor_models').perform(context)).strip()
+    can_ids = str(LaunchConfiguration('can_ids').perform(context)).strip()
+
+    return [
+        Node(
+            package='cm_interface',
+            executable='can_gateway_node',
+            name='can_gateway_node',
+            output='screen',
+            parameters=[{
+                'can_interface': LaunchConfiguration('can_interface').perform(context),
+                'namespaces': namespaces,
+                'motor_models': motor_models,
+                'can_ids': can_ids,
+                'loop_rate_hz': float(LaunchConfiguration('loop_rate_hz').perform(context)),
+                'feedback_timeout_ms': int(
+                    LaunchConfiguration('feedback_timeout_ms').perform(context)
+                ),
+                'feedback_poll_ms': int(
+                    LaunchConfiguration('feedback_poll_ms').perform(context)
+                ),
+                'startup_stagger_ms': int(
+                    LaunchConfiguration('startup_stagger_ms').perform(context)
+                ),
+                'enable_settle_ms': int(
+                    LaunchConfiguration('enable_settle_ms').perform(context)
+                ),
+                'ak80_enable_settle_ms': int(
+                    LaunchConfiguration('ak80_enable_settle_ms').perform(context)
+                ),
+                'startup_origin_poll_ms': int(
+                    LaunchConfiguration('startup_origin_poll_ms').perform(context)
+                ),
+                'bus_warmup_ms': int(
+                    LaunchConfiguration('bus_warmup_ms').perform(context)
+                ),
+            }],
+        ),
+    ]
 
 
 def generate_launch_description():
@@ -50,38 +93,5 @@ def generate_launch_description():
         DeclareLaunchArgument('namespaces', default_value=DEFAULT_NAMESPACES),
         DeclareLaunchArgument('motor_models', default_value=DEFAULT_MOTOR_MODELS),
         DeclareLaunchArgument('can_ids', default_value=DEFAULT_CAN_IDS),
-        Node(
-            package='cm_interface',
-            executable='can_gateway_node',
-            name='can_gateway_node',
-            output='screen',
-            parameters=[{
-                'can_interface': LaunchConfiguration('can_interface'),
-                'namespaces': LaunchConfiguration('namespaces'),
-                'motor_models': LaunchConfiguration('motor_models'),
-                'can_ids': LaunchConfiguration('can_ids'),
-                'loop_rate_hz': ParameterValue(LaunchConfiguration('loop_rate_hz'), value_type=float),
-                'feedback_timeout_ms': ParameterValue(
-                    LaunchConfiguration('feedback_timeout_ms'), value_type=int
-                ),
-                'feedback_poll_ms': ParameterValue(
-                    LaunchConfiguration('feedback_poll_ms'), value_type=int
-                ),
-                'startup_stagger_ms': ParameterValue(
-                    LaunchConfiguration('startup_stagger_ms'), value_type=int
-                ),
-                'enable_settle_ms': ParameterValue(
-                    LaunchConfiguration('enable_settle_ms'), value_type=int
-                ),
-                'ak80_enable_settle_ms': ParameterValue(
-                    LaunchConfiguration('ak80_enable_settle_ms'), value_type=int
-                ),
-                'startup_origin_poll_ms': ParameterValue(
-                    LaunchConfiguration('startup_origin_poll_ms'), value_type=int
-                ),
-                'bus_warmup_ms': ParameterValue(
-                    LaunchConfiguration('bus_warmup_ms'), value_type=int
-                ),
-            }],
-        ),
+        OpaqueFunction(function=_launch_setup),
     ])
