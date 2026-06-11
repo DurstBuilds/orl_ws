@@ -24,7 +24,8 @@ source install/setup.bash
 ## Prerequisites
 
 1. Motor configured in **MIT / force-control mode** via the CubeMars upper computer.
-2. CAN feedback set to **query-reply** (request-response) mode.
+2. CAN feedback set to **streaming** (continuous) mode — drives publish feedback at a
+   fixed rate; the gateway updates `motor_state` on each frame (not request-response).
 3. SocketCAN up at 1 Mbps:
 
    ```bash
@@ -70,6 +71,6 @@ Verify with `candump can0` — expect extended frames like `00000801` for drive 
 
 ## Troubleshooting
 
-- **No feedback**: Check drive ID, motor power, MIT mode, and query-reply CAN setting.
+- **No feedback**: Check drive ID, motor power, MIT mode, and streaming CAN feedback setting.
 - **Wrong velocity/torque readings**: Feedback scaling constants in `mit_can_codec.hpp` may need
   tuning against your hardware; see manual section 4.2.

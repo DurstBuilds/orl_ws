@@ -3,17 +3,20 @@
 // Parameters:
 //   can_interface          — SocketCAN device (e.g. can0)
 //   namespaces,motor_models,can_ids — comma-separated lists, same length
-//   loop_rate_hz           — TX/RX service rate (default 200)
-//   feedback_timeout_ms    — stale feedback → comm fault zero-hold
-//   feedback_poll_ms       — blocking RX poll each loop iteration
-//   bus_warmup_ms          — delay after bind before first MIT ping
+//   loop_rate_hz           — MIT command TX rate (default 200)
+//   feedback_timeout_ms    — stale streaming feedback → comm fault zero-hold
+//   bus_warmup_ms          — delay after bind before first MIT command
 //
-// MotorCommand.position is absolute position (rad), not per-tick delta.
+// V3 drives stream MIT feedback at a fixed rate (not request-response). A background
+// RX thread publishes motor_state on every feedback frame; the TX loop only sends
+// motor_command. MotorCommand.position is absolute position (rad), not per-tick delta.
 
+#include <atomic>
 #include <chrono>
 #include <cerrno>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <thread>
@@ -38,8 +41,8 @@ namespace
 
 constexpr double kDefaultLoopRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
-constexpr int kDefaultFeedbackPollMs = 15;
 constexpr int kDefaultBusWarmupMs = 100;
+constexpr int kRxPollTimeoutMs = 5;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 
 using SteadyClock = std::chrono::steady_clock;
@@ -90,7 +93,6 @@ public:
     loop_rate_hz_ = declare_parameter<double>("loop_rate_hz", kDefaultLoopRateHz);
     feedback_timeout_ms_ = declare_parameter<int>(
       "feedback_timeout_ms", kDefaultFeedbackTimeoutMs);
-    feedback_poll_ms_ = declare_parameter<int>("feedback_poll_ms", kDefaultFeedbackPollMs);
     bus_warmup_ms_ = declare_parameter<int>("bus_warmup_ms", kDefaultBusWarmupMs);
 
     const auto namespaces = split_csv(
@@ -167,10 +169,10 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "%s | %zu drives | loop %.0f Hz | feedback_timeout %d ms | feedback_poll %d ms",
-      can_interface_.c_str(), drives_.size(), loop_rate_hz_, feedback_timeout_ms_,
-      feedback_poll_ms_);
+      "%s | %zu drives | TX %.0f Hz | streaming feedback | feedback_timeout %d ms",
+      can_interface_.c_str(), drives_.size(), loop_rate_hz_, feedback_timeout_ms_);
 
+    start_rx_thread();
     startup_all_drives();
 
     const auto period = std::chrono::duration<double>(1.0 / loop_rate_hz_);
@@ -181,6 +183,7 @@ public:
 
   ~CanGatewayNode() override
   {
+    stop_rx_thread();
     if (can_socket_ >= 0) {
       close(can_socket_);
       can_socket_ = -1;
@@ -241,60 +244,46 @@ private:
     return write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame));
   }
 
-  void process_pending_rx()
+  void start_rx_thread()
   {
-    if (can_socket_ < 0) {
-      return;
-    }
+    rx_running_ = true;
+    rx_thread_ = std::thread(&CanGatewayNode::rx_thread_main, this);
+  }
 
+  void stop_rx_thread()
+  {
+    rx_running_ = false;
+    if (rx_thread_.joinable()) {
+      rx_thread_.join();
+    }
+  }
+
+  void rx_thread_main()
+  {
     struct pollfd pfd{};
     pfd.fd = can_socket_;
     pfd.events = POLLIN;
 
-    while (poll(&pfd, 1, 0) > 0) {
-      struct can_frame frame{};
-      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
-      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
-        break;
-      }
-      route_feedback_frame(frame);
-    }
-  }
-
-  void poll_bus_feedback(int poll_timeout_ms)
-  {
-    if (can_socket_ < 0) {
-      return;
-    }
-
-    const auto deadline = SteadyClock::now() + std::chrono::milliseconds(poll_timeout_ms);
-    while (rclcpp::ok() && SteadyClock::now() < deadline) {
-      const auto remaining_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-        deadline - SteadyClock::now()).count();
-      if (remaining_ms <= 0) {
-        break;
-      }
-
-      struct pollfd pfd{};
-      pfd.fd = can_socket_;
-      pfd.events = POLLIN;
-      const int poll_result = poll(&pfd, 1, static_cast<int>(remaining_ms));
+    while (rx_running_ && rclcpp::ok()) {
+      const int poll_result = poll(&pfd, 1, kRxPollTimeoutMs);
       if (poll_result < 0) {
         if (errno == EINTR) {
           continue;
         }
-        return;
-      }
-      if (poll_result == 0) {
         break;
       }
-
-      struct can_frame frame{};
-      const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
-      if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+      if (poll_result == 0) {
         continue;
       }
-      route_feedback_frame(frame);
+
+      while (rx_running_) {
+        struct can_frame frame{};
+        const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
+        if (nbytes != static_cast<ssize_t>(sizeof(frame))) {
+          break;
+        }
+        route_feedback_frame(frame);
+      }
     }
   }
 
@@ -314,14 +303,19 @@ private:
           cubemars_v3_interface::mit_error_string(fb.error_code), fb.error_code);
       }
 
-      const bool first = !ch.has_feedback;
-      ch.last_feedback_time = SteadyClock::now();
-      ch.has_feedback = true;
-      ch.comm_fault = false;
+      bool first = false;
+      {
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
+        first = !ch.has_feedback;
+        ch.last_feedback_time = SteadyClock::now();
+        ch.has_feedback = true;
+        ch.comm_fault = false;
+      }
 
       if (first) {
         RCLCPP_INFO(
-          get_logger(), "[%s] drive_id=%d MIT feedback active.", ch.ns.c_str(), ch.drive_id);
+          get_logger(), "[%s] drive_id=%d streaming MIT feedback active.",
+          ch.ns.c_str(), ch.drive_id);
       }
 
       publish_state(ch, fb);
@@ -371,25 +365,45 @@ private:
       send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f);
     }
 
-    poll_bus_feedback(feedback_timeout_ms_);
-    process_pending_rx();
+    const auto deadline = SteadyClock::now() +
+      std::chrono::milliseconds(feedback_timeout_ms_);
+    while (rclcpp::ok() && SteadyClock::now() < deadline) {
+      bool all_have_feedback = true;
+      {
+        std::lock_guard<std::mutex> lock(feedback_mutex_);
+        for (const auto & ch : drives_) {
+          if (!ch.has_feedback) {
+            all_have_feedback = false;
+            break;
+          }
+        }
+      }
+      if (all_have_feedback) {
+        break;
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
 
     bool any_feedback = false;
-    for (const auto & ch : drives_) {
-      if (ch.has_feedback) {
-        any_feedback = true;
-      } else {
-        RCLCPP_WARN(
-          get_logger(),
-          "[STARTUP] [%s] drive_id=%d no MIT feedback after startup ping.",
-          ch.ns.c_str(), ch.drive_id);
+    {
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      for (const auto & ch : drives_) {
+        if (ch.has_feedback) {
+          any_feedback = true;
+        } else {
+          RCLCPP_WARN(
+            get_logger(),
+            "[STARTUP] [%s] drive_id=%d no streaming MIT feedback within %d ms.",
+            ch.ns.c_str(), ch.drive_id, feedback_timeout_ms_);
+        }
       }
     }
 
     if (!any_feedback && !drives_.empty()) {
       RCLCPP_ERROR(
         get_logger(),
-        "[STARTUP] No MIT feedback; check power, CAN wiring, drive ID, and MIT mode.");
+        "[STARTUP] No MIT feedback; check power, CAN wiring, drive ID, MIT mode, "
+        "and streaming feedback setting.");
     } else if (any_feedback) {
       RCLCPP_INFO(get_logger(), "[STARTUP] Gateway ready.");
     }
@@ -399,6 +413,7 @@ private:
 
   bool feedback_is_fresh(const DriveChannel & ch) const
   {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     if (!ch.has_feedback) {
       return false;
     }
@@ -409,6 +424,7 @@ private:
 
   void mark_comm_fault(DriveChannel & ch)
   {
+    std::lock_guard<std::mutex> lock(feedback_mutex_);
     if (!ch.has_feedback || ch.comm_fault) {
       return;
     }
@@ -421,18 +437,26 @@ private:
 
   void service_drive_tx(DriveChannel & ch)
   {
-    if (ch.comm_fault) {
+    bool comm_fault = false;
+    bool has_feedback = false;
+    {
+      std::lock_guard<std::mutex> lock(feedback_mutex_);
+      comm_fault = ch.comm_fault;
+      has_feedback = ch.has_feedback;
+    }
+
+    if (comm_fault) {
       send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
       return;
     }
 
-    if (comm_fault_checks_armed_ && ch.has_feedback && !feedback_is_fresh(ch)) {
+    if (comm_fault_checks_armed_ && has_feedback && !feedback_is_fresh(ch)) {
       mark_comm_fault(ch);
       send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f);
       return;
     }
 
-    if (!ch.has_feedback) {
+    if (!has_feedback) {
       send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f);
       return;
     }
@@ -451,9 +475,6 @@ private:
     if (can_socket_ < 0) {
       return;
     }
-
-    process_pending_rx();
-    poll_bus_feedback(feedback_poll_ms_);
 
     for (auto & ch : drives_) {
       service_drive_tx(ch);
@@ -474,13 +495,16 @@ private:
   std::string can_interface_{"can0"};
   double loop_rate_hz_{kDefaultLoopRateHz};
   int feedback_timeout_ms_{kDefaultFeedbackTimeoutMs};
-  int feedback_poll_ms_{kDefaultFeedbackPollMs};
   int bus_warmup_ms_{kDefaultBusWarmupMs};
 
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};
   rclcpp::TimerBase::SharedPtr loop_timer_;
   bool comm_fault_checks_armed_{false};
+
+  std::atomic<bool> rx_running_{false};
+  std::thread rx_thread_;
+  mutable std::mutex feedback_mutex_;
 };
 
 int main(int argc, char ** argv)

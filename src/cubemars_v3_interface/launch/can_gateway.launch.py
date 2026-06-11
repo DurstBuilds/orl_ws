@@ -12,7 +12,6 @@ def generate_launch_description():
         DeclareLaunchArgument('can_interface', default_value='can0'),
         DeclareLaunchArgument('loop_rate_hz', default_value='200.0'),
         DeclareLaunchArgument('feedback_timeout_ms', default_value='250'),
-        DeclareLaunchArgument('feedback_poll_ms', default_value='15'),
         DeclareLaunchArgument('bus_warmup_ms', default_value='100'),
         DeclareLaunchArgument('namespaces', default_value='motor'),
         DeclareLaunchArgument('motor_models', default_value='ak60_6'),
@@ -32,9 +31,6 @@ def generate_launch_description():
                 ),
                 'feedback_timeout_ms': ParameterValue(
                     LaunchConfiguration('feedback_timeout_ms'), value_type=int
-                ),
-                'feedback_poll_ms': ParameterValue(
-                    LaunchConfiguration('feedback_poll_ms'), value_type=int
                 ),
                 'bus_warmup_ms': ParameterValue(
                     LaunchConfiguration('bus_warmup_ms'), value_type=int
