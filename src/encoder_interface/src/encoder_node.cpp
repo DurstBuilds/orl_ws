@@ -1,7 +1,7 @@
 // encoder_node: Poll Vishay RAIK060 multi-turn encoder over Linux spidev (SPI simple frame).
 //
 // Parameters:
-//   spi_device    — spidev path (default /dev/spidev0.1)
+//   spi_device    — spidev path (default /dev/spidev1.2, SPI1 CE2 / GPIO16)
 //   spi_speed_hz  — SPI clock (100 kHz .. 3 MHz)
 //   poll_rate_hz  — publish rate
 //   frame_id      — EncoderState header frame_id
@@ -110,7 +110,7 @@ public:
   EncoderNode()
   : Node("encoder_node")
   {
-    spi_device_ = declare_parameter<std::string>("spi_device", "/dev/spidev0.1");
+    spi_device_ = declare_parameter<std::string>("spi_device", "/dev/spidev1.2");
     spi_speed_hz_ = declare_parameter<int>("spi_speed_hz", 1000000);
     poll_rate_hz_ = declare_parameter<double>("poll_rate_hz", 100.0);
     frame_id_ = declare_parameter<std::string>("frame_id", "encoder_link");

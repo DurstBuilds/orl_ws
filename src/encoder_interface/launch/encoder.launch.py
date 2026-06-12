@@ -1,4 +1,4 @@
-# Launch RAIK060 multi-turn encoder SPI reader on Raspberry Pi spidev0.1.
+# Launch RAIK060 multi-turn encoder SPI reader on Raspberry Pi SPI1 (GPIO16 CE2).
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -26,7 +26,7 @@ def _launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('spi_device', default_value='/dev/spidev0.1'),
+        DeclareLaunchArgument('spi_device', default_value='/dev/spidev1.2'),
         DeclareLaunchArgument('spi_speed_hz', default_value='1000000'),
         DeclareLaunchArgument('poll_rate_hz', default_value='100.0'),
         DeclareLaunchArgument('frame_id', default_value='encoder_link'),

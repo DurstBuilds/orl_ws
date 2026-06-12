@@ -6,25 +6,46 @@ ROS 2 SPI driver for the Vishay **RAIK060I11318FB693** multi-turn absolute encod
 
 ```bash
 cd /path/to/orl_ws
+source /opt/ros/$ROS_DISTRO/setup.bash
 colcon build --packages-select encoder_interface
 source install/setup.bash
 ```
 
-## Raspberry Pi SPI bring-up
+## Raspberry Pi wiring (SPI1)
 
-1. Enable SPI: `sudo raspi-config` → Interface Options → SPI, or add `dtparam=spi=on` to `/boot/firmware/config.txt`.
-2. Wire encoder `/CS` to **CE1** (spidev0.**1**), plus SCLK, MOSI, MISO, GND. Supply **5 V ± 0.25 V** on VCC.
-3. Verify the device node exists:
+Default configuration matches this wiring:
 
-   ```bash
-   ls -l /dev/spidev0.1
-   ```
+| Encoder pin | Signal | Pi connection |
+|-------------|--------|---------------|
+| 1 | VCC | Pin 4 (5 V) |
+| 2 | SCLK | GPIO21 (SPI1 SCLK) |
+| 3 | `/CS` | GPIO16 (SPI1 CE2) |
+| 4 | MOSI | GPIO20 (SPI1 MOSI) |
+| 5 | MISO | GPIO19 (SPI1 MISO) |
+| 6 | GND | Pin 6 (GND) |
 
-4. Optional bus test:
+**GPIO16 works as chip select** — it is SPI1 CE2, exposed as `/dev/spidev1.2`. You do not need to move `/CS` unless you prefer a different CE line (GPIO18 = CE0 → `spidev1.0`, GPIO17 = CE1 → `spidev1.1`).
 
-   ```bash
-   spidev_test -D /dev/spidev0.1 -s 1000000
-   ```
+## Device tree (required for SPI1)
+
+SPI1 is disabled by default. Add to `/boot/firmware/config.txt`:
+
+```text
+dtparam=spi=on
+dtoverlay=spi1-3cs
+```
+
+`spi1-3cs` is required for GPIO16 (CE2). Reboot, then verify:
+
+```bash
+ls -l /dev/spidev1.2
+```
+
+Optional bus test:
+
+```bash
+spidev_test -D /dev/spidev1.2 -s 1000000
+```
 
 Perform encoder self-calibration after mechanical mounting (push-button on the sensor). Reads work at reduced accuracy until calibrated.
 
@@ -34,7 +55,7 @@ Perform encoder self-calibration after mechanical mounting (push-button on the s
 ros2 launch encoder_interface encoder.launch.py
 ```
 
-Parameters: `spi_device`, `spi_speed_hz` (default 1 MHz), `poll_rate_hz` (default 100), `frame_id`, `cs_delay_us` (default 10).
+Parameters: `spi_device` (default `/dev/spidev1.2`), `spi_speed_hz` (default 1 MHz), `poll_rate_hz` (default 100), `frame_id`, `cs_delay_us` (default 10).
 
 ## Verify
 
