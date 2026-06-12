@@ -1,0 +1,215 @@
+// encoder_node: Poll Vishay RAIK060 multi-turn encoder over Linux spidev (SPI simple frame).
+//
+// Parameters:
+//   spi_device    — spidev path (default /dev/spidev0.1)
+//   spi_speed_hz  — SPI clock (100 kHz .. 3 MHz)
+//   poll_rate_hz  — publish rate
+//   frame_id      — EncoderState header frame_id
+//   cs_delay_us   — tFCD delay from /CS fall to first SCLK (>= 5 us)
+
+#include <array>
+#include <chrono>
+#include <cerrno>
+#include <cstring>
+#include <memory>
+#include <string>
+
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#include <unistd.h>
+#include <linux/spi/spidev.h>
+
+#include "encoder_interface/raik060_spi_codec.hpp"
+#include "encoder_interface/msg/encoder_state.hpp"
+#include "rclcpp/rclcpp.hpp"
+
+namespace
+{
+
+class SpiDevice
+{
+public:
+  SpiDevice(const std::string & device, uint32_t speed_hz, uint16_t cs_delay_us)
+  : cs_delay_us_(cs_delay_us)
+  {
+    fd_ = open(device.c_str(), O_RDWR);
+    if (fd_ < 0) {
+      throw std::runtime_error(
+        "Failed to open SPI device '" + device + "': " + std::strerror(errno));
+    }
+
+    const uint8_t mode = encoder_interface::kSpiMode;
+    const uint8_t bits = 8;
+    if (ioctl(fd_, SPI_IOC_WR_MODE, &mode) < 0 ||
+      ioctl(fd_, SPI_IOC_WR_BITS_PER_WORD, &bits) < 0 ||
+      ioctl(fd_, SPI_IOC_WR_MAX_SPEED_HZ, &speed_hz) < 0)
+    {
+      close_fd();
+      throw std::runtime_error(
+        "Failed to configure SPI device '" + device + "': " + std::strerror(errno));
+    }
+  }
+
+  ~SpiDevice()
+  {
+    close_fd();
+  }
+
+  SpiDevice(const SpiDevice &) = delete;
+  SpiDevice & operator=(const SpiDevice &) = delete;
+
+  bool read_simple_frame_mt(std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> & rx)
+  {
+    if (fd_ < 0) {
+      return false;
+    }
+
+    std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> tx{};
+    std::array<uint8_t, 1> tx_pad{};
+    std::array<uint8_t, 1> rx_pad{};
+
+    // Hold /CS and satisfy tFCD before clocking the 44-bit response.
+    spi_ioc_transfer delay_xfer{};
+    delay_xfer.tx_buf = reinterpret_cast<uint64_t>(tx_pad.data());
+    delay_xfer.rx_buf = reinterpret_cast<uint64_t>(rx_pad.data());
+    delay_xfer.len = 1;
+    delay_xfer.speed_hz = 10000;
+    delay_xfer.delay_usecs = cs_delay_us_;
+    delay_xfer.cs_change = 0;
+
+    spi_ioc_transfer data_xfer{};
+    data_xfer.tx_buf = reinterpret_cast<uint64_t>(tx.data());
+    data_xfer.rx_buf = reinterpret_cast<uint64_t>(rx.data());
+    data_xfer.len = encoder_interface::kSimpleFrameClockBytes;
+    data_xfer.speed_hz = 0;  // use device default from SPI_IOC_WR_MAX_SPEED_HZ
+    data_xfer.cs_change = 0;
+
+    std::array<spi_ioc_transfer, 2> transfers{delay_xfer, data_xfer};
+    if (ioctl(fd_, SPI_IOC_MESSAGE(static_cast<int>(transfers.size())), transfers.data()) < 0) {
+      return false;
+    }
+    return true;
+  }
+
+private:
+  void close_fd()
+  {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
+  }
+
+  int fd_{-1};
+  uint16_t cs_delay_us_{10};
+};
+
+class EncoderNode : public rclcpp::Node
+{
+public:
+  EncoderNode()
+  : Node("encoder_node")
+  {
+    spi_device_ = declare_parameter<std::string>("spi_device", "/dev/spidev0.1");
+    spi_speed_hz_ = declare_parameter<int>("spi_speed_hz", 1000000);
+    poll_rate_hz_ = declare_parameter<double>("poll_rate_hz", 100.0);
+    frame_id_ = declare_parameter<std::string>("frame_id", "encoder_link");
+    cs_delay_us_ = declare_parameter<int>("cs_delay_us", 10);
+
+    if (spi_speed_hz_ < 100000 || spi_speed_hz_ > 3000000) {
+      RCLCPP_WARN(
+        get_logger(),
+        "spi_speed_hz=%d outside datasheet range [100000, 3000000]",
+        spi_speed_hz_);
+    }
+    if (poll_rate_hz_ <= 0.0) {
+      throw std::runtime_error("poll_rate_hz must be positive");
+    }
+
+    spi_ = std::make_unique<SpiDevice>(
+      spi_device_, static_cast<uint32_t>(spi_speed_hz_),
+      static_cast<uint16_t>(cs_delay_us_));
+
+    publisher_ = create_publisher<encoder_interface::msg::EncoderState>("encoder/state", 10);
+
+    const auto period = std::chrono::duration<double>(1.0 / poll_rate_hz_);
+    timer_ = create_wall_timer(
+      std::chrono::duration_cast<std::chrono::nanoseconds>(period),
+      std::bind(&EncoderNode::poll_once, this));
+
+    RCLCPP_INFO(
+      get_logger(),
+      "RAIK060 encoder node started: device=%s speed=%d Hz poll=%.1f Hz",
+      spi_device_.c_str(), spi_speed_hz_, poll_rate_hz_);
+  }
+
+private:
+  void poll_once()
+  {
+    std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> rx{};
+    if (!spi_->read_simple_frame_mt(rx)) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "SPI read failed on %s: %s", spi_device_.c_str(), std::strerror(errno));
+      publish_invalid();
+      return;
+    }
+
+    const auto frame = encoder_interface::parse_simple_frame_mt(rx);
+
+    encoder_interface::msg::EncoderState msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = frame_id_;
+    msg.position_counts = frame.position_counts;
+    msg.turn_count = frame.turn_count;
+    msg.angle_rad = encoder_interface::counts_to_angle_rad(frame.position_counts);
+    msg.total_angle_rad = encoder_interface::total_angle_rad(frame.turn_count, frame.position_counts);
+    msg.error_active = !frame.error_ok;
+    msg.warning_active = !frame.warning_ok;
+    msg.crc_valid = frame.crc_valid;
+
+    if (!frame.crc_valid) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 1000,
+        "Encoder CRC invalid (turn=%d pos=%u); try increasing cs_delay_us or lowering spi_speed_hz",
+        frame.turn_count, frame.position_counts);
+    }
+
+    publisher_->publish(msg);
+  }
+
+  void publish_invalid()
+  {
+    encoder_interface::msg::EncoderState msg;
+    msg.header.stamp = now();
+    msg.header.frame_id = frame_id_;
+    msg.crc_valid = false;
+    publisher_->publish(msg);
+  }
+
+  std::string spi_device_;
+  int spi_speed_hz_{1000000};
+  double poll_rate_hz_{100.0};
+  std::string frame_id_;
+  int cs_delay_us_{10};
+
+  std::unique_ptr<SpiDevice> spi_;
+  rclcpp::Publisher<encoder_interface::msg::EncoderState>::SharedPtr publisher_;
+  rclcpp::TimerBase::SharedPtr timer_;
+};
+
+}  // namespace
+
+int main(int argc, char ** argv)
+{
+  rclcpp::init(argc, argv);
+  try {
+    rclcpp::spin(std::make_shared<EncoderNode>());
+  } catch (const std::exception & ex) {
+    RCLCPP_ERROR(rclcpp::get_logger("encoder_node"), "Fatal error: %s", ex.what());
+    rclcpp::shutdown();
+    return 1;
+  }
+  rclcpp::shutdown();
+  return 0;
+}
