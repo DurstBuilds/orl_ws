@@ -30,7 +30,7 @@ class SpiDevice
 {
 public:
   SpiDevice(const std::string & device, uint32_t speed_hz, uint16_t cs_delay_us)
-  : cs_delay_us_(cs_delay_us)
+  : speed_hz_(speed_hz), cs_delay_us_(cs_delay_us)
   {
     fd_ = open(device.c_str(), O_RDWR);
     if (fd_ < 0) {
@@ -65,15 +65,9 @@ public:
     }
 
     std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> tx{};
-    std::array<uint8_t, 1> tx_pad{};
-    std::array<uint8_t, 1> rx_pad{};
 
-    // Hold /CS and satisfy tFCD before clocking the 44-bit response.
+    // Assert /CS, wait tFCD (>= 5 us) with no SCLK edges, then clock exactly 48 bits.
     spi_ioc_transfer delay_xfer{};
-    delay_xfer.tx_buf = reinterpret_cast<uint64_t>(tx_pad.data());
-    delay_xfer.rx_buf = reinterpret_cast<uint64_t>(rx_pad.data());
-    delay_xfer.len = 1;
-    delay_xfer.speed_hz = 10000;
     delay_xfer.delay_usecs = cs_delay_us_;
     delay_xfer.cs_change = 0;
 
@@ -81,7 +75,7 @@ public:
     data_xfer.tx_buf = reinterpret_cast<uint64_t>(tx.data());
     data_xfer.rx_buf = reinterpret_cast<uint64_t>(rx.data());
     data_xfer.len = encoder_interface::kSimpleFrameClockBytes;
-    data_xfer.speed_hz = 0;  // use device default from SPI_IOC_WR_MAX_SPEED_HZ
+    data_xfer.speed_hz = speed_hz_;
     data_xfer.cs_change = 0;
 
     std::array<spi_ioc_transfer, 2> transfers{delay_xfer, data_xfer};
@@ -101,6 +95,7 @@ private:
   }
 
   int fd_{-1};
+  uint32_t speed_hz_{1000000};
   uint16_t cs_delay_us_{10};
 };
 
@@ -111,10 +106,11 @@ public:
   : Node("encoder_node")
   {
     spi_device_ = declare_parameter<std::string>("spi_device", "/dev/spidev1.2");
-    spi_speed_hz_ = declare_parameter<int>("spi_speed_hz", 1000000);
+    spi_speed_hz_ = declare_parameter<int>("spi_speed_hz", 500000);
     poll_rate_hz_ = declare_parameter<double>("poll_rate_hz", 100.0);
     frame_id_ = declare_parameter<std::string>("frame_id", "encoder_link");
-    cs_delay_us_ = declare_parameter<int>("cs_delay_us", 10);
+    cs_delay_us_ = declare_parameter<int>("cs_delay_us", 20);
+    log_raw_frames_ = declare_parameter<bool>("log_raw_frames", false);
 
     if (spi_speed_hz_ < 100000 || spi_speed_hz_ > 3000000) {
       RCLCPP_WARN(
@@ -169,10 +165,19 @@ private:
     msg.crc_valid = frame.crc_valid;
 
     if (!frame.crc_valid) {
-      RCLCPP_WARN_THROTTLE(
-        get_logger(), *get_clock(), 1000,
-        "Encoder CRC invalid (turn=%d pos=%u); try increasing cs_delay_us or lowering spi_speed_hz",
-        frame.turn_count, frame.position_counts);
+      if (log_raw_frames_) {
+        RCLCPP_WARN(
+          get_logger(),
+          "Encoder CRC invalid (turn=%d pos=%u) raw=[%02x %02x %02x %02x %02x %02x]",
+          frame.turn_count, frame.position_counts,
+          rx[0], rx[1], rx[2], rx[3], rx[4], rx[5]);
+      } else {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 1000,
+          "Encoder CRC invalid (turn=%d pos=%u); try log_raw_frames:=true, "
+          "cs_delay_us:=50, or spi_speed_hz:=250000",
+          frame.turn_count, frame.position_counts);
+      }
     }
 
     publisher_->publish(msg);
@@ -191,7 +196,8 @@ private:
   int spi_speed_hz_{1000000};
   double poll_rate_hz_{100.0};
   std::string frame_id_;
-  int cs_delay_us_{10};
+  int cs_delay_us_{20};
+  bool log_raw_frames_{false};
 
   std::unique_ptr<SpiDevice> spi_;
   rclcpp::Publisher<encoder_interface::msg::EncoderState>::SharedPtr publisher_;

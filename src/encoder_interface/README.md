@@ -55,7 +55,26 @@ Perform encoder self-calibration after mechanical mounting (push-button on the s
 ros2 launch encoder_interface encoder.launch.py
 ```
 
-Parameters: `spi_device` (default `/dev/spidev1.2`), `spi_speed_hz` (default 1 MHz), `poll_rate_hz` (default 100), `frame_id`, `cs_delay_us` (default 10).
+Parameters: `spi_device` (default `/dev/spidev1.2`), `spi_speed_hz` (default 500 kHz), `poll_rate_hz` (default 100), `frame_id`, `cs_delay_us` (default 20), `log_raw_frames` (default false).
+
+## Troubleshooting CRC errors
+
+If you see `Encoder CRC invalid (turn=0 pos=0)`:
+
+1. Rebuild and redeploy — an earlier version clocked 8 spurious bits before the frame read.
+2. Confirm SPI1 is enabled and the device exists: `ls -l /dev/spidev1.2`
+3. Launch with raw SPI logging:
+
+   ```bash
+   ros2 launch encoder_interface encoder.launch.py log_raw_frames:=true
+   ```
+
+   All-zero raw bytes (`00 00 00 00 00 00`) usually means MISO is not connected or the wrong spidev device.
+4. Try slower SPI and longer CS delay:
+
+   ```bash
+   ros2 launch encoder_interface encoder.launch.py spi_speed_hz:=250000 cs_delay_us:=50
+   ```
 
 ## Verify
 
