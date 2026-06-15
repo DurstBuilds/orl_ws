@@ -15,6 +15,7 @@ def generate_launch_description():
         package='cm_interface',
         executable='joint_despos_command',
         name='joint_despos_command',
+        emulate_tty=True,
         parameters=[{
             'namespace': LaunchConfiguration('ns'),
         }],

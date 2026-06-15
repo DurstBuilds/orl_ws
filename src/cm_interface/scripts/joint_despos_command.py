@@ -16,6 +16,17 @@ def _topic_for_namespace(namespace: str, suffix: str) -> str:
     return suffix
 
 
+def _open_terminal_stream(mode: str):
+    """Use controlling terminal when launch/ros2 run redirects stdin/stdout."""
+    stream = sys.stdin if mode == 'r' and sys.stdin.isatty() else sys.stdout if mode == 'w' and sys.stdout.isatty() else None
+    if stream is not None:
+        return stream, False
+    try:
+        return open('/dev/tty', mode), True
+    except OSError:
+        return None, False
+
+
 class JointDesposCommand(Node):
     """ROS node: stdin in, namespaced joint_despos / hold_joint out."""
 
@@ -34,6 +45,15 @@ class JointDesposCommand(Node):
 
         self._despos_publisher = self.create_publisher(Float32, despos_topic, 10)
         self._hold_joint_publisher = self.create_publisher(Bool, hold_joint_topic, 10)
+
+        self._input_stream, self._close_input = _open_terminal_stream('r')
+        self._output_stream, self._close_output = _open_terminal_stream('w')
+        if self._input_stream is None or self._output_stream is None:
+            self.get_logger().error(
+                'No interactive terminal available. Run from a TTY or use: '
+                'ros2 run cm_interface joint_despos_command --ros-args -p namespace:=<motor>'
+            )
+            raise SystemExit(1)
 
         self._stdin_running = True
         self._stdin_thread = threading.Thread(target=self._stdin_loop, daemon=True)
@@ -59,11 +79,16 @@ class JointDesposCommand(Node):
             f'{self._despos_publisher.topic_name}'
         )
 
+    def _read_line(self, prompt: str) -> str:
+        self._output_stream.write(prompt)
+        self._output_stream.flush()
+        return self._input_stream.readline()
+
     def _stdin_loop(self) -> None:
         prompt = f'{self._namespace} joint_despos (deg): '
         while self._stdin_running and rclpy.ok():
             try:
-                line = input(prompt)
+                line = self._read_line(prompt)
             except EOFError:
                 break
 
@@ -89,14 +114,14 @@ class JointDesposCommand(Node):
     def destroy_node(self) -> None:
         self._stdin_running = False
         self._stdin_thread.join(timeout=0.5)
+        if self._close_input:
+            self._input_stream.close()
+        if self._close_output:
+            self._output_stream.close()
         super().destroy_node()
 
 
 def main(args=None) -> None:
-    if not sys.stdin.isatty():
-        print('joint_despos_command requires an interactive terminal (TTY).', file=sys.stderr)
-        raise SystemExit(1)
-
     rclpy.init(args=args)
     try:
         node = JointDesposCommand()
