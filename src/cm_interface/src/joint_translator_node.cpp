@@ -132,6 +132,10 @@ public:
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
 
+    std_msgs::msg::Float32 initial_curpos;
+    initial_curpos.data = 0.0f;
+    joint_curpos_pub_->publish(initial_curpos);
+
     const auto loop_period = std::chrono::duration<double>(1.0 / loop_hz_);
     loop_timer_ = create_wall_timer(
       std::chrono::duration_cast<std::chrono::nanoseconds>(loop_period),

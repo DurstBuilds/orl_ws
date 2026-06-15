@@ -6,8 +6,9 @@ Namespace substring rules (case-insensitive):
   'wheel' — left stick X (both wheel motors share the same stick)
   'hip'   — buttons 4/5 (neg/pos); joint_despos clamped to hip_angle_limit_deg
 
-All listed namespaces receive soft_mode (button 1 edge) and hold_joint on input release.
-Namespaces without knee/wheel/hip still get soft_mode/hold_joint but no stick motion.
+All listed namespaces receive soft_mode (button 1 edge). hold_joint is published once
+at startup (true), on rising edge when stick control begins (false), and on falling
+edge when control returns to neutral (true, with despos snapped to curpos).
 
 TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
   knee_velocity_constant, wheel_velocity_constant, hip_velocity_constant
@@ -138,8 +139,7 @@ class NamespaceTarget:
         self.hip_velocity = hip_velocity
         self.lock = threading.Lock()
         self.curpos = 0.0
-        self.has_curpos = False
-        self.warned_no_curpos = False
+        self.has_curpos = True
         self.control_was_active = False
 
         if namespace:
@@ -171,6 +171,11 @@ class NamespaceTarget:
         msg = Float32()
         msg.data = float(despos)
         self.despos_publisher.publish(msg)
+
+    def publish_hold_joint(self, hold: bool) -> None:
+        msg = Bool()
+        msg.data = hold
+        self.hold_joint_publisher.publish(msg)
 
 
 class BoomJoystickControl(Node):
@@ -267,6 +272,9 @@ class BoomJoystickControl(Node):
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_timer(1.0 / publish_hz, self._publish_timer_callback)
 
+        for target in self._targets:
+            target.publish_hold_joint(True)
+
         despos_topics = ', '.join(t.despos_publisher.topic_name for t in self._targets)
         soft_mode_topics = ', '.join(t.soft_mode_publisher.topic_name for t in self._targets)
         hold_joint_topics = ', '.join(t.hold_joint_publisher.topic_name for t in self._targets)
@@ -298,7 +306,7 @@ class BoomJoystickControl(Node):
         )
 
     def _publish_timer_callback(self) -> None:
-        """Map cached joy state to despos deltas; hold_joint when not actively driving."""
+        """Map cached joy state to despos deltas; hold_joint on control edges only."""
         right_x, left_x, soft_mode, hip_neg, hip_pos = self._state.get_state()
 
         soft_msg = Bool()
@@ -310,12 +318,10 @@ class BoomJoystickControl(Node):
             self.get_logger().info(f'soft_mode={soft_mode}')
             self._last_soft_mode = soft_mode
 
-        hold_joint_msg = Bool()
-
         for target in self._targets:
-            has_curpos, curpos = target.get_curpos()
+            _, curpos = target.get_curpos()
 
-            if soft_mode_toggled_off and has_curpos:
+            if soft_mode_toggled_off:
                 self._publish_despos(target, curpos)
 
             control_active = False
@@ -339,29 +345,17 @@ class BoomJoystickControl(Node):
                     control_active = True
                     delta = axis * target.wheel_velocity
 
-            hold_joint_msg.data = not control_active
-            target.hold_joint_publisher.publish(hold_joint_msg)
-
-            if not control_active:
-                if target.control_was_active and has_curpos:
-                    self._publish_despos(target, curpos)
-                target.control_was_active = False
+            if control_active:
+                if not target.control_was_active:
+                    target.publish_hold_joint(False)
+                self._publish_despos(target, curpos + delta)
+                target.control_was_active = True
                 continue
 
-            if not has_curpos:
-                hold_joint_msg.data = True
-                target.hold_joint_publisher.publish(hold_joint_msg)
-                if not target.warned_no_curpos:
-                    topic_name = target.despos_publisher.topic_name
-                    self.get_logger().warn(
-                        f'No joint_curpos received yet for {topic_name}; holding until feedback'
-                    )
-                    target.warned_no_curpos = True
-                target.control_was_active = False
-                continue
-
-            self._publish_despos(target, curpos + delta)
-            target.control_was_active = True
+            if target.control_was_active:
+                target.publish_hold_joint(True)
+                self._publish_despos(target, curpos)
+            target.control_was_active = False
 
 
 def main(args=None) -> None:
