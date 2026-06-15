@@ -69,6 +69,12 @@ install(PROGRAMS
 )
 
 install(PROGRAMS
+  scripts/joint_despos_command.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME joint_despos_command
+)
+
+install(PROGRAMS
   scripts/can0_up.sh
   DESTINATION lib/${PROJECT_NAME}
 )
