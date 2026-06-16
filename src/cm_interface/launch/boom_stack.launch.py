@@ -35,6 +35,12 @@ from boom_motor_config import (  # noqa: E402
     parse_namespace_omega_max,
 )
 
+PSU_TELEMETRY_TOPICS = (
+    '/power_supply/current',
+    '/power_supply/voltage',
+    '/power_supply/power',
+)
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, GroupAction, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -309,6 +315,7 @@ def _launch_setup(context, *args, **kwargs):
         bag_topics = list(MOTOR_STATE_TOPICS)
         bag_topics.extend(MOTOR_COMMAND_TOPICS)
         bag_topics.extend(JOINT_CURPOS_TOPICS)
+        bag_topics.extend(PSU_TELEMETRY_TOPICS)
         print(
             f'[boom_stack] enable_logging: recording to {bag_root}/{bag_uri} '
             f'({bag_uri}_0.mcap inside bag directory when using mcap)'
@@ -443,7 +450,7 @@ def generate_launch_description():
             default_value='false',
             description=(
                 'If true, run ros2 bag record on all stack motor_state, motor_command, '
-                'and joint_curpos topics.'
+                'joint_curpos, and power_supply telemetry topics.'
             ),
         ),
         DeclareLaunchArgument(
