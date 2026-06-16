@@ -29,7 +29,7 @@ def _launch_setup(context, *args, **kwargs):
 
 def generate_launch_description():
     return LaunchDescription([
-        DeclareLaunchArgument('serial_port', default_value='/dev/ttyUSB0'),
+        DeclareLaunchArgument('serial_port', default_value='/dev/ttyACM0'),
         DeclareLaunchArgument('baud_rate', default_value='9600'),
         DeclareLaunchArgument('publish_rate_hz', default_value='10.0'),
         DeclareLaunchArgument('output_index', default_value='1'),

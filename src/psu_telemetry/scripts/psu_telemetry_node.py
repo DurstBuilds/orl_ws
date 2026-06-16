@@ -32,7 +32,7 @@ class PsuTelemetryNode(Node):
     def __init__(self) -> None:
         super().__init__('psu_telemetry_node')
 
-        self.declare_parameter('serial_port', '/dev/ttyUSB0')
+        self.declare_parameter('serial_port', '/dev/ttyACM0')
         self.declare_parameter('baud_rate', 9600)
         self.declare_parameter('publish_rate_hz', 10.0)
         self.declare_parameter('output_index', 1)
