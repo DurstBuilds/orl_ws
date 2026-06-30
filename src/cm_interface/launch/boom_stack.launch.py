@@ -54,6 +54,12 @@ def _logging_enabled(context) -> bool:
     return value in ('true', '1', 'yes')
 
 
+def _joint_sequence_enabled(context) -> bool:
+    """True when enable_joint_sequence launch arg is true/1/yes."""
+    value = LaunchConfiguration('enable_joint_sequence').perform(context).strip().lower()
+    return value in ('true', '1', 'yes')
+
+
 def _use_can_gateway(context) -> bool:
     """True when use_can_gateway launch arg is true/1/yes."""
     value = LaunchConfiguration('use_can_gateway').perform(context).strip().lower()
@@ -307,6 +313,25 @@ def _launch_setup(context, *args, **kwargs):
 
     actions.extend([joy_node, boom_joystick_control_node])
 
+    if _joint_sequence_enabled(context):
+        actions.append(
+            Node(
+                package='cm_interface',
+                executable='joint_position_sequence_node',
+                name='joint_position_sequence_node',
+                parameters=[{
+                    'sequence_file': LaunchConfiguration('sequence_file'),
+                    'start_button_index': ParameterValue(
+                        LaunchConfiguration('joint_sequence_start_button'), value_type=int
+                    ),
+                    'hip_angle_limit_deg': hip_angle_limit_deg,
+                    'loop': ParameterValue(
+                        LaunchConfiguration('joint_sequence_loop'), value_type=bool
+                    ),
+                }],
+            )
+        )
+
     if _logging_enabled(context):
         base = LaunchConfiguration('bag_output_uri').perform(context)
         storage = LaunchConfiguration('bag_storage_id').perform(context)
@@ -444,6 +469,28 @@ def generate_launch_description():
             'namespace_gear_ratios',
             default_value=DEFAULT_NAMESPACE_GEAR_RATIOS,
             description='Per-namespace gear ratios for teleop scaling (ns:ratio,...).',
+        ),
+        DeclareLaunchArgument(
+            'enable_joint_sequence',
+            default_value='false',
+            description=(
+                'If true, run joint_position_sequence_node (Start button runs YAML waypoints).'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'sequence_file',
+            default_value='',
+            description='Waypoint YAML for joint sequence; empty uses installed preset.',
+        ),
+        DeclareLaunchArgument(
+            'joint_sequence_start_button',
+            default_value='7',
+            description='Joy button index to start/abort joint position sequence.',
+        ),
+        DeclareLaunchArgument(
+            'joint_sequence_loop',
+            default_value='false',
+            description='Repeat joint sequence waypoints after the last step.',
         ),
         DeclareLaunchArgument(
             'enable_logging',

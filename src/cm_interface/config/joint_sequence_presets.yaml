@@ -1,0 +1,25 @@
+# Preset joint positions for joint_position_sequence_node (degrees).
+# Edit waypoints for your bench test; hip targets are clamped to ±hip_angle_limit_deg.
+
+position_tolerance_deg: 2.0
+settle_timeout_sec: 30.0
+
+waypoints:
+  - delay_sec: 1.0
+    positions:
+      knee_motor: 0.0
+      hip_motor: 0.0
+      wheel_motor1: 0.0
+      wheel_motor2: 0.0
+  - delay_sec: 2.0
+    positions:
+      knee_motor: 10.0
+      hip_motor: 5.0
+      wheel_motor1: 0.0
+      wheel_motor2: 0.0
+  - delay_sec: 1.0
+    positions:
+      knee_motor: 0.0
+      hip_motor: 0.0
+      wheel_motor1: 0.0
+      wheel_motor2: 0.0

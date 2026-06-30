@@ -75,8 +75,18 @@ install(PROGRAMS
 )
 
 install(PROGRAMS
+  scripts/joint_position_sequence.py
+  DESTINATION lib/${PROJECT_NAME}
+  RENAME joint_position_sequence_node
+)
+
+install(PROGRAMS
   scripts/can0_up.sh
   DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY config
+  DESTINATION share/${PROJECT_NAME}
 )
 
 install(DIRECTORY launch

@@ -51,13 +51,14 @@ Requires: `rclcpp`, `rclpy`, `std_msgs`, `sensor_msgs`, `motor_interfaces`, `joy
 
 | Launch file | Purpose |
 |-------------|---------|
-| **boom_stack.launch.py** | Full boom: knee, hip, two wheels, one `joy_node`, one `boom_joystick_control_node`. Optional rosbag logging. |
+| **boom_stack.launch.py** | Full boom: knee, hip, two wheels, one `joy_node`, one `boom_joystick_control_node`. Optional rosbag logging and joint position test sequence. |
 | **boom_teleop.launch.py** | Single namespaced stack + joy + boom teleop (for one motor at a time). |
 | **motor_stack.launch.py** | Single stack + original `joystick_control` (deadman, right-stick absolute position). |
 | **motor_node_continuous.launch.py** | Motor node only. |
 | **can_gateway.launch.py** | CAN gateway only (boom drive list). |
 | **joint_translator.launch.py** | Translator + unwrapper only (motor node launched separately). |
 | **joystick_teleop.launch.py** | Teleop nodes only (deadman + right-stick absolute position). |
+| **joint_position_sequence.launch.py** | Joystick-triggered preset joint waypoint runner |
 
 ### Full boom stack (recommended)
 
@@ -70,6 +71,26 @@ ros2 launch cm_interface boom_stack.launch.py
 On Raspberry Pi / MCP251x, bring up CAN with auto-restart before launch: `ros2 run cm_interface can0_up.sh` (sets `restart-ms 100`).
 
 Default: `use_can_gateway:=true` (one gateway on `can0`) and four drives from `boom_motor_config.py` (knee, hip, two wheels). Legacy per-motor CAN: `use_can_gateway:=false`.
+
+Optional joint test sequence: `enable_joint_sequence:=true` (see below).
+
+### Joint position test sequence
+
+Runs preset `joint_despos` waypoints when you press **Start** (button 7) on the gamepad. Between waypoints the node waits until all listed joints settle within tolerance, then applies the per-step `delay_sec` from the YAML file.
+
+```bash
+ros2 launch cm_interface boom_stack.launch.py enable_joint_sequence:=true
+```
+
+Or launch the sequence node separately after `boom_stack`:
+
+```bash
+ros2 launch cm_interface joint_position_sequence.launch.py
+```
+
+Edit waypoints in `config/joint_sequence_presets.yaml` (installed under `share/cm_interface/config/`). Positions are in **degrees** per namespace (`knee_motor`, `hip_motor`, `wheel_motor1`, `wheel_motor2`). While a sequence runs, `boom_joystick_control` pauses `joint_despos` / `hold_joint` publishing (`/joint_sequence/active` is true). Press Start again to abort. The sequence will not start if any joint is in `soft_mode`.
+
+Launch args (when using `boom_stack`): `sequence_file`, `joint_sequence_start_button` (default 7), `joint_sequence_loop`.
 
 ### Single motor (boom teleop)
 
@@ -156,6 +177,7 @@ See [docs/BOOM_STACK.md](docs/BOOM_STACK.md#logging) for `enable_logging`, bag p
 |---------------|------|
 | `keyboard_command` | Numpad absolute position commands via `motor_command` |
 | `joystick_control_node` | Deadman teleop with right-stick absolute angle |
+| `joint_position_sequence_node` | Start-button preset joint waypoint test sequence |
 
 Manual keyboard teleop (remap namespace as needed):
 
@@ -175,10 +197,11 @@ ros2 topic hz /hip_motor/motor_state
 
 ```text
 cm_interface/
+├── config/          # joint_sequence_presets.yaml
 ├── docs/BOOM_STACK.md
 ├── include/cm_interface/motor_mit_profile.hpp
 ├── launch/          # boom_stack, boom_motor_config, boom_teleop, ...
-├── scripts/         # boom_joystick_control.py, joystick_control.py, keyboard_command.py
+├── scripts/         # boom_joystick_control.py, joint_position_sequence.py, ...
 └── src/             # can_gateway_node, joint_translator_node, motor_unwrapper_node, ...
 ```
 

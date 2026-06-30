@@ -269,7 +269,11 @@ class BoomJoystickControl(Node):
             ))
         self._last_soft_mode = False
 
+        self._sequence_active = False
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
+        self.create_subscription(
+            Bool, '/joint_sequence/active', self._sequence_active_callback, 10
+        )
         self.create_timer(1.0 / publish_hz, self._publish_timer_callback)
 
         for target in self._targets:
@@ -295,6 +299,9 @@ class BoomJoystickControl(Node):
             despos = clamp_hip_despos(despos, self._hip_angle_limit_rad)
         target.publish_despos(despos)
 
+    def _sequence_active_callback(self, msg: Bool) -> None:
+        self._sequence_active = msg.data
+
     def _joy_callback(self, msg: Joy) -> None:
         self._state.update(
             msg,
@@ -317,6 +324,9 @@ class BoomJoystickControl(Node):
         if soft_mode != self._last_soft_mode:
             self.get_logger().info(f'soft_mode={soft_mode}')
             self._last_soft_mode = soft_mode
+
+        if self._sequence_active:
+            return
 
         for target in self._targets:
             _, curpos = target.get_curpos()
