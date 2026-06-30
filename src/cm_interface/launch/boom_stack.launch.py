@@ -333,6 +333,34 @@ def _launch_setup(context, *args, **kwargs):
         )
 
     if _logging_enabled(context):
+        actions.append(
+            Node(
+                package='psu_telemetry',
+                executable='psu_telemetry_node',
+                name='psu_telemetry_node',
+                output='screen',
+                parameters=[{
+                    'serial_port': LaunchConfiguration('psu_serial_port').perform(context),
+                    'baud_rate': int(LaunchConfiguration('psu_baud_rate').perform(context)),
+                    'publish_rate_hz': float(
+                        LaunchConfiguration('psu_publish_rate_hz').perform(context)
+                    ),
+                    'output_index': int(LaunchConfiguration('psu_output_index').perform(context)),
+                    'current_topic': 'power_supply/current',
+                    'voltage_topic': 'power_supply/voltage',
+                    'power_topic': 'power_supply/power',
+                    'serial_timeout_s': float(
+                        LaunchConfiguration('psu_serial_timeout_s').perform(context)
+                    ),
+                    'identify_on_startup': LaunchConfiguration('psu_identify_on_startup')
+                    .perform(context)
+                    .strip()
+                    .lower()
+                    in ('true', '1', 'yes'),
+                }],
+            )
+        )
+
         base = LaunchConfiguration('bag_output_uri').perform(context)
         storage = LaunchConfiguration('bag_storage_id').perform(context)
         bag_uri = _next_bag_output_uri(base, bag_dir)
@@ -342,7 +370,7 @@ def _launch_setup(context, *args, **kwargs):
         bag_topics.extend(JOINT_CURPOS_TOPICS)
         bag_topics.extend(PSU_TELEMETRY_TOPICS)
         print(
-            f'[boom_stack] enable_logging: recording to {bag_root}/{bag_uri} '
+            f'[boom_stack] enable_logging: psu_telemetry + recording to {bag_root}/{bag_uri} '
             f'({bag_uri}_0.mcap inside bag directory when using mcap)'
         )
         actions.append(
@@ -496,9 +524,39 @@ def generate_launch_description():
             'enable_logging',
             default_value='false',
             description=(
-                'If true, run ros2 bag record on all stack motor_state, motor_command, '
-                'joint_curpos, and power_supply telemetry topics.'
+                'If true, launch psu_telemetry and ros2 bag record on all stack motor_state, '
+                'motor_command, joint_curpos, and power_supply telemetry topics.'
             ),
+        ),
+        DeclareLaunchArgument(
+            'psu_serial_port',
+            default_value='/dev/ttyACM0',
+            description='PSU USB serial device when enable_logging is true.',
+        ),
+        DeclareLaunchArgument(
+            'psu_baud_rate',
+            default_value='9600',
+            description='PSU serial baud rate when enable_logging is true.',
+        ),
+        DeclareLaunchArgument(
+            'psu_publish_rate_hz',
+            default_value='10.0',
+            description='PSU telemetry publish rate (Hz) when enable_logging is true.',
+        ),
+        DeclareLaunchArgument(
+            'psu_output_index',
+            default_value='1',
+            description='QPX600DP output index (1 or 2) when enable_logging is true.',
+        ),
+        DeclareLaunchArgument(
+            'psu_serial_timeout_s',
+            default_value='0.5',
+            description='PSU serial read timeout (s) when enable_logging is true.',
+        ),
+        DeclareLaunchArgument(
+            'psu_identify_on_startup',
+            default_value='true',
+            description='Send *IDN? on PSU connect when enable_logging is true.',
         ),
         DeclareLaunchArgument(
             'bag_output_uri',
