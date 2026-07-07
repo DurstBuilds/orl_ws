@@ -1,6 +1,9 @@
-// joint_translator_node: maps motor total position to joint space and commands
-// motor deltas via PD control at loop_hz (default 200 Hz). Hold (deltaP=0) when
-// hold_joint is true (teleop release), goal/limit latched, or predictive motor hold.
+// joint_translator_node: maps joint targets to motor deltas via PD control at
+// loop_hz (default 200 Hz). Position error uses dead reckoning: commanded motor
+// total position is the sum of published deltaP commands (not motor feedback).
+// motor_total_position seeds/resyncs commanded position; joint_curpos stays on
+// feedback for teleop. Hold (deltaP=0) when hold_joint is true (teleop release),
+// goal/limit latched, or predictive motor hold.
 //
 // Parameters (TWEAK):
 //   motor_model            — ak70_10 | ak10_9 | ak80_64 (sets PD + MIT defaults)
@@ -154,12 +157,14 @@ private:
   struct ControlState
   {
     float total_position{0.0f};
+    float commanded_total_position{0.0f};
     float motor_velocity{0.0f};
     float joint_despos{0.0f};
     bool soft_mode{false};
     bool hold_joint{false};
     bool has_hold_joint{false};
     bool has_total{false};
+    bool has_commanded{false};
     bool has_velocity{false};
     bool has_despos{false};
     bool at_goal_latched{false};
@@ -170,8 +175,9 @@ private:
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return ControlState{
-      total_position_, motor_velocity_, joint_despos_, soft_mode_, hold_joint_,
-      has_hold_joint_, has_total_position_, has_motor_velocity_, has_joint_despos_,
+      total_position_, commanded_total_position_, motor_velocity_, joint_despos_,
+      soft_mode_, hold_joint_, has_hold_joint_, has_total_position_,
+      has_commanded_total_position_, has_motor_velocity_, has_joint_despos_,
       at_goal_latched_, awaiting_post_soft_latch_};
   }
 
@@ -184,13 +190,17 @@ private:
       std::lock_guard<std::mutex> lock(state_mutex_);
       total_position_ = msg->total_position;
       has_total_position_ = true;
+      if (!has_commanded_total_position_) {
+        commanded_total_position_ = msg->total_position;
+        has_commanded_total_position_ = true;
+      }
       if (awaiting_post_soft_latch_ && !soft_mode_) {
         joint_despos_ = clamp_joint_despos(
           total_position_ / static_cast<float>(gear_ratio_));
         has_joint_despos_ = true;
         at_goal_latched_ = true;
         awaiting_post_soft_latch_ = false;
-        has_prev_motor_error_ = false;
+        commanded_total_position_ = total_position_;
         RCLCPP_INFO(
           get_logger(),
           "soft_mode off: latched joint_despos=%.4f at current position",
@@ -253,7 +263,6 @@ private:
       despos_moved_away_from_limit(clamped_new, clamped_prev))
     {
       at_goal_latched_ = false;
-      has_prev_motor_error_ = false;
     }
     joint_despos_ = clamped_new;
     has_joint_despos_ = true;
@@ -267,7 +276,6 @@ private:
       soft_mode_ = msg->data;
       if (was_soft_mode && !soft_mode_) {
         awaiting_post_soft_latch_ = true;
-        has_prev_motor_error_ = false;
         reset_velocity_ramp();
       }
       RCLCPP_INFO(get_logger(), "soft_mode=%s", soft_mode_ ? "true" : "false");
@@ -282,7 +290,6 @@ private:
       hold_joint_ = msg->data;
       if (!hold_joint_) {
         at_goal_latched_ = false;
-        has_prev_motor_error_ = false;
       }
       RCLCPP_DEBUG(get_logger(), "hold_joint=%s", hold_joint_ ? "true" : "false");
     }
@@ -308,7 +315,6 @@ private:
     at_goal_latched_ = true;
     joint_despos_ = clamp_joint_despos(joint_curpos);
     has_joint_despos_ = true;
-    has_prev_motor_error_ = false;
   }
 
   void latch_goal_at_joint_limit(float joint_limit_rad)
@@ -317,7 +323,8 @@ private:
     at_goal_latched_ = true;
     joint_despos_ = joint_limit_rad;
     has_joint_despos_ = true;
-    has_prev_motor_error_ = false;
+    commanded_total_position_ =
+      joint_limit_rad * static_cast<float>(gear_ratio_);
   }
 
   bool joint_angle_limit_enabled() const
@@ -389,14 +396,12 @@ private:
       commanding_into_negative_limit(motor_error, motor_tol))
     {
       at_goal_latched_ = false;
-      has_prev_motor_error_ = false;
       return;
     }
     if (joint_curpos <= -joint_angle_limit_rad_ + kJointAngleLimitEps &&
       commanding_into_positive_limit(motor_error, motor_tol))
     {
       at_goal_latched_ = false;
-      has_prev_motor_error_ = false;
     }
   }
 
@@ -430,6 +435,12 @@ private:
     motor_command_pub_->publish(cmd);
   }
 
+  void integrate_commanded_delta(float motor_delta)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    commanded_total_position_ += motor_delta;
+  }
+
   void publish_motor_damping_hold()
   {
     motor_interfaces::msg::MotorCommand cmd;
@@ -456,7 +467,7 @@ private:
       return;
     }
 
-    if (!state.has_total || !state.has_despos) {
+    if (!state.has_total || !state.has_commanded || !state.has_despos) {
       if (!state.has_total) {
         warn_no_total_position();
       }
@@ -466,33 +477,20 @@ private:
     }
 
     const float gear_ratio = static_cast<float>(gear_ratio_);
-    const float joint_curpos = state.total_position / gear_ratio;
+    const float commanded_joint = state.commanded_total_position / gear_ratio;
     const float desired_total = state.joint_despos * gear_ratio;
-    const float motor_error = desired_total - state.total_position;
+    const float motor_error = desired_total - state.commanded_total_position;
     const float motor_tol = static_cast<float>(motor_error_tolerance_);
     const bool hold_from_teleop = state.has_hold_joint && state.hold_joint;
 
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       clear_goal_latch_if_tracking_away_from_limit(
-        joint_curpos, motor_error, hold_from_teleop, motor_tol);
+        commanded_joint, motor_error, hold_from_teleop, motor_tol);
     }
 
-    const bool within_tolerance = std::fabs(motor_error) < motor_tol;
-    bool crossed_desired = false;
-    {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      if (has_prev_motor_error_ && prev_motor_error_ * motor_error < 0.0f) {
-        crossed_desired = true;
-      }
-    }
-
-    if (within_tolerance || crossed_desired) {
-      latch_goal_at_current_position(joint_curpos);
-    } else {
-      std::lock_guard<std::mutex> lock(state_mutex_);
-      prev_motor_error_ = motor_error;
-      has_prev_motor_error_ = true;
+    if (std::fabs(motor_error) < motor_tol) {
+      latch_goal_at_current_position(commanded_joint);
     }
 
     const auto hold_state = read_state();
@@ -503,7 +501,8 @@ private:
     }
 
     const float hold_desired_total = hold_state.joint_despos * gear_ratio;
-    const float total_position_error = hold_desired_total - hold_state.total_position;
+    const float total_position_error =
+      hold_desired_total - hold_state.commanded_total_position;
     const float motor_velocity = hold_state.has_velocity ? hold_state.motor_velocity : 0.0f;
 
     const float raw_delta = compute_motor_delta(total_position_error, motor_velocity);
@@ -512,16 +511,16 @@ private:
     const float ramped_velocity = ramp_command_velocity(target_command_velocity);
     const float ramped_delta = clamp_magnitude(ramped_velocity / loop_hz, pdelta_max_);
 
-    const float predicted_total = hold_state.total_position + ramped_delta;
+    const float predicted_total = hold_state.commanded_total_position + ramped_delta;
     const float predicted_error = hold_desired_total - predicted_total;
     if (std::fabs(predicted_error) < motor_tol) {
-      latch_goal_at_current_position(joint_curpos);
+      latch_goal_at_current_position(commanded_joint);
       reset_velocity_ramp();
       publish_motor_command(0.0f);
       return;
     }
 
-    if (at_joint_angle_limit_reactive(joint_curpos, total_position_error, motor_tol)) {
+    if (at_joint_angle_limit_reactive(commanded_joint, total_position_error, motor_tol)) {
       const float limit_rad = commanding_into_positive_limit(total_position_error, motor_tol) ?
         joint_angle_limit_rad_ : -joint_angle_limit_rad_;
       latch_goal_at_joint_limit(limit_rad);
@@ -531,7 +530,7 @@ private:
     }
 
     if (would_exceed_joint_angle_limit(
-        hold_state.total_position, ramped_delta, total_position_error, motor_tol))
+        hold_state.commanded_total_position, ramped_delta, total_position_error, motor_tol))
     {
       const float limit_rad = commanding_into_positive_limit(total_position_error, motor_tol) ?
         joint_angle_limit_rad_ : -joint_angle_limit_rad_;
@@ -542,6 +541,7 @@ private:
     }
 
     publish_motor_command(ramped_delta);
+    integrate_commanded_delta(ramped_delta);
   }
 
   void warn_no_total_position()
@@ -567,6 +567,8 @@ private:
 
   std::mutex state_mutex_;
   float total_position_{0.0f};
+  float commanded_total_position_{0.0f};
+  bool has_commanded_total_position_{false};
   float motor_velocity_{0.0f};
   float joint_despos_{0.0f};
   bool soft_mode_{false};
@@ -577,8 +579,6 @@ private:
   bool has_joint_despos_{false};
   bool at_goal_latched_{false};
   bool awaiting_post_soft_latch_{false};
-  float prev_motor_error_{0.0f};
-  bool has_prev_motor_error_{false};
 
   double gear_ratio_{0.0};
   double loop_hz_{kDefaultLoopHz};
