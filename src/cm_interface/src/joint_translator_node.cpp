@@ -186,6 +186,15 @@ private:
         has_commanded_total_position_ = true;
         publish_commanded_joint_position(commanded_total_position_);
       }
+      if (!has_joint_despos_) {
+        joint_despos_ = clamp_joint_despos(joint_curpos);
+        has_joint_despos_ = true;
+        at_goal_latched_ = true;
+        RCLCPP_INFO(
+          get_logger(),
+          "startup: latched joint_despos=%.4f at current position",
+          joint_despos_);
+      }
       if (awaiting_post_soft_latch_ && !soft_mode_) {
         joint_despos_ = clamp_joint_despos(
           total_position_ / static_cast<float>(gear_ratio_));
