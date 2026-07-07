@@ -1,10 +1,7 @@
 // joint_translator_node: maps joint targets to motor deltas via proportional
-// control at loop_hz (default 200 Hz). Position error is a hybrid of dead
-// reckoning (commanded total position) and feedback (joint_curpos):
-//   e = (1-w)*e_commanded + w*e_feedback
-// commanded_joint_position integrates published deltaP (quantized to the
-// 15-bit CAN packing grid so it matches what the motor executes);
-// joint_curpos is feedback.
+// control at loop_hz (default 200 Hz). Position error is feedback-only:
+//   e = joint_despos * gear_ratio - total_position
+// deltaP is quantized to the 15-bit CAN packing grid before publish.
 // Hold (deltaP=0) when hold_joint is true (teleop release), goal/limit latched,
 // or within motor_error_tolerance (hold only, no latch).
 //
@@ -13,14 +10,12 @@
 //   gear_ratio             — motor rad per joint rad (> 0)
 //   loop_hz                — control loop rate (default 200)
 //   motor_error_tolerance  — motor-space goal/hold tolerance (rad)
-//   feedback_blend         — w in [0,1]: fraction of error from joint_curpos feedback
 //   joint_angle_limit_deg  — 0 disables; else clamp ±limit in joint space
 //   omega_max              — "auto" or max motor speed (rad/s) for delta cap
 //   mit_kp, mit_kd         — override profile MIT gains on motor_command
 //
 // Subscribes (relative to namespace): motor_total_position, joint_despos,
-// soft_mode, hold_joint. Publishes joint_curpos, commanded_joint_position,
-// motor_command.
+// soft_mode, hold_joint. Publishes joint_curpos, motor_command.
 // Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
 // reset before tracking joint_despos again.
 
@@ -43,7 +38,6 @@ namespace
 
 constexpr float kDefaultLoopHz = 200.0f;
 constexpr float kDefaultMotorErrorTolerance = 1e-3f;
-constexpr float kDefaultFeedbackBlend = 0.3f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kJointAngleLimitEps = 1e-4f;
 constexpr double kDefaultJointAngleLimitDeg = 0.0;
@@ -77,11 +71,6 @@ public:
     loop_hz_ = declare_parameter<double>("loop_hz", kDefaultLoopHz);
     motor_error_tolerance_ = declare_parameter<double>(
       "motor_error_tolerance", kDefaultMotorErrorTolerance);
-    feedback_blend_ = static_cast<float>(declare_parameter<double>(
-      "feedback_blend", kDefaultFeedbackBlend));
-    if (feedback_blend_ < 0.0 || feedback_blend_ > 1.0) {
-      throw std::invalid_argument("feedback_blend must be in [0, 1]");
-    }
     const double joint_angle_limit_deg = declare_parameter<double>(
       "joint_angle_limit_deg", kDefaultJointAngleLimitDeg);
     if (joint_angle_limit_deg < 0.0) {
@@ -140,14 +129,7 @@ public:
       std::bind(&JointTranslatorNode::hold_joint_callback, this, std::placeholders::_1));
 
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
-    commanded_joint_position_pub_ = create_publisher<std_msgs::msg::Float32>(
-      "commanded_joint_position", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
-
-    std_msgs::msg::Float32 initial_curpos;
-    initial_curpos.data = 0.0f;
-    joint_curpos_pub_->publish(initial_curpos);
-    commanded_joint_position_pub_->publish(initial_curpos);
 
     const auto loop_period = std::chrono::duration<double>(1.0 / loop_hz_);
     loop_timer_ = create_wall_timer(
@@ -157,23 +139,21 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "motor_model=%s gear_ratio=%.4f loop_hz=%.1f "
-      "omega_max=%.3f pdelta_max=%.4f motor_error_tolerance=%.4f feedback_blend=%.3f "
+      "omega_max=%.3f pdelta_max=%.4f motor_error_tolerance=%.4f "
       "joint_angle_limit_deg=%.1f pd_kp=%.4f mit_kp=%.2f mit_kd=%.3f",
       profile_.name, gear_ratio_, loop_hz_, omega_max_, pdelta_max_,
-      motor_error_tolerance_, feedback_blend_, joint_angle_limit_deg, pd_kp_, mit_kp_, mit_kd_);
+      motor_error_tolerance_, joint_angle_limit_deg, pd_kp_, mit_kp_, mit_kd_);
   }
 
 private:
   struct ControlState
   {
     float total_position{0.0f};
-    float commanded_total_position{0.0f};
     float joint_despos{0.0f};
     bool soft_mode{false};
     bool hold_joint{false};
     bool has_hold_joint{false};
     bool has_total{false};
-    bool has_commanded{false};
     bool has_despos{false};
     bool at_goal_latched{false};
     bool awaiting_post_soft_latch{false};
@@ -183,8 +163,8 @@ private:
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return ControlState{
-      total_position_, commanded_total_position_, joint_despos_, soft_mode_,
-      hold_joint_, has_hold_joint_, has_total_position_, has_commanded_total_position_,
+      total_position_, joint_despos_, soft_mode_,
+      hold_joint_, has_hold_joint_, has_total_position_,
       has_joint_despos_, at_goal_latched_, awaiting_post_soft_latch_};
   }
 
@@ -194,16 +174,7 @@ private:
     rcl_interfaces::msg::SetParametersResult result;
     result.successful = true;
     for (const auto & param : parameters) {
-      if (param.get_name() == "feedback_blend") {
-        const double value = param.as_double();
-        if (value < 0.0 || value > 1.0) {
-          result.successful = false;
-          result.reason = "feedback_blend must be in [0, 1]";
-          return result;
-        }
-        feedback_blend_ = static_cast<float>(value);
-        RCLCPP_INFO(get_logger(), "feedback_blend=%.3f", feedback_blend_);
-      } else if (param.get_name() == "motor_error_tolerance") {
+      if (param.get_name() == "motor_error_tolerance") {
         const double value = param.as_double();
         if (value <= 0.0) {
           result.successful = false;
@@ -226,14 +197,20 @@ private:
       std::lock_guard<std::mutex> lock(state_mutex_);
       total_position_ = msg->total_position;
       has_total_position_ = true;
-      if (awaiting_post_soft_latch_ && !soft_mode_) {
-        joint_despos_ = clamp_joint_despos(
-          total_position_ / static_cast<float>(gear_ratio_));
+
+      if (!has_latched_startup_despos_) {
+        joint_despos_ = clamp_joint_despos(joint_curpos);
+        has_joint_despos_ = true;
+        has_latched_startup_despos_ = true;
+        RCLCPP_INFO(
+          get_logger(),
+          "startup: latched joint_despos=%.4f at current position",
+          joint_despos_);
+      } else if (awaiting_post_soft_latch_ && !soft_mode_) {
+        joint_despos_ = clamp_joint_despos(joint_curpos);
         has_joint_despos_ = true;
         at_goal_latched_ = true;
         awaiting_post_soft_latch_ = false;
-        commanded_total_position_ = total_position_;
-        publish_commanded_joint_position(commanded_total_position_);
         RCLCPP_INFO(
           get_logger(),
           "soft_mode off: latched joint_despos=%.4f at current position",
@@ -328,23 +305,12 @@ private:
     return clamp(joint_despos, -joint_angle_limit_rad_, joint_angle_limit_rad_);
   }
 
-  void latch_goal_at_current_position(float joint_curpos)
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    at_goal_latched_ = true;
-    joint_despos_ = clamp_joint_despos(joint_curpos);
-    has_joint_despos_ = true;
-  }
-
   void latch_goal_at_joint_limit(float joint_limit_rad)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     at_goal_latched_ = true;
     joint_despos_ = joint_limit_rad;
     has_joint_despos_ = true;
-    commanded_total_position_ =
-      joint_limit_rad * static_cast<float>(gear_ratio_);
-    publish_commanded_joint_position(commanded_total_position_);
   }
 
   bool joint_angle_limit_enabled() const
@@ -425,27 +391,12 @@ private:
     }
   }
 
-  float compute_hybrid_motor_error(
-    float desired_total,
-    float commanded_total,
-    float feedback_total,
-    float predicted_commanded_delta = 0.0f) const
-  {
-    const float w = feedback_blend_;
-    const float commanded_error = desired_total - (commanded_total + predicted_commanded_delta);
-    const float feedback_error = desired_total - feedback_total;
-    return (1.0f - w) * commanded_error + w * feedback_error;
-  }
-
   float compute_motor_delta(float total_position_error) const
   {
     return clamp_magnitude(pd_kp_ * total_position_error, pdelta_max_);
   }
 
-  // The CAN gateway packs deltaP into a 15-bit integer over [p_min, p_max]
-  // (see pack_position_continuous). Round-trip through the same codec so the
-  // integrated commanded position matches the delta the motor actually
-  // executes, not the pre-quantization float.
+  // Round-trip deltaP through the CAN 15-bit packing grid (pack_position_continuous).
   float quantize_motor_delta(float motor_delta) const
   {
     if (std::fabs(motor_delta) < cm_interface::kCmdZeroEps) {
@@ -465,20 +416,6 @@ private:
     cmd.kp = static_cast<float>(mit_kp_);
     cmd.kd = clamp(static_cast<float>(mit_kd_), 0.0f, kMitKdMax);
     motor_command_pub_->publish(cmd);
-  }
-
-  void publish_commanded_joint_position(float commanded_total_motor_rad)
-  {
-    std_msgs::msg::Float32 out;
-    out.data = commanded_total_motor_rad / static_cast<float>(gear_ratio_);
-    commanded_joint_position_pub_->publish(out);
-  }
-
-  void integrate_commanded_delta(float motor_delta)
-  {
-    std::lock_guard<std::mutex> lock(state_mutex_);
-    commanded_total_position_ += motor_delta;
-    publish_commanded_joint_position(commanded_total_position_);
   }
 
   void publish_motor_damping_hold()
@@ -505,7 +442,7 @@ private:
       return;
     }
 
-    if (!state.has_total || !state.has_commanded || !state.has_despos) {
+    if (!state.has_total || !state.has_despos) {
       if (!state.has_total) {
         warn_no_total_position();
       }
@@ -516,8 +453,7 @@ private:
     const float gear_ratio = static_cast<float>(gear_ratio_);
     const float joint_curpos = state.total_position / gear_ratio;
     const float desired_total = state.joint_despos * gear_ratio;
-    const float motor_error = compute_hybrid_motor_error(
-      desired_total, state.commanded_total_position, state.total_position);
+    const float motor_error = desired_total - state.total_position;
     const float motor_tol = static_cast<float>(motor_error_tolerance_);
     const bool hold_from_teleop = state.has_hold_joint && state.hold_joint;
 
@@ -545,7 +481,7 @@ private:
     }
 
     if (would_exceed_joint_angle_limit(
-        state.commanded_total_position, motor_delta, motor_error, motor_tol))
+        state.total_position, motor_delta, motor_error, motor_tol))
     {
       const float limit_rad = commanding_into_positive_limit(motor_error, motor_tol) ?
         joint_angle_limit_rad_ : -joint_angle_limit_rad_;
@@ -555,7 +491,6 @@ private:
     }
 
     publish_motor_command(motor_delta);
-    integrate_commanded_delta(motor_delta);
   }
 
   void warn_no_total_position()
@@ -575,28 +510,25 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
-  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr commanded_joint_position_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
   rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   std::mutex state_mutex_;
   float total_position_{0.0f};
-  float commanded_total_position_{0.0f};
-  bool has_commanded_total_position_{true};
   float joint_despos_{0.0f};
   bool soft_mode_{false};
   bool hold_joint_{false};
   bool has_hold_joint_{false};
   bool has_total_position_{false};
-  bool has_joint_despos_{true};
+  bool has_joint_despos_{false};
+  bool has_latched_startup_despos_{false};
   bool at_goal_latched_{false};
   bool awaiting_post_soft_latch_{false};
 
   double gear_ratio_{0.0};
   double loop_hz_{kDefaultLoopHz};
   double motor_error_tolerance_{kDefaultMotorErrorTolerance};
-  float feedback_blend_{kDefaultFeedbackBlend};
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   float pd_kp_{0.0f};
   float omega_max_{0.0f};

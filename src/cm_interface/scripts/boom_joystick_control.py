@@ -8,7 +8,7 @@ Namespace substring rules (case-insensitive):
 
 All listed namespaces receive soft_mode (button 1 edge). hold_joint is published once
 at startup (true), on rising edge when stick control begins (false), and on falling
-edge when control returns to neutral (true, with despos snapped to commanded_joint_position).
+edge when control returns to neutral (true, with despos snapped to joint_curpos).
 
 TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
   knee_velocity_constant, wheel_velocity_constant, hip_velocity_constant
@@ -121,7 +121,7 @@ def parse_namespace_gear_ratios(
 
 
 class NamespaceTarget:
-    """Per-namespace publishers + commanded_joint_position state."""
+    """Per-namespace publishers + joint_curpos / despos teleop state."""
 
     def __init__(
         self,
@@ -138,38 +138,37 @@ class NamespaceTarget:
         self.wheel_velocity = wheel_velocity
         self.hip_velocity = hip_velocity
         self.lock = threading.Lock()
-        self.commanded_joint_position = 0.0
-        self.has_commanded_joint_position = True
+        self.curpos = 0.0
+        self.has_curpos = False
+        self.despos = 0.0
         self.control_was_active = False
 
         if namespace:
             despos_topic = f'/{namespace}/joint_despos'
-            commanded_topic = f'/{namespace}/commanded_joint_position'
+            curpos_topic = f'/{namespace}/joint_curpos'
             soft_mode_topic = f'/{namespace}/soft_mode'
             hold_joint_topic = f'/{namespace}/hold_joint'
         else:
             despos_topic = 'joint_despos'
-            commanded_topic = 'commanded_joint_position'
+            curpos_topic = 'joint_curpos'
             soft_mode_topic = 'soft_mode'
             hold_joint_topic = 'hold_joint'
 
         self.despos_publisher = node.create_publisher(Float32, despos_topic, 10)
         self.soft_mode_publisher = node.create_publisher(Bool, soft_mode_topic, 10)
         self.hold_joint_publisher = node.create_publisher(Bool, hold_joint_topic, 10)
-        node.create_subscription(Float32, commanded_topic, self._commanded_callback, 10)
+        node.create_subscription(Float32, curpos_topic, self._curpos_callback, 10)
 
-    def _set_commanded_joint_position(self, value: float) -> None:
-        self.commanded_joint_position = value
-        self.has_commanded_joint_position = True
-
-    def _commanded_callback(self, msg: Float32) -> None:
+    def _curpos_callback(self, msg: Float32) -> None:
         with self.lock:
+            self.curpos = msg.data
+            self.has_curpos = True
             if not self.control_was_active:
-                self._set_commanded_joint_position(msg.data)
+                self.despos = msg.data
 
-    def get_commanded_joint_position(self) -> tuple[bool, float]:
+    def get_curpos(self) -> tuple[bool, float]:
         with self.lock:
-            return self.has_commanded_joint_position, self.commanded_joint_position
+            return self.has_curpos, self.curpos
 
     def publish_despos(self, despos: float) -> None:
         msg = Float32()
@@ -272,6 +271,7 @@ class BoomJoystickControl(Node):
                 hip_velocity=hip_vel * velocity_scale,
             ))
         self._last_soft_mode = False
+        self._warned_waiting_curpos: set[str] = set()
 
         self._sequence_active = False
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
@@ -333,12 +333,19 @@ class BoomJoystickControl(Node):
             return
 
         for target in self._targets:
-            _, commanded_joint_position = target.get_commanded_joint_position()
+            has_curpos, curpos = target.get_curpos()
+            if not has_curpos:
+                if target.namespace not in self._warned_waiting_curpos:
+                    self.get_logger().warn(
+                        f'Waiting for joint_curpos on {target.namespace or "(root)"}'
+                    )
+                    self._warned_waiting_curpos.add(target.namespace)
+                continue
 
             if soft_mode_toggled_off:
                 with target.lock:
-                    target._set_commanded_joint_position(commanded_joint_position)
-                self._publish_despos(target, commanded_joint_position)
+                    target.despos = curpos
+                self._publish_despos(target, curpos)
 
             control_active = False
             delta = 0.0
@@ -365,8 +372,8 @@ class BoomJoystickControl(Node):
                 if not target.control_was_active:
                     target.publish_hold_joint(False)
                 with target.lock:
-                    target.commanded_joint_position += delta
-                    despos = target.commanded_joint_position
+                    target.despos += delta
+                    despos = target.despos
                 self._publish_despos(target, despos)
                 target.control_was_active = True
                 continue
@@ -374,7 +381,8 @@ class BoomJoystickControl(Node):
             if target.control_was_active:
                 target.publish_hold_joint(True)
                 with target.lock:
-                    despos = target.commanded_joint_position
+                    target.despos = curpos
+                    despos = target.despos
                 self._publish_despos(target, despos)
             target.control_was_active = False
 
