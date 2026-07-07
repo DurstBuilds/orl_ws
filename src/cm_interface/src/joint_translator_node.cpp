@@ -6,7 +6,7 @@
 // 15-bit CAN packing grid so it matches what the motor executes);
 // joint_curpos is feedback.
 // Hold (deltaP=0) when hold_joint is true (teleop release), goal/limit latched,
-// or predictive motor hold.
+// or within motor_error_tolerance (hold only, no latch).
 //
 // Parameters (TWEAK):
 //   motor_model            — ak70_10 | ak10_9 | ak80_64 (sets P + MIT defaults)
@@ -481,7 +481,6 @@ private:
     }
 
     const float gear_ratio = static_cast<float>(gear_ratio_);
-    const float commanded_joint = state.commanded_total_position / gear_ratio;
     const float joint_curpos = state.total_position / gear_ratio;
     const float desired_total = state.joint_despos * gear_ratio;
     const float motor_error = compute_hybrid_motor_error(
@@ -496,9 +495,6 @@ private:
     }
 
     const bool within_tolerance = std::fabs(motor_error) < motor_tol;
-    if (within_tolerance) {
-      latch_goal_at_current_position(commanded_joint);
-    }
 
     if (hold_from_teleop || state.at_goal_latched || within_tolerance) {
       publish_motor_command(0.0f);
@@ -506,17 +502,6 @@ private:
     }
 
     const float motor_delta = quantize_motor_delta(compute_motor_delta(motor_error));
-
-    const float predicted_error = compute_hybrid_motor_error(
-      desired_total, state.commanded_total_position, state.total_position, motor_delta);
-    if (std::fabs(predicted_error) < motor_tol) {
-      const float final_delta = quantize_motor_delta(
-        clamp_magnitude(motor_error, pdelta_max_));
-      publish_motor_command(final_delta);
-      integrate_commanded_delta(final_delta);
-      latch_goal_at_current_position(state.joint_despos);
-      return;
-    }
 
     if (at_joint_angle_limit_reactive(joint_curpos, motor_error, motor_tol)) {
       const float limit_rad = commanding_into_positive_limit(motor_error, motor_tol) ?
