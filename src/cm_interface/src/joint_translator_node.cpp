@@ -2,7 +2,9 @@
 // control at loop_hz (default 200 Hz). Position error is a hybrid of dead
 // reckoning (commanded total position) and feedback (joint_curpos):
 //   e = (1-w)*e_commanded + w*e_feedback
-// commanded_joint_position integrates published deltaP; joint_curpos is feedback.
+// commanded_joint_position integrates published deltaP (quantized to the
+// 15-bit CAN packing grid so it matches what the motor executes);
+// joint_curpos is feedback.
 // Hold (deltaP=0) when hold_joint is true (teleop release), goal/limit latched,
 // or predictive motor hold.
 //
@@ -27,6 +29,7 @@
 #include <stdexcept>
 #include <string>
 
+#include "cm_interface/mit_can_codec.hpp"
 #include "cm_interface/motor_mit_profile.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
@@ -406,6 +409,20 @@ private:
     return clamp_magnitude(pd_kp_ * total_position_error, pdelta_max_);
   }
 
+  // The CAN gateway packs deltaP into a 15-bit integer over [p_min, p_max]
+  // (see pack_position_continuous). Round-trip through the same codec so the
+  // integrated commanded position matches the delta the motor actually
+  // executes, not the pre-quantization float.
+  float quantize_motor_delta(float motor_delta) const
+  {
+    if (std::fabs(motor_delta) < cm_interface::kCmdZeroEps) {
+      return 0.0f;  // Gateway sends hold (apply bit clear); no motion.
+    }
+    const int p_int = cm_interface::float_to_uint(
+      motor_delta, profile_.p_min, profile_.p_max, 15);
+    return cm_interface::uint_to_float(p_int, profile_.p_min, profile_.p_max, 15);
+  }
+
   void publish_motor_command(float motor_delta)
   {
     motor_interfaces::msg::MotorCommand cmd;
@@ -488,12 +505,13 @@ private:
       return;
     }
 
-    const float motor_delta = compute_motor_delta(motor_error);
+    const float motor_delta = quantize_motor_delta(compute_motor_delta(motor_error));
 
     const float predicted_error = compute_hybrid_motor_error(
       desired_total, state.commanded_total_position, state.total_position, motor_delta);
     if (std::fabs(predicted_error) < motor_tol) {
-      const float final_delta = clamp_magnitude(motor_error, pdelta_max_);
+      const float final_delta = quantize_motor_delta(
+        clamp_magnitude(motor_error, pdelta_max_));
       publish_motor_command(final_delta);
       integrate_commanded_delta(final_delta);
       latch_goal_at_current_position(state.joint_despos);
