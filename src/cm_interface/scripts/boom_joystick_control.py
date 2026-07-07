@@ -206,11 +206,11 @@ class BoomJoystickControl(Node):
         self.declare_parameter('soft_mode_button_index', 1)  # TWEAK: toggle on rising edge
         self.declare_parameter('hip_neg_button_index', 5)  # TWEAK
         self.declare_parameter('hip_pos_button_index', 4)  # TWEAK
-        self.declare_parameter('knee_velocity_constant', 1.0)  # TWEAK: rad per tick before /gear_ratio
-        self.declare_parameter('wheel_velocity_constant', 1.0)  # TWEAK
-        self.declare_parameter('hip_velocity_constant', 1.0)  # TWEAK
+        self.declare_parameter('knee_velocity_constant', 0.2)  # TWEAK: rad per tick before /gear_ratio
+        self.declare_parameter('wheel_velocity_constant', 0.2)  # TWEAK
+        self.declare_parameter('hip_velocity_constant', 0.5)  # TWEAK
         self.declare_parameter('hip_angle_limit_deg', 45.0)  # TWEAK: teleop clamp (translator uses launch)
-        self.declare_parameter('stick_deadzone', 0.15)  # TWEAK
+        self.declare_parameter('stick_deadzone', 0.05)  # TWEAK
         self.declare_parameter('namespaces', '')
         self.declare_parameter('namespace_gear_ratios', '')
 
