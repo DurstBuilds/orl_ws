@@ -132,6 +132,7 @@ public:
     std_msgs::msg::Float32 initial_curpos;
     initial_curpos.data = 0.0f;
     joint_curpos_pub_->publish(initial_curpos);
+    commanded_joint_position_pub_->publish(initial_curpos);
 
     const auto loop_period = std::chrono::duration<double>(1.0 / loop_hz_);
     loop_timer_ = create_wall_timer(
@@ -181,11 +182,6 @@ private:
       std::lock_guard<std::mutex> lock(state_mutex_);
       total_position_ = msg->total_position;
       has_total_position_ = true;
-      if (!has_commanded_total_position_) {
-        commanded_total_position_ = msg->total_position;
-        has_commanded_total_position_ = true;
-        publish_commanded_joint_position(commanded_total_position_);
-      }
       if (awaiting_post_soft_latch_ && !soft_mode_) {
         joint_despos_ = clamp_joint_despos(
           total_position_ / static_cast<float>(gear_ratio_));
@@ -528,7 +524,7 @@ private:
   std::mutex state_mutex_;
   float total_position_{0.0f};
   float commanded_total_position_{0.0f};
-  bool has_commanded_total_position_{false};
+  bool has_commanded_total_position_{true};
   float joint_despos_{0.0f};
   bool soft_mode_{false};
   bool hold_joint_{false};
