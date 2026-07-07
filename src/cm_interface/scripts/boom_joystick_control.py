@@ -9,7 +9,8 @@ Namespace substring rules (case-insensitive):
 All listed namespaces receive soft_mode (button 1 edge). hold_joint is published once
 at startup (true), on rising edge when stick control begins (false), and on falling
 edge when control returns to neutral (true, with despos snapped to the reference
-position). The reference position is commanded_joint_position from the translator.
+position). The reference position is commanded_joint_position from the translator,
+with joint_curpos as a startup fallback until the first commanded position arrives.
 
 TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
   knee_velocity_constant, wheel_velocity_constant, hip_velocity_constant
@@ -146,11 +147,13 @@ class NamespaceTarget:
         if namespace:
             despos_topic = f'/{namespace}/joint_despos'
             commanded_topic = f'/{namespace}/commanded_joint_position'
+            curpos_topic = f'/{namespace}/joint_curpos'
             soft_mode_topic = f'/{namespace}/soft_mode'
             hold_joint_topic = f'/{namespace}/hold_joint'
         else:
             despos_topic = 'joint_despos'
             commanded_topic = 'commanded_joint_position'
+            curpos_topic = 'joint_curpos'
             soft_mode_topic = 'soft_mode'
             hold_joint_topic = 'hold_joint'
 
@@ -158,11 +161,21 @@ class NamespaceTarget:
         self.soft_mode_publisher = node.create_publisher(Bool, soft_mode_topic, 10)
         self.hold_joint_publisher = node.create_publisher(Bool, hold_joint_topic, 10)
         node.create_subscription(Float32, commanded_topic, self._commanded_callback, 10)
+        node.create_subscription(Float32, curpos_topic, self._curpos_callback, 10)
+
+    def _set_refpos(self, value: float) -> None:
+        self.refpos = value
+        self.has_refpos = True
 
     def _commanded_callback(self, msg: Float32) -> None:
         with self.lock:
-            self.refpos = msg.data
-            self.has_refpos = True
+            if not self.control_was_active:
+                self._set_refpos(msg.data)
+
+    def _curpos_callback(self, msg: Float32) -> None:
+        with self.lock:
+            if not self.has_refpos and not self.control_was_active:
+                self._set_refpos(msg.data)
 
     def get_refpos(self) -> tuple[bool, float]:
         with self.lock:
@@ -271,6 +284,7 @@ class BoomJoystickControl(Node):
         self._last_soft_mode = False
 
         self._sequence_active = False
+        self._warned_waiting_refpos = False
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_subscription(
             Bool, '/joint_sequence/active', self._sequence_active_callback, 10
@@ -329,12 +343,16 @@ class BoomJoystickControl(Node):
         if self._sequence_active:
             return
 
+        any_waiting_refpos = False
         for target in self._targets:
             has_refpos, refpos = target.get_refpos()
             if not has_refpos:
+                any_waiting_refpos = True
                 continue
 
             if soft_mode_toggled_off:
+                with target.lock:
+                    target._set_refpos(refpos)
                 self._publish_despos(target, refpos)
 
             control_active = False
@@ -361,14 +379,27 @@ class BoomJoystickControl(Node):
             if control_active:
                 if not target.control_was_active:
                     target.publish_hold_joint(False)
-                self._publish_despos(target, refpos + delta)
+                with target.lock:
+                    target.refpos += delta
+                    despos = target.refpos
+                self._publish_despos(target, despos)
                 target.control_was_active = True
                 continue
 
             if target.control_was_active:
                 target.publish_hold_joint(True)
-                self._publish_despos(target, refpos)
+                with target.lock:
+                    despos = target.refpos
+                self._publish_despos(target, despos)
             target.control_was_active = False
+
+        if any_waiting_refpos and not self._warned_waiting_refpos:
+            self.get_logger().warn(
+                'Waiting for commanded_joint_position or joint_curpos; teleop despos paused.'
+            )
+            self._warned_waiting_refpos = True
+        elif not any_waiting_refpos:
+            self._warned_waiting_refpos = False
 
 
 def main(args=None) -> None:
