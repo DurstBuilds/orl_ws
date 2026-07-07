@@ -31,6 +31,7 @@
 
 #include "cm_interface/mit_can_codec.hpp"
 #include "cm_interface/motor_mit_profile.hpp"
+#include "rcl_interfaces/msg/set_parameters_result.hpp"
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/bool.hpp"
 #include "std_msgs/msg/float32.hpp"
@@ -115,6 +116,9 @@ public:
     }
     pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
 
+    param_callback_handle_ = add_on_set_parameters_callback(
+      std::bind(&JointTranslatorNode::on_set_parameters, this, std::placeholders::_1));
+
     motor_total_sub_ = create_subscription<motor_interfaces::msg::MotorTotalPosition>(
       "motor_total_position",
       10,
@@ -182,6 +186,35 @@ private:
       total_position_, commanded_total_position_, joint_despos_, soft_mode_,
       hold_joint_, has_hold_joint_, has_total_position_, has_commanded_total_position_,
       has_joint_despos_, at_goal_latched_, awaiting_post_soft_latch_};
+  }
+
+  rcl_interfaces::msg::SetParametersResult on_set_parameters(
+    const std::vector<rclcpp::Parameter> & parameters)
+  {
+    rcl_interfaces::msg::SetParametersResult result;
+    result.successful = true;
+    for (const auto & param : parameters) {
+      if (param.get_name() == "feedback_blend") {
+        const double value = param.as_double();
+        if (value < 0.0 || value > 1.0) {
+          result.successful = false;
+          result.reason = "feedback_blend must be in [0, 1]";
+          return result;
+        }
+        feedback_blend_ = static_cast<float>(value);
+        RCLCPP_INFO(get_logger(), "feedback_blend=%.3f", feedback_blend_);
+      } else if (param.get_name() == "motor_error_tolerance") {
+        const double value = param.as_double();
+        if (value <= 0.0) {
+          result.successful = false;
+          result.reason = "motor_error_tolerance must be > 0";
+          return result;
+        }
+        motor_error_tolerance_ = value;
+        RCLCPP_INFO(get_logger(), "motor_error_tolerance=%.4f", motor_error_tolerance_);
+      }
+    }
+    return result;
   }
 
   void motor_total_position_callback(
@@ -545,6 +578,7 @@ private:
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr commanded_joint_position_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
+  rclcpp::node_interfaces::OnSetParametersCallbackHandle::SharedPtr param_callback_handle_;
 
   std::mutex state_mutex_;
   float total_position_{0.0f};
