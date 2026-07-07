@@ -1,15 +1,17 @@
 // joint_translator_node: maps joint targets to motor deltas via proportional
-// control at loop_hz (default 200 Hz). Position error uses dead reckoning:
-// commanded motor total position is the sum of published deltaP commands (not
-// motor feedback). motor_total_position seeds/resyncs commanded position;
-// joint_curpos stays on feedback for teleop. Hold (deltaP=0) when hold_joint is
-// true (teleop release), goal/limit latched, or predictive motor hold.
+// control at loop_hz (default 200 Hz). Position error is a hybrid of dead
+// reckoning (commanded total position) and feedback (joint_curpos):
+//   e = (1-w)*e_commanded + w*e_feedback
+// commanded_joint_position integrates published deltaP; joint_curpos is feedback.
+// Hold (deltaP=0) when hold_joint is true (teleop release), goal/limit latched,
+// or predictive motor hold.
 //
 // Parameters (TWEAK):
 //   motor_model            — ak70_10 | ak10_9 | ak80_64 (sets P + MIT defaults)
 //   gear_ratio             — motor rad per joint rad (> 0)
 //   loop_hz                — control loop rate (default 200)
 //   motor_error_tolerance  — motor-space goal/hold tolerance (rad)
+//   feedback_blend         — w in [0,1]: fraction of error from joint_curpos feedback
 //   joint_angle_limit_deg  — 0 disables; else clamp ±limit in joint space
 //   omega_max              — "auto" or max motor speed (rad/s) for delta cap
 //   mit_kp, mit_kd         — override profile MIT gains on motor_command
@@ -37,6 +39,7 @@ namespace
 
 constexpr float kDefaultLoopHz = 200.0f;
 constexpr float kDefaultMotorErrorTolerance = 1e-3f;
+constexpr float kDefaultFeedbackBlend = 0.3f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kJointAngleLimitEps = 1e-4f;
 constexpr double kDefaultJointAngleLimitDeg = 0.0;
@@ -70,6 +73,11 @@ public:
     loop_hz_ = declare_parameter<double>("loop_hz", kDefaultLoopHz);
     motor_error_tolerance_ = declare_parameter<double>(
       "motor_error_tolerance", kDefaultMotorErrorTolerance);
+    feedback_blend_ = static_cast<float>(declare_parameter<double>(
+      "feedback_blend", kDefaultFeedbackBlend));
+    if (feedback_blend_ < 0.0 || feedback_blend_ > 1.0) {
+      throw std::invalid_argument("feedback_blend must be in [0, 1]");
+    }
     const double joint_angle_limit_deg = declare_parameter<double>(
       "joint_angle_limit_deg", kDefaultJointAngleLimitDeg);
     if (joint_angle_limit_deg < 0.0) {
@@ -142,10 +150,10 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "motor_model=%s gear_ratio=%.4f loop_hz=%.1f "
-      "omega_max=%.3f pdelta_max=%.4f motor_error_tolerance=%.4f "
+      "omega_max=%.3f pdelta_max=%.4f motor_error_tolerance=%.4f feedback_blend=%.3f "
       "joint_angle_limit_deg=%.1f pd_kp=%.4f mit_kp=%.2f mit_kd=%.3f",
       profile_.name, gear_ratio_, loop_hz_, omega_max_, pdelta_max_,
-      motor_error_tolerance_, joint_angle_limit_deg, pd_kp_, mit_kp_, mit_kd_);
+      motor_error_tolerance_, feedback_blend_, joint_angle_limit_deg, pd_kp_, mit_kp_, mit_kd_);
   }
 
 private:
@@ -381,6 +389,18 @@ private:
     }
   }
 
+  float compute_hybrid_motor_error(
+    float desired_total,
+    float commanded_total,
+    float feedback_total,
+    float predicted_commanded_delta = 0.0f) const
+  {
+    const float w = feedback_blend_;
+    const float commanded_error = desired_total - (commanded_total + predicted_commanded_delta);
+    const float feedback_error = desired_total - feedback_total;
+    return (1.0f - w) * commanded_error + w * feedback_error;
+  }
+
   float compute_motor_delta(float total_position_error) const
   {
     return clamp_magnitude(pd_kp_ * total_position_error, pdelta_max_);
@@ -445,15 +465,17 @@ private:
 
     const float gear_ratio = static_cast<float>(gear_ratio_);
     const float commanded_joint = state.commanded_total_position / gear_ratio;
+    const float joint_curpos = state.total_position / gear_ratio;
     const float desired_total = state.joint_despos * gear_ratio;
-    const float motor_error = desired_total - state.commanded_total_position;
+    const float motor_error = compute_hybrid_motor_error(
+      desired_total, state.commanded_total_position, state.total_position);
     const float motor_tol = static_cast<float>(motor_error_tolerance_);
     const bool hold_from_teleop = state.has_hold_joint && state.hold_joint;
 
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       clear_goal_latch_if_tracking_away_from_limit(
-        commanded_joint, motor_error, hold_from_teleop, motor_tol);
+        joint_curpos, motor_error, hold_from_teleop, motor_tol);
     }
 
     const bool within_tolerance = std::fabs(motor_error) < motor_tol;
@@ -468,8 +490,8 @@ private:
 
     const float motor_delta = compute_motor_delta(motor_error);
 
-    const float predicted_total = state.commanded_total_position + motor_delta;
-    const float predicted_error = desired_total - predicted_total;
+    const float predicted_error = compute_hybrid_motor_error(
+      desired_total, state.commanded_total_position, state.total_position, motor_delta);
     if (std::fabs(predicted_error) < motor_tol) {
       const float final_delta = clamp_magnitude(motor_error, pdelta_max_);
       publish_motor_command(final_delta);
@@ -478,7 +500,7 @@ private:
       return;
     }
 
-    if (at_joint_angle_limit_reactive(commanded_joint, motor_error, motor_tol)) {
+    if (at_joint_angle_limit_reactive(joint_curpos, motor_error, motor_tol)) {
       const float limit_rad = commanding_into_positive_limit(motor_error, motor_tol) ?
         joint_angle_limit_rad_ : -joint_angle_limit_rad_;
       latch_goal_at_joint_limit(limit_rad);
@@ -537,6 +559,7 @@ private:
   double gear_ratio_{0.0};
   double loop_hz_{kDefaultLoopHz};
   double motor_error_tolerance_{kDefaultMotorErrorTolerance};
+  float feedback_blend_{kDefaultFeedbackBlend};
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   float pd_kp_{0.0f};
   float omega_max_{0.0f};
