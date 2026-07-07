@@ -9,8 +9,7 @@ Namespace substring rules (case-insensitive):
 All listed namespaces receive soft_mode (button 1 edge). hold_joint is published once
 at startup (true), on rising edge when stick control begins (false), and on falling
 edge when control returns to neutral (true, with despos snapped to the reference
-position). The reference position is the translator's commanded_total_position
-(motor rad, converted to joint rad via gear_ratio) rather than joint feedback.
+position). The reference position is commanded_joint_position from the translator.
 
 TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
   knee_velocity_constant, wheel_velocity_constant, hip_velocity_constant
@@ -27,7 +26,6 @@ import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
-from motor_interfaces.msg import MotorTotalPosition
 
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
@@ -131,14 +129,12 @@ class NamespaceTarget:
         node: Node,
         namespace: str,
         *,
-        gear_ratio: float,
         knee_velocity: float,
         wheel_velocity: float,
         hip_velocity: float,
     ) -> None:
         self.namespace = namespace
         self.namespace_lower = namespace.lower()
-        self.gear_ratio = gear_ratio
         self.knee_velocity = knee_velocity
         self.wheel_velocity = wheel_velocity
         self.hip_velocity = hip_velocity
@@ -149,25 +145,23 @@ class NamespaceTarget:
 
         if namespace:
             despos_topic = f'/{namespace}/joint_despos'
-            commanded_topic = f'/{namespace}/commanded_total_position'
+            commanded_topic = f'/{namespace}/commanded_joint_position'
             soft_mode_topic = f'/{namespace}/soft_mode'
             hold_joint_topic = f'/{namespace}/hold_joint'
         else:
             despos_topic = 'joint_despos'
-            commanded_topic = 'commanded_total_position'
+            commanded_topic = 'commanded_joint_position'
             soft_mode_topic = 'soft_mode'
             hold_joint_topic = 'hold_joint'
 
         self.despos_publisher = node.create_publisher(Float32, despos_topic, 10)
         self.soft_mode_publisher = node.create_publisher(Bool, soft_mode_topic, 10)
         self.hold_joint_publisher = node.create_publisher(Bool, hold_joint_topic, 10)
-        node.create_subscription(
-            MotorTotalPosition, commanded_topic, self._commanded_callback, 10
-        )
+        node.create_subscription(Float32, commanded_topic, self._commanded_callback, 10)
 
-    def _commanded_callback(self, msg: MotorTotalPosition) -> None:
+    def _commanded_callback(self, msg: Float32) -> None:
         with self.lock:
-            self.refpos = msg.total_position / self.gear_ratio
+            self.refpos = msg.data
             self.has_refpos = True
 
     def get_refpos(self) -> tuple[bool, float]:
@@ -270,7 +264,6 @@ class BoomJoystickControl(Node):
             self._targets.append(NamespaceTarget(
                 self,
                 ns,
-                gear_ratio=gear_ratio,
                 knee_velocity=knee_vel * velocity_scale,
                 wheel_velocity=wheel_vel * velocity_scale,
                 hip_velocity=hip_vel * velocity_scale,

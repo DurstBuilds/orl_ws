@@ -15,7 +15,7 @@
 //   mit_kp, mit_kd         — override profile MIT gains on motor_command
 //
 // Subscribes (relative to namespace): motor_total_position, joint_despos,
-// soft_mode, hold_joint. Publishes joint_curpos, commanded_total_position,
+// soft_mode, hold_joint. Publishes joint_curpos, commanded_joint_position,
 // motor_command.
 // Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
 // reset before tracking joint_despos again.
@@ -125,8 +125,8 @@ public:
       std::bind(&JointTranslatorNode::hold_joint_callback, this, std::placeholders::_1));
 
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
-    commanded_total_position_pub_ = create_publisher<motor_interfaces::msg::MotorTotalPosition>(
-      "commanded_total_position", 10);
+    commanded_joint_position_pub_ = create_publisher<std_msgs::msg::Float32>(
+      "commanded_joint_position", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
 
     std_msgs::msg::Float32 initial_curpos;
@@ -184,7 +184,7 @@ private:
       if (!has_commanded_total_position_) {
         commanded_total_position_ = msg->total_position;
         has_commanded_total_position_ = true;
-        publish_commanded_total_position(commanded_total_position_);
+        publish_commanded_joint_position(commanded_total_position_);
       }
       if (awaiting_post_soft_latch_ && !soft_mode_) {
         joint_despos_ = clamp_joint_despos(
@@ -193,7 +193,7 @@ private:
         at_goal_latched_ = true;
         awaiting_post_soft_latch_ = false;
         commanded_total_position_ = total_position_;
-        publish_commanded_total_position(commanded_total_position_);
+        publish_commanded_joint_position(commanded_total_position_);
         RCLCPP_INFO(
           get_logger(),
           "soft_mode off: latched joint_despos=%.4f at current position",
@@ -304,7 +304,7 @@ private:
     has_joint_despos_ = true;
     commanded_total_position_ =
       joint_limit_rad * static_cast<float>(gear_ratio_);
-    publish_commanded_total_position(commanded_total_position_);
+    publish_commanded_joint_position(commanded_total_position_);
   }
 
   bool joint_angle_limit_enabled() const
@@ -401,20 +401,18 @@ private:
     motor_command_pub_->publish(cmd);
   }
 
-  void publish_commanded_total_position(float commanded_total)
+  void publish_commanded_joint_position(float commanded_total_motor_rad)
   {
-    motor_interfaces::msg::MotorTotalPosition out;
-    out.total_position = commanded_total;
-    out.wrapped_position = std::atan2(
-      std::sin(commanded_total), std::cos(commanded_total));
-    commanded_total_position_pub_->publish(out);
+    std_msgs::msg::Float32 out;
+    out.data = commanded_total_motor_rad / static_cast<float>(gear_ratio_);
+    commanded_joint_position_pub_->publish(out);
   }
 
   void integrate_commanded_delta(float motor_delta)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     commanded_total_position_ += motor_delta;
-    publish_commanded_total_position(commanded_total_position_);
+    publish_commanded_joint_position(commanded_total_position_);
   }
 
   void publish_motor_damping_hold()
@@ -523,8 +521,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
-  rclcpp::Publisher<motor_interfaces::msg::MotorTotalPosition>::SharedPtr
-  commanded_total_position_pub_;
+  rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr commanded_joint_position_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
 
