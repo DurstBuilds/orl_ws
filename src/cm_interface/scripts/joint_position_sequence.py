@@ -269,6 +269,50 @@ class JointPositionSequence(Node):
                 return False
         return True
 
+    def _out_of_tolerance_errors(
+        self, targets_rad: dict[str, float]
+    ) -> list[tuple[str, Optional[float], float, Optional[float]]]:
+        """Return (namespace, curpos_deg, target_deg, error_deg) for motors outside tolerance."""
+        errors: list[tuple[str, Optional[float], float, Optional[float]]] = []
+        for namespace, target_rad in targets_rad.items():
+            handle = self._handles[namespace]
+            has_curpos, curpos_rad, _, _ = handle.get_state()
+            target_deg = math.degrees(target_rad)
+            if not has_curpos:
+                errors.append((namespace, None, target_deg, None))
+                continue
+            error_rad = curpos_rad - target_rad
+            if abs(error_rad) > self._tolerance_rad:
+                errors.append((
+                    namespace,
+                    math.degrees(curpos_rad),
+                    target_deg,
+                    math.degrees(error_rad),
+                ))
+        return errors
+
+    def _log_settle_timeout_errors(
+        self, targets_rad: dict[str, float], waypoint_index: int
+    ) -> None:
+        self.get_logger().warn(
+            f'Waypoint {waypoint_index} did not settle within '
+            f'{self._config.settle_timeout_sec:.1f} s.'
+        )
+        tolerance_deg = self._config.position_tolerance_deg
+        for namespace, curpos_deg, target_deg, error_deg in self._out_of_tolerance_errors(
+            targets_rad
+        ):
+            if curpos_deg is None or error_deg is None:
+                self.get_logger().error(
+                    f'  {namespace}: no curpos feedback (target={target_deg:.2f} deg)'
+                )
+                continue
+            self.get_logger().error(
+                f'  {namespace}: curpos={curpos_deg:.2f} deg, '
+                f'target={target_deg:.2f} deg, error={error_deg:+.2f} deg '
+                f'(tolerance=±{tolerance_deg:.2f} deg)'
+            )
+
     def _wait_for_settle(self, targets_rad: dict[str, float], waypoint_index: int) -> bool:
         deadline = time.monotonic() + self._config.settle_timeout_sec
         while rclpy.ok() and time.monotonic() < deadline:
@@ -277,10 +321,7 @@ class JointPositionSequence(Node):
             if self._all_settled(targets_rad):
                 return True
             time.sleep(0.05)
-        self.get_logger().warn(
-            f'Waypoint {waypoint_index} did not settle within '
-            f'{self._config.settle_timeout_sec:.1f} s.'
-        )
+        self._log_settle_timeout_errors(targets_rad, waypoint_index)
         return False
 
     def _hold_all_at_curpos(self) -> None:

@@ -2,7 +2,7 @@
 # Edit waypoints for your bench test; hip targets are clamped to ±hip_angle_limit_deg.
 
 position_tolerance_deg: 10.0
-settle_timeout_sec: 30.0
+settle_timeout_sec: 10.0
 
 waypoints:
   - delay_sec: 3.0
