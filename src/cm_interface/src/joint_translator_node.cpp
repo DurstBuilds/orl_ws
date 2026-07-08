@@ -37,7 +37,7 @@ namespace
 {
 
 constexpr float kDefaultLoopHz = 200.0f;
-constexpr float kDefaultMotorErrorTolerance = 1e-3f;
+constexpr float kDefaultMotorErrorTolerance = 1e-2f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kJointAngleLimitEps = 1e-4f;
 constexpr double kDefaultJointAngleLimitDeg = 0.0;
