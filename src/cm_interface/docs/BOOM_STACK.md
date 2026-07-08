@@ -125,7 +125,7 @@ Default stack:
 | Namespace | Motor model | CAN ID | Gear ratio | Joint limit |
 |-----------|-------------|--------|------------|-------------|
 | `knee_motor` | ak80_64 | 4 | 1.6 | — (0 = off) |
-| `hip_motor` | ak70_10 | 3 | 33.0 | ±45° (launch + entry) |
+| `hip_motor` | ak70_10 | 3 | 33.0 | ±90° (launch + entry) |
 | `wheel_motor1` | ak10_9 | 1 | 1.0 | — |
 | `wheel_motor2` | ak10_9 | 2 | 1.0 | — |
 
@@ -174,7 +174,7 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
 | `namespace_omega_max` | from `boom_motor_config.py` | Per-namespace cap: `ns:auto` or `ns:<rad/s>`, comma-separated (e.g. `knee_motor:4.0,hip_motor:auto,wheel_motor1:15.0,wheel_motor2:15.0`) |
 | `omega_max` | `auto` | Fallback for any namespace not listed in `namespace_omega_max` (`auto` uses each motor profile’s `omega_max`) |
 | `motor_error_tolerance` | 0.001 | Motor-space goal/hold tolerance (rad), all translators |
-| `hip_angle_limit_deg` | 45.0 | Hip teleop clamp and hip translator limit |
+| `hip_angle_limit_deg` | 90.0 | Hip teleop clamp and hip translator limit |
 
 Example — slower knee, profile-default hip, faster wheels:
 

@@ -23,7 +23,7 @@ BOOM_MOTOR_STACKS = (
         'gear_ratio': 33.0,
         'motor_model': 'ak70_10',
         'can_id': 3,
-        'joint_angle_limit_deg': 45.0,
+        'joint_angle_limit_deg': 90.0,
         'omega_max': 'auto',
     },
     {

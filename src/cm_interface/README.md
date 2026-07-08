@@ -123,7 +123,7 @@ Requires deadman held; right stick sets absolute `joint_despos`.
 | Button 1 (edge) | all | Toggle `soft_mode` |
 | Release input | all | `hold_joint=true`, snap `joint_despos` to `joint_curpos` |
 
-Hip `joint_despos` is clamped to ±`hip_angle_limit_deg` (default 45°) in teleop. The translator applies the same limit and limit-hold logic for the hip namespace.
+Hip `joint_despos` is clamped to ±`hip_angle_limit_deg` (default 90°) in teleop. The translator applies the same limit and limit-hold logic for the hip namespace.
 
 Per-motor gear ratios in **boom_stack** use `namespace_gear_ratios`, e.g. `knee_motor:1.6,hip_motor:33,...` (defaults from `boom_motor_config.py`).
 
@@ -157,7 +157,7 @@ Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to cur
 - **Parameters** (common):
   - `motor_model`, `gear_ratio`, `loop_hz` (default 200)
   - `motor_error_tolerance` (motor rad, default 0.001)
-  - `joint_angle_limit_deg` (0 = disabled; hip stack uses 45°)
+  - `joint_angle_limit_deg` (0 = disabled; hip stack uses 90°)
   - `omega_max` (`auto` or rad/s cap on per-tick delta). In **boom_stack**, use `namespace_omega_max` for per-namespace values (see [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).
   - `mit_kp`, `mit_kd` (override profile defaults)
 

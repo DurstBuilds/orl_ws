@@ -32,7 +32,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'hip_angle_limit_deg',
-            default_value='45.0',
+            default_value='90.0',
             description='Hip joint limit (deg) when clamping sequence targets.',
         ),
         DeclareLaunchArgument(

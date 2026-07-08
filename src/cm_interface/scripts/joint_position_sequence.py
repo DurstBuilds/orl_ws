@@ -174,7 +174,7 @@ class JointPositionSequence(Node):
         self.declare_parameter('sequence_file', default_sequence_file)
         self.declare_parameter('joint_sequence', 'KneeTumble')
         self.declare_parameter('start_button_index', 7)
-        self.declare_parameter('hip_angle_limit_deg', 45.0)
+        self.declare_parameter('hip_angle_limit_deg', 90.0)
         self.declare_parameter('loop', False)
         self.declare_parameter('active_publish_hz', 10.0)
 
