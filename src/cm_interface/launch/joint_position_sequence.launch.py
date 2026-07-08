@@ -21,6 +21,11 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
+            'joint_sequence',
+            default_value='KneeTumble',
+            description='Preset name to run when sequence_file defines presets.',
+        ),
+        DeclareLaunchArgument(
             'start_button_index',
             default_value='7',
             description='Joy button index to start/abort the sequence (default Start).',
@@ -42,6 +47,7 @@ def generate_launch_description():
             parameters=[{
                 'joy_topic': LaunchConfiguration('joy_topic'),
                 'sequence_file': LaunchConfiguration('sequence_file'),
+                'joint_sequence': LaunchConfiguration('joint_sequence'),
                 'start_button_index': ParameterValue(
                     LaunchConfiguration('start_button_index'), value_type=int
                 ),

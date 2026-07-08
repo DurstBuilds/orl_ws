@@ -321,6 +321,7 @@ def _launch_setup(context, *args, **kwargs):
                 name='joint_position_sequence_node',
                 parameters=[{
                     'sequence_file': LaunchConfiguration('sequence_file'),
+                    'joint_sequence': LaunchConfiguration('joint_sequence'),
                     'start_button_index': ParameterValue(
                         LaunchConfiguration('joint_sequence_start_button'), value_type=int
                     ),
@@ -509,6 +510,11 @@ def generate_launch_description():
             'sequence_file',
             default_value='',
             description='Waypoint YAML for joint sequence; empty uses installed preset.',
+        ),
+        DeclareLaunchArgument(
+            'joint_sequence',
+            default_value='KneeTumble',
+            description='Preset name in sequence_file when using presets mapping.',
         ),
         DeclareLaunchArgument(
             'joint_sequence_start_button',

@@ -79,7 +79,9 @@ Optional joint test sequence: `enable_joint_sequence:=true` (see below).
 Runs preset `joint_despos` waypoints when you press **Start** (button 7) on the gamepad. Between waypoints the node waits until all listed joints settle within tolerance, then applies the per-step `delay_sec` from the YAML file.
 
 ```bash
-ros2 launch cm_interface boom_stack.launch.py enable_joint_sequence:=true
+ros2 launch cm_interface boom_stack.launch.py \
+  enable_joint_sequence:=true \
+  joint_sequence:=KneeTumble
 ```
 
 Or launch the sequence node separately after `boom_stack`:
@@ -88,9 +90,9 @@ Or launch the sequence node separately after `boom_stack`:
 ros2 launch cm_interface joint_position_sequence.launch.py
 ```
 
-Edit waypoints in `config/joint_sequence_presets.yaml` (installed under `share/cm_interface/config/`). Positions are in **degrees** per namespace (`knee_motor`, `hip_motor`, `wheel_motor1`, `wheel_motor2`). While a sequence runs, `boom_joystick_control` pauses `joint_despos` / `hold_joint` publishing (`/joint_sequence/active` is true). Press Start again to abort. The sequence will not start if any joint is in `soft_mode`.
+Edit presets in `config/joint_sequence_presets.yaml` (installed under `share/cm_interface/config/`). Select one with `joint_sequence:=<PresetName>` (e.g. `KneeTumble`, `HipSuperman`). Positions are in **degrees** per namespace (`knee_motor`, `hip_motor`, `wheel_motor1`, `wheel_motor2`). While a sequence runs, `boom_joystick_control` pauses `joint_despos` / `hold_joint` publishing (`/joint_sequence/active` is true). Press Start again to abort. The sequence will not start if any joint is in `soft_mode`.
 
-Launch args (when using `boom_stack`): `sequence_file`, `joint_sequence_start_button` (default 7), `joint_sequence_loop`.
+Launch args (when using `boom_stack`): `sequence_file`, `joint_sequence`, `joint_sequence_start_button` (default 7), `joint_sequence_loop`.
 
 ### Single motor (boom teleop)
 

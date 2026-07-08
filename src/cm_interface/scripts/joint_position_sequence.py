@@ -34,12 +34,50 @@ class Waypoint:
 
 @dataclass
 class SequenceConfig:
+  name: str
   position_tolerance_deg: float
   settle_timeout_sec: float
   waypoints: list[Waypoint]
 
 
-def load_sequence_config(path: str) -> SequenceConfig:
+def _parse_sequence_config(raw: dict, *, source: str, name: str) -> SequenceConfig:
+    if not isinstance(raw, dict):
+        raise ValueError(f'{source} must be a mapping')
+
+    tolerance_deg = float(raw.get('position_tolerance_deg', 2.0))
+    settle_timeout_sec = float(raw.get('settle_timeout_sec', 30.0))
+    if tolerance_deg <= 0.0:
+        raise ValueError(f'{source}.position_tolerance_deg must be > 0')
+    if settle_timeout_sec <= 0.0:
+        raise ValueError(f'{source}.settle_timeout_sec must be > 0')
+
+    waypoints_raw = raw.get('waypoints')
+    if not isinstance(waypoints_raw, list) or not waypoints_raw:
+        raise ValueError(f'{source} must contain a non-empty waypoints list')
+
+    waypoints: list[Waypoint] = []
+    for index, entry in enumerate(waypoints_raw):
+        if not isinstance(entry, dict):
+            raise ValueError(f'{source}.waypoints[{index}] must be a mapping')
+        delay_sec = float(entry.get('delay_sec', 0.0))
+        if delay_sec < 0.0:
+            raise ValueError(f'{source}.waypoints[{index}].delay_sec must be >= 0')
+        positions_raw = entry.get('positions')
+        if not isinstance(positions_raw, dict) or not positions_raw:
+            raise ValueError(
+                f'{source}.waypoints[{index}].positions must be a non-empty mapping')
+        positions_deg = {str(ns).strip(): float(deg) for ns, deg in positions_raw.items()}
+        waypoints.append(Waypoint(delay_sec=delay_sec, positions_deg=positions_deg))
+
+    return SequenceConfig(
+        name=name,
+        position_tolerance_deg=tolerance_deg,
+        settle_timeout_sec=settle_timeout_sec,
+        waypoints=waypoints,
+    )
+
+
+def load_sequence_config(path: str, sequence_name: str) -> SequenceConfig:
     config_path = Path(path).expanduser()
     if not config_path.is_file():
         raise FileNotFoundError(f'sequence_file not found: {config_path}')
@@ -50,35 +88,28 @@ def load_sequence_config(path: str) -> SequenceConfig:
     if not isinstance(raw, dict):
         raise ValueError('sequence_file root must be a mapping')
 
-    tolerance_deg = float(raw.get('position_tolerance_deg', 2.0))
-    settle_timeout_sec = float(raw.get('settle_timeout_sec', 30.0))
-    if tolerance_deg <= 0.0:
-        raise ValueError('position_tolerance_deg must be > 0')
-    if settle_timeout_sec <= 0.0:
-        raise ValueError('settle_timeout_sec must be > 0')
+    presets = raw.get('presets')
+    if presets is None:
+        # Backward-compatibility: legacy single-sequence file.
+        return _parse_sequence_config(raw, source='sequence_file', name=sequence_name)
 
-    waypoints_raw = raw.get('waypoints')
-    if not isinstance(waypoints_raw, list) or not waypoints_raw:
-        raise ValueError('sequence_file must contain a non-empty waypoints list')
+    if not isinstance(presets, dict) or not presets:
+        raise ValueError('sequence_file.presets must be a non-empty mapping')
 
-    waypoints: list[Waypoint] = []
-    for index, entry in enumerate(waypoints_raw):
-        if not isinstance(entry, dict):
-            raise ValueError(f'waypoints[{index}] must be a mapping')
-        delay_sec = float(entry.get('delay_sec', 0.0))
-        if delay_sec < 0.0:
-            raise ValueError(f'waypoints[{index}].delay_sec must be >= 0')
-        positions_raw = entry.get('positions')
-        if not isinstance(positions_raw, dict) or not positions_raw:
-            raise ValueError(f'waypoints[{index}].positions must be a non-empty mapping')
-        positions_deg = {str(ns).strip(): float(deg) for ns, deg in positions_raw.items()}
-        waypoints.append(Waypoint(delay_sec=delay_sec, positions_deg=positions_deg))
+    requested = sequence_name.strip()
+    if not requested:
+        raise ValueError('joint_sequence must be non-empty')
 
-    return SequenceConfig(
-        position_tolerance_deg=tolerance_deg,
-        settle_timeout_sec=settle_timeout_sec,
-        waypoints=waypoints,
-    )
+    preset = presets.get(requested)
+    if preset is None:
+        available = ', '.join(sorted(str(name) for name in presets.keys()))
+        raise ValueError(
+            f"joint_sequence '{requested}' not found in sequence_file presets. "
+            f'Available: {available}')
+    return _parse_sequence_config(
+        preset,
+        source=f"sequence_file.presets['{requested}']",
+        name=requested)
 
 
 class NamespaceHandle:
@@ -141,6 +172,7 @@ class JointPositionSequence(Node):
 
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('sequence_file', default_sequence_file)
+        self.declare_parameter('joint_sequence', 'KneeTumble')
         self.declare_parameter('start_button_index', 7)
         self.declare_parameter('hip_angle_limit_deg', 45.0)
         self.declare_parameter('loop', False)
@@ -150,6 +182,9 @@ class JointPositionSequence(Node):
         sequence_file = self.get_parameter('sequence_file').get_parameter_value().string_value.strip()
         if not sequence_file:
             sequence_file = default_sequence_file
+        sequence_name = (
+            self.get_parameter('joint_sequence').get_parameter_value().string_value.strip()
+        )
         self._start_button_index = (
             self.get_parameter('start_button_index').get_parameter_value().integer_value
         )
@@ -166,7 +201,7 @@ class JointPositionSequence(Node):
         if active_publish_hz <= 0.0:
             raise ValueError('active_publish_hz must be > 0')
 
-        self._config = load_sequence_config(sequence_file)
+        self._config = load_sequence_config(sequence_file, sequence_name)
         self._tolerance_rad = math.radians(self._config.position_tolerance_deg)
 
         namespaces: list[str] = []
@@ -190,7 +225,8 @@ class JointPositionSequence(Node):
         self.create_timer(1.0 / active_publish_hz, self._active_timer_callback)
 
         self.get_logger().info(
-            f'Loaded {len(self._config.waypoints)} waypoints from {sequence_file}.\n'
+            f"Loaded sequence '{self._config.name}' ({len(self._config.waypoints)} waypoints) "
+            f'from {sequence_file}.\n'
             f'  Press button[{self._start_button_index}] to start (again to abort); '
             f'tolerance={self._config.position_tolerance_deg:.2f} deg, '
             f'settle_timeout={self._config.settle_timeout_sec:.1f} s, loop={self._loop}.\n'

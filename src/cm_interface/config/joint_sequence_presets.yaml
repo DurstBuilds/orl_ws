@@ -1,25 +1,50 @@
 # Preset joint positions for joint_position_sequence_node (degrees).
-# Edit waypoints for your bench test; hip targets are clamped to ±hip_angle_limit_deg.
+# Select one at launch with: joint_sequence:=KneeTumble (or HipSuperman).
+# Hip targets are clamped to ±hip_angle_limit_deg at runtime.
 
-position_tolerance_deg: 5.0
-settle_timeout_sec: 10.0
+presets:
+  KneeTumble:
+    position_tolerance_deg: 5.0
+    settle_timeout_sec: 10.0
+    waypoints:
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 90.0
+          hip_motor: 0.0
+          wheel_motor1: 180.0
+          wheel_motor2: 180.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
 
-waypoints:
-  - delay_sec: 1.0
-    positions:
-      knee_motor: 0.0
-      hip_motor: 0.0
-      wheel_motor1: 0.0
-      wheel_motor2: 0.0
-  - delay_sec: 1.0
-    positions:
-      knee_motor: 90.0
-      hip_motor: 0.0
-      wheel_motor1: 180.0
-      wheel_motor2: 180.0
-  - delay_sec: 1.0
-    positions:
-      knee_motor: 0.0
-      hip_motor: 0.0
-      wheel_motor1: 0.0
-      wheel_motor2: 0.0
+  HipSuperman:
+    position_tolerance_deg: 5.0
+    settle_timeout_sec: 10.0
+    waypoints:
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 1.5
+        positions:
+          knee_motor: 0.0
+          hip_motor: 90.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
