@@ -40,6 +40,7 @@ constexpr float kDefaultLoopHz = 200.0f;
 constexpr float kDefaultMotorErrorTolerance = 1e-2f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kJointAngleLimitEps = 1e-4f;
+constexpr float kStartupOriginJointTolRad = 0.15f;
 constexpr double kDefaultJointAngleLimitDeg = 0.0;
 
 float clamp(float value, float low, float high)
@@ -199,22 +200,38 @@ private:
       has_total_position_ = true;
 
       if (!has_latched_startup_despos_) {
-        joint_despos_ = clamp_joint_despos(joint_curpos);
-        has_joint_despos_ = true;
-        has_latched_startup_despos_ = true;
-        RCLCPP_INFO(
-          get_logger(),
-          "startup: latched joint_despos=%.4f at current position",
-          joint_despos_);
+        if (std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "startup: deferring despos latch until post-origin feedback "
+            "(joint_curpos=%.4f rad)",
+            joint_curpos);
+        } else {
+          joint_despos_ = clamp_joint_despos(joint_curpos);
+          has_joint_despos_ = true;
+          has_latched_startup_despos_ = true;
+          RCLCPP_INFO(
+            get_logger(),
+            "startup: latched joint_despos=%.4f at current position",
+            joint_despos_);
+        }
       } else if (awaiting_post_soft_latch_ && !soft_mode_) {
-        joint_despos_ = clamp_joint_despos(joint_curpos);
-        has_joint_despos_ = true;
-        at_goal_latched_ = true;
-        awaiting_post_soft_latch_ = false;
-        RCLCPP_INFO(
-          get_logger(),
-          "soft_mode off: latched joint_despos=%.4f at current position",
-          joint_despos_);
+        if (std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
+          RCLCPP_WARN_THROTTLE(
+            get_logger(), *get_clock(), 2000,
+            "soft_mode off: deferring despos latch until post-origin feedback "
+            "(joint_curpos=%.4f rad)",
+            joint_curpos);
+        } else {
+          joint_despos_ = clamp_joint_despos(joint_curpos);
+          has_joint_despos_ = true;
+          at_goal_latched_ = true;
+          awaiting_post_soft_latch_ = false;
+          RCLCPP_INFO(
+            get_logger(),
+            "soft_mode off: latched joint_despos=%.4f at current position",
+            joint_despos_);
+        }
       }
     }
 

@@ -63,6 +63,8 @@ constexpr int kDefaultStartupOriginPollMs = 100;
 constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kDefaultStartupStaggerMs = 200;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
+// Wrapped motor position must be within this after set-origin before motor_state is published.
+constexpr float kPostOriginPositionTolRad = 0.15f;
 
 using SteadyClock = std::chrono::steady_clock;
 using SteadyTime = SteadyClock::time_point;
@@ -132,6 +134,9 @@ public:
     bool has_soft_mode_on_position{false};
     bool pending_soft_origin_reset{false};
     bool startup_enable_done{false};
+    bool suppress_state_publish{false};
+    bool has_last_feedback{false};
+    cm_interface::MitFeedback last_feedback{};
   };
 
   CanGatewayNode()
@@ -385,12 +390,17 @@ private:
       ch.last_position_rad = fb.position_rad;
       ch.has_last_position = true;
 
+      ch.last_feedback = fb;
+      ch.has_last_feedback = true;
+
       if (first) {
         RCLCPP_INFO(
           get_logger(), "[%s] can_id=%d MIT feedback active.", ch.ns.c_str(), ch.can_id);
       }
 
-      publish_state(ch, fb);
+      if (!ch.suppress_state_publish) {
+        publish_state(ch, fb);
+      }
       return true;
     }
     return false;
@@ -458,8 +468,13 @@ private:
         continue;
       }
       ch.pending_soft_origin_reset = false;
+      ch.suppress_state_publish = true;
+      process_pending_rx();
       send_set_origin(ch, startup_origin_poll_ms_);
       send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+      wait_for_post_origin_position(ch);
+      ch.suppress_state_publish = false;
+      publish_cached_state(ch);
       RCLCPP_INFO(
         get_logger(), "[%s] soft_mode off: origin reset at current position", ch.ns.c_str());
     }
@@ -488,14 +503,58 @@ private:
     return is_ak80_drive(ch) ? ak80_enable_settle_ms_ : enable_settle_ms_;
   }
 
+  void publish_cached_state(DriveChannel & ch)
+  {
+    if (ch.has_last_feedback) {
+      publish_state(ch, ch.last_feedback);
+      return;
+    }
+    send_startup_mit_hold(ch);
+    poll_bus_feedback(feedback_poll_ms_);
+  }
+
+  bool wait_for_post_origin_position(DriveChannel & ch)
+  {
+    const int max_wait_ms = std::max(
+      startup_origin_poll_ms_ * 2,
+      feedback_poll_ms_ * 10);
+    const auto deadline = SteadyClock::now() + std::chrono::milliseconds(max_wait_ms);
+    const int period_ms = service_period_ms();
+
+    while (rclcpp::ok() && SteadyClock::now() < deadline) {
+      send_startup_mit_hold(ch);
+      poll_bus_feedback(period_ms);
+      if (ch.has_last_position &&
+        std::fabs(ch.last_position_rad) <= kPostOriginPositionTolRad)
+      {
+        RCLCPP_INFO(
+          get_logger(),
+          "[STARTUP] [%s] post-origin position %.4f rad",
+          ch.ns.c_str(), ch.last_position_rad);
+        return true;
+      }
+    }
+
+    RCLCPP_WARN(
+      get_logger(),
+      "[STARTUP] [%s] post-origin position not near zero (%.4f rad); "
+      "downstream may see stale feedback",
+      ch.ns.c_str(), ch.has_last_position ? ch.last_position_rad : 0.0f);
+    return false;
+  }
+
   void startup_one_drive(DriveChannel & ch)
   {
     const int settle_ms = enable_settle_ms_for(ch);
+    ch.suppress_state_publish = true;
     send_enable(ch);
     std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+    process_pending_rx();
     send_set_origin(ch, startup_origin_poll_ms_);
     send_startup_mit_hold(ch);
-    poll_bus_feedback(feedback_poll_ms_);
+    wait_for_post_origin_position(ch);
+    ch.suppress_state_publish = false;
+    publish_cached_state(ch);
     ch.startup_enable_done = true;
   }
 
