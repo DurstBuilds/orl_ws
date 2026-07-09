@@ -54,7 +54,7 @@ presets:
           hip_motor: 0.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 1.0
+      - delay_sec: 2.0
         positions:
           knee_motor: 0.0
           hip_motor: 0.0
