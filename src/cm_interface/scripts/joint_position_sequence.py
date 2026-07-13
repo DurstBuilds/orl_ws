@@ -307,6 +307,20 @@ class JointPositionSequence(Node):
 
         self._handles = {ns: NamespaceHandle(self, ns) for ns in all_namespaces}
 
+        self._get_omega_clients: dict[str, rclpy.client.Client] = {}
+        self._set_omega_clients: dict[str, rclpy.client.Client] = {}
+        omega_namespaces: set[str] = set()
+        for config in self._preset_configs.values():
+            omega_namespaces.update(config.omega_max.keys())
+        for ns in sorted(omega_namespaces):
+            translator_node = f'/{ns}/joint_translator_node'
+            self._get_omega_clients[ns] = self.create_client(
+                GetParameters, f'{translator_node}/get_parameters'
+            )
+            self._set_omega_clients[ns] = self.create_client(
+                SetParameters, f'{translator_node}/set_parameters'
+            )
+
         self._active_publisher = self.create_publisher(Bool, '/joint_sequence/active', 10)
         self._sequence_active = False
         self._abort_requested = False
@@ -448,19 +462,25 @@ class JointPositionSequence(Node):
             f'Set origin at current position for: {", ".join(self._origin_namespaces)}'
         )
 
-    def _translator_param_clients(
-        self, namespace: str
-    ) -> tuple[Optional[rclpy.client.Client], Optional[rclpy.client.Client]]:
-        node_name = f'/{namespace}/joint_translator_node'
-        get_client = self.create_client(GetParameters, f'{node_name}/get_parameters')
-        set_client = self.create_client(SetParameters, f'{node_name}/set_parameters')
-        return get_client, set_client
+    def _service_result(self, future, namespace: str, label: str):
+        """Wait for an async service call while the main executor keeps spinning."""
+        try:
+            return future.result(timeout=self._PARAM_CLIENT_TIMEOUT_SEC)
+        except TimeoutError:
+            self.get_logger().warn(f'{label} timed out for {namespace}')
+            return None
+        except Exception as exc:
+            self.get_logger().warn(f'{label} failed for {namespace}: {exc}')
+            return None
 
     def _get_translator_omega_max(self, namespace: str) -> Optional[str]:
-        get_client, _ = self._translator_param_clients(namespace)
-        if get_client is None or not get_client.wait_for_service(
-            timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC
-        ):
+        get_client = self._get_omega_clients.get(namespace)
+        if get_client is None:
+            self.get_logger().warn(
+                f'No get_parameters client for {namespace}/joint_translator_node'
+            )
+            return None
+        if not get_client.wait_for_service(timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC):
             self.get_logger().warn(
                 f'Could not reach {namespace}/joint_translator_node get_parameters'
             )
@@ -469,21 +489,19 @@ class JointPositionSequence(Node):
         request = GetParameters.Request()
         request.names = ['omega_max']
         future = get_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC)
-        if not future.done() or future.result() is None:
-            self.get_logger().warn(f'get_parameters timed out for {namespace}')
-            return None
-
-        result = future.result()
-        if not result.values:
+        result = self._service_result(future, namespace, 'get_parameters')
+        if result is None or not result.values:
             return None
         return result.values[0].string_value
 
     def _set_translator_omega_max(self, namespace: str, value: str) -> bool:
-        _, set_client = self._translator_param_clients(namespace)
-        if set_client is None or not set_client.wait_for_service(
-            timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC
-        ):
+        set_client = self._set_omega_clients.get(namespace)
+        if set_client is None:
+            self.get_logger().warn(
+                f'No set_parameters client for {namespace}/joint_translator_node'
+            )
+            return False
+        if not set_client.wait_for_service(timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC):
             self.get_logger().warn(
                 f'Could not reach {namespace}/joint_translator_node set_parameters'
             )
@@ -495,12 +513,9 @@ class JointPositionSequence(Node):
         request = SetParameters.Request()
         request.parameters = [param]
         future = set_client.call_async(request)
-        rclpy.spin_until_future_complete(self, future, timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC)
-        if not future.done() or future.result() is None:
-            self.get_logger().warn(f'set_parameters timed out for {namespace}')
+        result = self._service_result(future, namespace, 'set_parameters')
+        if result is None:
             return False
-
-        result = future.result()
         if not result.results or not result.results[0].successful:
             reason = result.results[0].reason if result.results else 'unknown'
             self.get_logger().warn(f'set_parameters failed for {namespace}: {reason}')
