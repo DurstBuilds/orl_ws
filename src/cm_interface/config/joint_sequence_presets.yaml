@@ -1,11 +1,17 @@
 # Preset joint positions for joint_position_sequence_node (degrees).
 # Select one at launch with: joint_sequence:=KneeTumble (or HipSuperman).
 # Hip targets are clamped to ±hip_angle_limit_deg at runtime.
+# omega_max values are motor rad/s caps applied during sequence execution.
 
 presets:
   KneeTumble:
-    position_tolerance_deg: 5.0
+    position_tolerance_deg: 1.0
     settle_timeout_sec: 10.0
+    omega_max:
+      knee_motor: 2.0
+      hip_motor: 2.0
+      wheel_motor1: 2.0
+      wheel_motor2: 2.0
     waypoints:
       - delay_sec: 1.0
         positions:
@@ -27,8 +33,13 @@ presets:
           wheel_motor2: 0.0
 
   HipSuperman:
-    position_tolerance_deg: 5.0
+    position_tolerance_deg: 1.0
     settle_timeout_sec: 10.0
+    omega_max:
+      knee_motor: 2.0
+      hip_motor: 2.0
+      wheel_motor1: 2.0
+      wheel_motor2: 2.0
     waypoints:
       - delay_sec: 1.0
         positions:

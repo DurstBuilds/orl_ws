@@ -320,12 +320,12 @@ class BoomJoystickControl(Node):
         """Map cached joy state to despos deltas; hold_joint on control edges only."""
         right_x, left_x, soft_mode, hip_neg, hip_pos = self._state.get_state()
 
-        soft_msg = Bool()
-        soft_msg.data = soft_mode
-        for target in self._targets:
-            target.soft_mode_publisher.publish(soft_msg)
         soft_mode_toggled_off = self._last_soft_mode and not soft_mode
         if soft_mode != self._last_soft_mode:
+            soft_msg = Bool()
+            soft_msg.data = soft_mode
+            for target in self._targets:
+                target.soft_mode_publisher.publish(soft_msg)
             self.get_logger().info(f'soft_mode={soft_mode}')
             self._last_soft_mode = soft_mode
 

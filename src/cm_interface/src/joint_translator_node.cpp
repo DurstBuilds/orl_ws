@@ -184,6 +184,29 @@ private:
         }
         motor_error_tolerance_ = value;
         RCLCPP_INFO(get_logger(), "motor_error_tolerance=%.4f", motor_error_tolerance_);
+      } else if (param.get_name() == "omega_max") {
+        const std::string value = param.as_string();
+        if (value == "auto") {
+          result.successful = false;
+          result.reason = "omega_max cannot be set to 'auto' at runtime";
+          return result;
+        }
+        try {
+          const double numeric = std::stod(value);
+          if (numeric <= 0.0) {
+            result.successful = false;
+            result.reason = "omega_max must be > 0";
+            return result;
+          }
+          omega_max_ = static_cast<float>(numeric);
+          pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
+          RCLCPP_INFO(
+            get_logger(), "omega_max=%.3f pdelta_max=%.4f", omega_max_, pdelta_max_);
+        } catch (const std::exception &) {
+          result.successful = false;
+          result.reason = "omega_max must be a positive number";
+          return result;
+        }
       }
     }
     return result;

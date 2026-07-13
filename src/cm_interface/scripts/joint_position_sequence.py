@@ -4,6 +4,9 @@
 Loads waypoints from YAML (positions in degrees). For each waypoint: command poses,
 wait until joint_curpos settles within tolerance, then optional delay_sec.
 Publishes /joint_sequence/active while running so boom_joystick_control pauses teleop.
+
+D-pad axis scrolls through presets; back button sets origin on all origin_namespaces.
+Per-preset omega_max overrides joint_translator speed caps during sequence execution.
 """
 
 import math
@@ -16,6 +19,8 @@ from typing import Optional
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
+from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
+from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
@@ -26,18 +31,29 @@ def clamp_hip_despos(despos: float, limit_rad: float) -> float:
     return max(-limit_rad, min(limit_rad, despos))
 
 
+def parse_namespace_list(param: str) -> list[str]:
+    """Parse comma-separated namespace list."""
+    namespaces: list[str] = []
+    for entry in param.split(','):
+        ns = entry.strip()
+        if ns:
+            namespaces.append(ns)
+    return namespaces
+
+
 @dataclass
 class Waypoint:
-  delay_sec: float
-  positions_deg: dict[str, float] = field(default_factory=dict)
+    delay_sec: float
+    positions_deg: dict[str, float] = field(default_factory=dict)
 
 
 @dataclass
 class SequenceConfig:
-  name: str
-  position_tolerance_deg: float
-  settle_timeout_sec: float
-  waypoints: list[Waypoint]
+    name: str
+    position_tolerance_deg: float
+    settle_timeout_sec: float
+    waypoints: list[Waypoint]
+    omega_max: dict[str, float] = field(default_factory=dict)
 
 
 def _parse_sequence_config(raw: dict, *, source: str, name: str) -> SequenceConfig:
@@ -50,6 +66,17 @@ def _parse_sequence_config(raw: dict, *, source: str, name: str) -> SequenceConf
         raise ValueError(f'{source}.position_tolerance_deg must be > 0')
     if settle_timeout_sec <= 0.0:
         raise ValueError(f'{source}.settle_timeout_sec must be > 0')
+
+    omega_max: dict[str, float] = {}
+    omega_raw = raw.get('omega_max')
+    if omega_raw is not None:
+        if not isinstance(omega_raw, dict):
+            raise ValueError(f'{source}.omega_max must be a mapping')
+        for ns, value in omega_raw.items():
+            omega = float(value)
+            if omega <= 0.0:
+                raise ValueError(f'{source}.omega_max[{ns}] must be > 0')
+            omega_max[str(ns).strip()] = omega
 
     waypoints_raw = raw.get('waypoints')
     if not isinstance(waypoints_raw, list) or not waypoints_raw:
@@ -74,10 +101,11 @@ def _parse_sequence_config(raw: dict, *, source: str, name: str) -> SequenceConf
         position_tolerance_deg=tolerance_deg,
         settle_timeout_sec=settle_timeout_sec,
         waypoints=waypoints,
+        omega_max=omega_max,
     )
 
 
-def load_sequence_config(path: str, sequence_name: str) -> SequenceConfig:
+def _load_yaml_root(path: str) -> dict:
     config_path = Path(path).expanduser()
     if not config_path.is_file():
         raise FileNotFoundError(f'sequence_file not found: {config_path}')
@@ -87,29 +115,64 @@ def load_sequence_config(path: str, sequence_name: str) -> SequenceConfig:
 
     if not isinstance(raw, dict):
         raise ValueError('sequence_file root must be a mapping')
+    return raw
+
+
+def load_presets_file(path: str) -> tuple[list[str], dict[str, SequenceConfig]]:
+    """Load all presets; returns (ordered names, name -> config)."""
+    raw = _load_yaml_root(path)
+    presets = raw.get('presets')
+    if presets is None:
+        raise ValueError('sequence_file must contain a presets mapping')
+
+    if not isinstance(presets, dict) or not presets:
+        raise ValueError('sequence_file.presets must be a non-empty mapping')
+
+    names = [str(name) for name in presets.keys()]
+    configs = {
+        name: _parse_sequence_config(
+            presets[name],
+            source=f"sequence_file.presets['{name}']",
+            name=name,
+        )
+        for name in names
+    }
+    return names, configs
+
+
+def load_sequence_config(path: str, sequence_name: str) -> SequenceConfig:
+    raw = _load_yaml_root(path)
 
     presets = raw.get('presets')
     if presets is None:
         # Backward-compatibility: legacy single-sequence file.
         return _parse_sequence_config(raw, source='sequence_file', name=sequence_name)
 
-    if not isinstance(presets, dict) or not presets:
-        raise ValueError('sequence_file.presets must be a non-empty mapping')
-
+    _, configs = load_presets_file(path)
     requested = sequence_name.strip()
     if not requested:
         raise ValueError('joint_sequence must be non-empty')
 
-    preset = presets.get(requested)
-    if preset is None:
-        available = ', '.join(sorted(str(name) for name in presets.keys()))
+    config = configs.get(requested)
+    if config is None:
+        available = ', '.join(sorted(configs.keys()))
         raise ValueError(
             f"joint_sequence '{requested}' not found in sequence_file presets. "
             f'Available: {available}')
-    return _parse_sequence_config(
-        preset,
-        source=f"sequence_file.presets['{requested}']",
-        name=requested)
+    return config
+
+
+def collect_namespaces_from_configs(configs: dict[str, SequenceConfig]) -> list[str]:
+    """Union of all namespaces referenced in any preset waypoint."""
+    namespaces: list[str] = []
+    seen: set[str] = set()
+    for config in configs.values():
+        for waypoint in config.waypoints:
+            for ns in waypoint.positions_deg:
+                if ns not in seen:
+                    seen.add(ns)
+                    namespaces.append(ns)
+    return namespaces
 
 
 class NamespaceHandle:
@@ -121,6 +184,7 @@ class NamespaceHandle:
         prefix = f'/{namespace}'
         self.despos_publisher = node.create_publisher(Float32, f'{prefix}/joint_despos', 10)
         self.hold_joint_publisher = node.create_publisher(Bool, f'{prefix}/hold_joint', 10)
+        self.soft_mode_publisher = node.create_publisher(Bool, f'{prefix}/soft_mode', 10)
         self._lock = threading.Lock()
         self.curpos_rad = 0.0
         self.has_curpos = False
@@ -157,9 +221,16 @@ class NamespaceHandle:
         msg.data = float(despos_rad)
         self.despos_publisher.publish(msg)
 
+    def publish_soft_mode(self, enabled: bool) -> None:
+        msg = Bool()
+        msg.data = enabled
+        self.soft_mode_publisher.publish(msg)
+
 
 class JointPositionSequence(Node):
     """Joystick-triggered joint position waypoint runner."""
+
+    _PARAM_CLIENT_TIMEOUT_SEC = 1.0
 
     def __init__(self) -> None:
         super().__init__('joint_position_sequence_node')
@@ -174,6 +245,10 @@ class JointPositionSequence(Node):
         self.declare_parameter('sequence_file', default_sequence_file)
         self.declare_parameter('joint_sequence', 'KneeTumble')
         self.declare_parameter('start_button_index', 7)
+        self.declare_parameter('back_button_index', 6)
+        self.declare_parameter('dpad_vertical_axis', 7)
+        self.declare_parameter('dpad_axis_threshold', 0.5)
+        self.declare_parameter('origin_namespaces', '')
         self.declare_parameter('hip_angle_limit_deg', 90.0)
         self.declare_parameter('loop', False)
         self.declare_parameter('active_publish_hz', 10.0)
@@ -188,6 +263,17 @@ class JointPositionSequence(Node):
         self._start_button_index = (
             self.get_parameter('start_button_index').get_parameter_value().integer_value
         )
+        self._back_button_index = (
+            self.get_parameter('back_button_index').get_parameter_value().integer_value
+        )
+        self._dpad_vertical_axis = (
+            self.get_parameter('dpad_vertical_axis').get_parameter_value().integer_value
+        )
+        self._dpad_axis_threshold = (
+            self.get_parameter('dpad_axis_threshold').get_parameter_value().double_value
+        )
+        if self._dpad_axis_threshold <= 0.0:
+            raise ValueError('dpad_axis_threshold must be > 0')
         hip_angle_limit_deg = (
             self.get_parameter('hip_angle_limit_deg').get_parameter_value().double_value
         )
@@ -201,23 +287,38 @@ class JointPositionSequence(Node):
         if active_publish_hz <= 0.0:
             raise ValueError('active_publish_hz must be > 0')
 
-        self._config = load_sequence_config(sequence_file, sequence_name)
+        self._preset_names, self._preset_configs = load_presets_file(sequence_file)
+        if sequence_name not in self._preset_configs:
+            available = ', '.join(sorted(self._preset_names))
+            raise ValueError(
+                f"joint_sequence '{sequence_name}' not found in sequence_file presets. "
+                f'Available: {available}')
+        self._selected_preset_index = self._preset_names.index(sequence_name)
+        self._config = self._preset_configs[sequence_name]
         self._tolerance_rad = math.radians(self._config.position_tolerance_deg)
 
-        namespaces: list[str] = []
-        seen: set[str] = set()
-        for waypoint in self._config.waypoints:
-            for ns in waypoint.positions_deg:
-                if ns not in seen:
-                    seen.add(ns)
-                    namespaces.append(ns)
+        origin_namespaces_param = (
+            self.get_parameter('origin_namespaces').get_parameter_value().string_value
+        )
+        self._origin_namespaces = parse_namespace_list(origin_namespaces_param)
+        if not self._origin_namespaces:
+            self._origin_namespaces = collect_namespaces_from_configs(self._preset_configs)
 
-        self._handles = {ns: NamespaceHandle(self, ns) for ns in namespaces}
+        all_namespaces = list(self._origin_namespaces)
+        seen = set(all_namespaces)
+        for ns in collect_namespaces_from_configs(self._preset_configs):
+            if ns not in seen:
+                seen.add(ns)
+                all_namespaces.append(ns)
+
+        self._handles = {ns: NamespaceHandle(self, ns) for ns in all_namespaces}
 
         self._active_publisher = self.create_publisher(Bool, '/joint_sequence/active', 10)
         self._sequence_active = False
         self._abort_requested = False
         self._prev_start_pressed = False
+        self._prev_back_pressed = False
+        self._prev_dpad_direction = 0
         self._sequence_lock = threading.Lock()
         self._sequence_thread: Optional[threading.Thread] = None
 
@@ -225,13 +326,52 @@ class JointPositionSequence(Node):
         self.create_timer(1.0 / active_publish_hz, self._active_timer_callback)
 
         self.get_logger().info(
-            f"Loaded sequence '{self._config.name}' ({len(self._config.waypoints)} waypoints) "
-            f'from {sequence_file}.\n'
+            f'Loaded {len(self._preset_names)} presets from {sequence_file}.\n'
+            f'  Selected joint sequence: {self._config.name}\n'
             f'  Press button[{self._start_button_index}] to start (again to abort); '
-            f'tolerance={self._config.position_tolerance_deg:.2f} deg, '
+            f'button[{self._back_button_index}] to set origin; '
+            f'axis[{self._dpad_vertical_axis}] to scroll presets.\n'
+            f'  tolerance={self._config.position_tolerance_deg:.2f} deg, '
             f'settle_timeout={self._config.settle_timeout_sec:.1f} s, loop={self._loop}.\n'
-            f'  Namespaces: {", ".join(namespaces)}'
+            f'  Origin namespaces: {", ".join(self._origin_namespaces)}\n'
+            f'  Waypoint namespaces: {", ".join(all_namespaces)}'
         )
+
+    def _is_sequence_running(self) -> bool:
+        with self._sequence_lock:
+            return self._sequence_thread is not None and self._sequence_thread.is_alive()
+
+    def _select_preset(self, index: int) -> None:
+        self._selected_preset_index = index % len(self._preset_names)
+        name = self._preset_names[self._selected_preset_index]
+        self._config = self._preset_configs[name]
+        self._tolerance_rad = math.radians(self._config.position_tolerance_deg)
+        self.get_logger().info(f'Selected joint sequence: {name}')
+
+    def _read_dpad_direction(self, msg: Joy) -> int:
+        if self._dpad_vertical_axis >= len(msg.axes):
+            return 0
+        axis_value = float(msg.axes[self._dpad_vertical_axis])
+        if axis_value > self._dpad_axis_threshold:
+            return 1
+        if axis_value < -self._dpad_axis_threshold:
+            return -1
+        return 0
+
+    def _handle_dpad_scroll(self, msg: Joy) -> None:
+        if self._is_sequence_running():
+            return
+
+        direction = self._read_dpad_direction(msg)
+        if direction == 0 or direction == self._prev_dpad_direction:
+            self._prev_dpad_direction = direction
+            return
+
+        self._prev_dpad_direction = direction
+        if direction < 0:
+            self._select_preset(self._selected_preset_index - 1)
+        else:
+            self._select_preset(self._selected_preset_index + 1)
 
     def _set_active(self, active: bool) -> None:
         self._sequence_active = active
@@ -246,6 +386,18 @@ class JointPositionSequence(Node):
             self._active_publisher.publish(msg)
 
     def _joy_callback(self, msg: Joy) -> None:
+        self._handle_dpad_scroll(msg)
+
+        back_pressed = (
+            self._back_button_index < len(msg.buttons)
+            and msg.buttons[self._back_button_index] == 1
+        )
+        back_rising = back_pressed and not self._prev_back_pressed
+        self._prev_back_pressed = back_pressed
+        if back_rising:
+            self._handle_set_origin()
+            return
+
         start_pressed = (
             self._start_button_index < len(msg.buttons)
             and msg.buttons[self._start_button_index] == 1
@@ -266,6 +418,115 @@ class JointPositionSequence(Node):
                 target=self._run_sequence, daemon=True
             )
             self._sequence_thread.start()
+
+    def _handle_set_origin(self) -> None:
+        if self._is_sequence_running():
+            self.get_logger().warn('Set origin refused: joint sequence is running.')
+            return
+
+        for namespace in self._origin_namespaces:
+            handle = self._handles.get(namespace)
+            if handle is None:
+                self.get_logger().warn(f'Set origin skipped unknown namespace: {namespace}')
+                continue
+            handle.publish_soft_mode(True)
+
+        time.sleep(0.1)
+
+        for namespace in self._origin_namespaces:
+            handle = self._handles.get(namespace)
+            if handle is None:
+                continue
+            handle.publish_soft_mode(False)
+
+        time.sleep(0.1)
+
+        for namespace in self._origin_namespaces:
+            handle = self._handles.get(namespace)
+            if handle is None:
+                continue
+            has_curpos, curpos_rad, _, _ = handle.get_state()
+            if has_curpos:
+                handle.publish_despos_rad(curpos_rad)
+            handle.publish_hold_joint(True)
+
+        self.get_logger().info(
+            f'Set origin at current position for: {", ".join(self._origin_namespaces)}'
+        )
+
+    def _translator_param_clients(
+        self, namespace: str
+    ) -> tuple[Optional[rclpy.client.Client], Optional[rclpy.client.Client]]:
+        node_name = f'/{namespace}/joint_translator_node'
+        get_client = self.create_client(GetParameters, f'{node_name}/get_parameters')
+        set_client = self.create_client(SetParameters, f'{node_name}/set_parameters')
+        return get_client, set_client
+
+    def _get_translator_omega_max(self, namespace: str) -> Optional[str]:
+        get_client, _ = self._translator_param_clients(namespace)
+        if get_client is None or not get_client.wait_for_service(
+            timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC
+        ):
+            self.get_logger().warn(
+                f'Could not reach {namespace}/joint_translator_node get_parameters'
+            )
+            return None
+
+        request = GetParameters.Request()
+        request.names = ['omega_max']
+        future = get_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC)
+        if not future.done() or future.result() is None:
+            self.get_logger().warn(f'get_parameters timed out for {namespace}')
+            return None
+
+        result = future.result()
+        if not result.values:
+            return None
+        return result.values[0].string_value
+
+    def _set_translator_omega_max(self, namespace: str, value: str) -> bool:
+        _, set_client = self._translator_param_clients(namespace)
+        if set_client is None or not set_client.wait_for_service(
+            timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC
+        ):
+            self.get_logger().warn(
+                f'Could not reach {namespace}/joint_translator_node set_parameters'
+            )
+            return False
+
+        param = Parameter()
+        param.name = 'omega_max'
+        param.value = ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=value)
+        request = SetParameters.Request()
+        request.parameters = [param]
+        future = set_client.call_async(request)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC)
+        if not future.done() or future.result() is None:
+            self.get_logger().warn(f'set_parameters timed out for {namespace}')
+            return False
+
+        result = future.result()
+        if not result.results or not result.results[0].successful:
+            reason = result.results[0].reason if result.results else 'unknown'
+            self.get_logger().warn(f'set_parameters failed for {namespace}: {reason}')
+            return False
+        return True
+
+    def _apply_preset_omega_max(self) -> dict[str, str]:
+        saved: dict[str, str] = {}
+        for namespace, omega in self._config.omega_max.items():
+            current = self._get_translator_omega_max(namespace)
+            if current is None:
+                continue
+            saved[namespace] = current
+            if not self._set_translator_omega_max(namespace, f'{omega:.6g}'):
+                saved.pop(namespace, None)
+        return saved
+
+    def _restore_omega_max(self, saved: dict[str, str]) -> None:
+        for namespace, value in saved.items():
+            self._set_translator_omega_max(namespace, value)
 
     def _any_soft_mode(self) -> bool:
         for handle in self._handles.values():
@@ -369,12 +630,15 @@ class JointPositionSequence(Node):
 
     def _run_sequence(self) -> None:
         self._set_active(True)
-        self.get_logger().info('Joint sequence started.')
+        self.get_logger().info(f"Joint sequence started: {self._config.name}")
+        saved_omega_max: dict[str, str] = {}
 
         try:
             if self._any_soft_mode():
                 self.get_logger().warn('Sequence refused: soft_mode is active on one or more joints.')
                 return
+
+            saved_omega_max = self._apply_preset_omega_max()
 
             while rclpy.ok():
                 for index, waypoint in enumerate(self._config.waypoints):
@@ -409,6 +673,7 @@ class JointPositionSequence(Node):
 
             self.get_logger().info('Joint sequence completed.')
         finally:
+            self._restore_omega_max(saved_omega_max)
             self._hold_all_at_curpos()
             self._set_active(False)
             with self._sequence_lock:
