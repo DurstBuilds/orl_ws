@@ -26,34 +26,6 @@ def generate_launch_description():
             description='Initial preset selection when sequence_file defines presets.',
         ),
         DeclareLaunchArgument(
-            'start_button_index',
-            default_value='7',
-            description='Joy button index to start/abort the sequence (default Start).',
-        ),
-        DeclareLaunchArgument(
-            'back_button_index',
-            default_value='0',
-            description='Joy button index to set origin on all origin_namespaces.',
-        ),
-        DeclareLaunchArgument(
-            'dpad_vertical_axis',
-            default_value='0',
-            description='Joy axis index for D-pad up/down preset scrolling.',
-        ),
-        DeclareLaunchArgument(
-            'dpad_axis_threshold',
-            default_value='0.5',
-            description='Axis magnitude threshold for D-pad up/down detection.',
-        ),
-        DeclareLaunchArgument(
-            'origin_namespaces',
-            default_value='',
-            description=(
-                'Comma-separated namespaces for back-button origin reset. '
-                'Empty uses union of all preset waypoint namespaces.'
-            ),
-        ),
-        DeclareLaunchArgument(
             'hip_angle_limit_deg',
             default_value='90.0',
             description='Hip joint limit (deg) when clamping sequence targets.',
@@ -71,19 +43,6 @@ def generate_launch_description():
                 'joy_topic': LaunchConfiguration('joy_topic'),
                 'sequence_file': LaunchConfiguration('sequence_file'),
                 'joint_sequence': LaunchConfiguration('joint_sequence'),
-                'start_button_index': ParameterValue(
-                    LaunchConfiguration('start_button_index'), value_type=int
-                ),
-                'back_button_index': ParameterValue(
-                    LaunchConfiguration('back_button_index'), value_type=int
-                ),
-                'dpad_vertical_axis': ParameterValue(
-                    LaunchConfiguration('dpad_vertical_axis'), value_type=int
-                ),
-                'dpad_axis_threshold': ParameterValue(
-                    LaunchConfiguration('dpad_axis_threshold'), value_type=float
-                ),
-                'origin_namespaces': LaunchConfiguration('origin_namespaces'),
                 'hip_angle_limit_deg': ParameterValue(
                     LaunchConfiguration('hip_angle_limit_deg'), value_type=float
                 ),

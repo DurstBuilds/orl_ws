@@ -7,6 +7,8 @@ Publishes /joint_sequence/active while running so boom_joystick_control pauses t
 
 D-pad axis scrolls through presets; back button sets origin on all origin_namespaces.
 Per-preset omega_max overrides joint_translator speed caps during sequence execution.
+
+TWEAK controller mapping in module constants below (not launch parameters).
 """
 
 import math
@@ -24,6 +26,13 @@ from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
+
+# TWEAK: joystick mapping for this node (edit here, not in launch files).
+START_BUTTON_INDEX = 7
+BACK_BUTTON_INDEX = 6
+DPAD_VERTICAL_AXIS = 7
+DPAD_AXIS_THRESHOLD = 0.5
+ORIGIN_NAMESPACES = ''  # comma-separated; empty = all namespaces from presets
 
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
@@ -244,11 +253,6 @@ class JointPositionSequence(Node):
         self.declare_parameter('joy_topic', '/joy')
         self.declare_parameter('sequence_file', default_sequence_file)
         self.declare_parameter('joint_sequence', 'KneeTumble')
-        self.declare_parameter('start_button_index', 7)
-        self.declare_parameter('back_button_index', 6)
-        self.declare_parameter('dpad_vertical_axis', 7)
-        self.declare_parameter('dpad_axis_threshold', 0.5)
-        self.declare_parameter('origin_namespaces', '')
         self.declare_parameter('hip_angle_limit_deg', 90.0)
         self.declare_parameter('loop', False)
         self.declare_parameter('active_publish_hz', 10.0)
@@ -260,20 +264,12 @@ class JointPositionSequence(Node):
         sequence_name = (
             self.get_parameter('joint_sequence').get_parameter_value().string_value.strip()
         )
-        self._start_button_index = (
-            self.get_parameter('start_button_index').get_parameter_value().integer_value
-        )
-        self._back_button_index = (
-            self.get_parameter('back_button_index').get_parameter_value().integer_value
-        )
-        self._dpad_vertical_axis = (
-            self.get_parameter('dpad_vertical_axis').get_parameter_value().integer_value
-        )
-        self._dpad_axis_threshold = (
-            self.get_parameter('dpad_axis_threshold').get_parameter_value().double_value
-        )
+        self._start_button_index = START_BUTTON_INDEX
+        self._back_button_index = BACK_BUTTON_INDEX
+        self._dpad_vertical_axis = DPAD_VERTICAL_AXIS
+        self._dpad_axis_threshold = DPAD_AXIS_THRESHOLD
         if self._dpad_axis_threshold <= 0.0:
-            raise ValueError('dpad_axis_threshold must be > 0')
+            raise ValueError('DPAD_AXIS_THRESHOLD must be > 0')
         hip_angle_limit_deg = (
             self.get_parameter('hip_angle_limit_deg').get_parameter_value().double_value
         )
@@ -297,9 +293,7 @@ class JointPositionSequence(Node):
         self._config = self._preset_configs[sequence_name]
         self._tolerance_rad = math.radians(self._config.position_tolerance_deg)
 
-        origin_namespaces_param = (
-            self.get_parameter('origin_namespaces').get_parameter_value().string_value
-        )
+        origin_namespaces_param = ORIGIN_NAMESPACES
         self._origin_namespaces = parse_namespace_list(origin_namespaces_param)
         if not self._origin_namespaces:
             self._origin_namespaces = collect_namespaces_from_configs(self._preset_configs)

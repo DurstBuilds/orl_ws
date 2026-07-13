@@ -322,20 +322,6 @@ def _launch_setup(context, *args, **kwargs):
                 parameters=[{
                     'sequence_file': LaunchConfiguration('sequence_file'),
                     'joint_sequence': LaunchConfiguration('joint_sequence'),
-                    'start_button_index': ParameterValue(
-                        LaunchConfiguration('joint_sequence_start_button'), value_type=int
-                    ),
-                    'back_button_index': ParameterValue(
-                        LaunchConfiguration('joint_sequence_back_button'), value_type=int
-                    ),
-                    'dpad_vertical_axis': ParameterValue(
-                        LaunchConfiguration('joint_sequence_dpad_vertical_axis'), value_type=int
-                    ),
-                    'dpad_axis_threshold': ParameterValue(
-                        LaunchConfiguration('joint_sequence_dpad_axis_threshold'),
-                        value_type=float,
-                    ),
-                    'origin_namespaces': LaunchConfiguration('joint_sequence_origin_namespaces'),
                     'hip_angle_limit_deg': hip_angle_limit_deg,
                     'loop': ParameterValue(
                         LaunchConfiguration('joint_sequence_loop'), value_type=bool
@@ -526,34 +512,6 @@ def generate_launch_description():
             'joint_sequence',
             default_value='KneeTumble',
             description='Preset name in sequence_file when using presets mapping.',
-        ),
-        DeclareLaunchArgument(
-            'joint_sequence_start_button',
-            default_value='7',
-            description='Joy button index to start/abort joint position sequence.',
-        ),
-        DeclareLaunchArgument(
-            'joint_sequence_back_button',
-            default_value='0',
-            description='Joy button index to set origin on all motors during joint sequence.',
-        ),
-        DeclareLaunchArgument(
-            'joint_sequence_dpad_vertical_axis',
-            default_value='0',
-            description='Joy axis index for D-pad up/down joint sequence preset scrolling.',
-        ),
-        DeclareLaunchArgument(
-            'joint_sequence_dpad_axis_threshold',
-            default_value='0.5',
-            description='Axis magnitude threshold for joint sequence D-pad scrolling.',
-        ),
-        DeclareLaunchArgument(
-            'joint_sequence_origin_namespaces',
-            default_value='',
-            description=(
-                'Comma-separated namespaces for joint sequence back-button origin reset. '
-                'Empty uses union of all preset waypoint namespaces.'
-            ),
         ),
         DeclareLaunchArgument(
             'joint_sequence_loop',
