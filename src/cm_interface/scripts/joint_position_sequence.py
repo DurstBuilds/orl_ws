@@ -21,8 +21,6 @@ from typing import Optional
 import rclpy
 import yaml
 from ament_index_python.packages import get_package_share_directory
-from rcl_interfaces.msg import Parameter, ParameterType, ParameterValue
-from rcl_interfaces.srv import GetParameters, SetParameters
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
@@ -194,6 +192,9 @@ class NamespaceHandle:
         self.despos_publisher = node.create_publisher(Float32, f'{prefix}/joint_despos', 10)
         self.hold_joint_publisher = node.create_publisher(Bool, f'{prefix}/hold_joint', 10)
         self.soft_mode_publisher = node.create_publisher(Bool, f'{prefix}/soft_mode', 10)
+        self.sequence_omega_max_publisher = node.create_publisher(
+            Float32, f'{prefix}/sequence_omega_max', 10
+        )
         self._lock = threading.Lock()
         self.curpos_rad = 0.0
         self.has_curpos = False
@@ -235,11 +236,14 @@ class NamespaceHandle:
         msg.data = enabled
         self.soft_mode_publisher.publish(msg)
 
+    def publish_sequence_omega_max(self, omega_max: float) -> None:
+        msg = Float32()
+        msg.data = float(omega_max)
+        self.sequence_omega_max_publisher.publish(msg)
+
 
 class JointPositionSequence(Node):
     """Joystick-triggered joint position waypoint runner."""
-
-    _PARAM_CLIENT_TIMEOUT_SEC = 1.0
 
     def __init__(self) -> None:
         super().__init__('joint_position_sequence_node')
@@ -306,20 +310,6 @@ class JointPositionSequence(Node):
                 all_namespaces.append(ns)
 
         self._handles = {ns: NamespaceHandle(self, ns) for ns in all_namespaces}
-
-        self._get_omega_clients: dict[str, rclpy.client.Client] = {}
-        self._set_omega_clients: dict[str, rclpy.client.Client] = {}
-        omega_namespaces: set[str] = set()
-        for config in self._preset_configs.values():
-            omega_namespaces.update(config.omega_max.keys())
-        for ns in sorted(omega_namespaces):
-            translator_node = f'/{ns}/joint_translator_node'
-            self._get_omega_clients[ns] = self.create_client(
-                GetParameters, f'{translator_node}/get_parameters'
-            )
-            self._set_omega_clients[ns] = self.create_client(
-                SetParameters, f'{translator_node}/set_parameters'
-            )
 
         self._active_publisher = self.create_publisher(Bool, '/joint_sequence/active', 10)
         self._sequence_active = False
@@ -462,80 +452,27 @@ class JointPositionSequence(Node):
             f'Set origin at current position for: {", ".join(self._origin_namespaces)}'
         )
 
-    def _service_result(self, future, namespace: str, label: str):
-        """Wait for an async service call while the main executor keeps spinning."""
-        try:
-            return future.result(timeout=self._PARAM_CLIENT_TIMEOUT_SEC)
-        except TimeoutError:
-            self.get_logger().warn(f'{label} timed out for {namespace}')
-            return None
-        except Exception as exc:
-            self.get_logger().warn(f'{label} failed for {namespace}: {exc}')
-            return None
-
-    def _get_translator_omega_max(self, namespace: str) -> Optional[str]:
-        get_client = self._get_omega_clients.get(namespace)
-        if get_client is None:
-            self.get_logger().warn(
-                f'No get_parameters client for {namespace}/joint_translator_node'
-            )
-            return None
-        if not get_client.wait_for_service(timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC):
-            self.get_logger().warn(
-                f'Could not reach {namespace}/joint_translator_node get_parameters'
-            )
-            return None
-
-        request = GetParameters.Request()
-        request.names = ['omega_max']
-        future = get_client.call_async(request)
-        result = self._service_result(future, namespace, 'get_parameters')
-        if result is None or not result.values:
-            return None
-        return result.values[0].string_value
-
-    def _set_translator_omega_max(self, namespace: str, value: str) -> bool:
-        set_client = self._set_omega_clients.get(namespace)
-        if set_client is None:
-            self.get_logger().warn(
-                f'No set_parameters client for {namespace}/joint_translator_node'
-            )
-            return False
-        if not set_client.wait_for_service(timeout_sec=self._PARAM_CLIENT_TIMEOUT_SEC):
-            self.get_logger().warn(
-                f'Could not reach {namespace}/joint_translator_node set_parameters'
-            )
-            return False
-
-        param = Parameter()
-        param.name = 'omega_max'
-        param.value = ParameterValue(type=ParameterType.PARAMETER_STRING, string_value=value)
-        request = SetParameters.Request()
-        request.parameters = [param]
-        future = set_client.call_async(request)
-        result = self._service_result(future, namespace, 'set_parameters')
-        if result is None:
-            return False
-        if not result.results or not result.results[0].successful:
-            reason = result.results[0].reason if result.results else 'unknown'
-            self.get_logger().warn(f'set_parameters failed for {namespace}: {reason}')
-            return False
-        return True
-
-    def _apply_preset_omega_max(self) -> dict[str, str]:
-        saved: dict[str, str] = {}
+    def _apply_preset_omega_max(self) -> set[str]:
+        applied: set[str] = set()
         for namespace, omega in self._config.omega_max.items():
-            current = self._get_translator_omega_max(namespace)
-            if current is None:
+            handle = self._handles.get(namespace)
+            if handle is None:
+                self.get_logger().warn(f'No handle for omega_max namespace: {namespace}')
                 continue
-            saved[namespace] = current
-            if not self._set_translator_omega_max(namespace, f'{omega:.6g}'):
-                saved.pop(namespace, None)
-        return saved
+            handle.publish_sequence_omega_max(omega)
+            applied.add(namespace)
+            self.get_logger().info(
+                f'Sequence omega_max for {namespace}: {omega:.3f} motor rad/s'
+            )
+        return applied
 
-    def _restore_omega_max(self, saved: dict[str, str]) -> None:
-        for namespace, value in saved.items():
-            self._set_translator_omega_max(namespace, value)
+    def _restore_omega_max(self, namespaces: set[str]) -> None:
+        for namespace in namespaces:
+            handle = self._handles.get(namespace)
+            if handle is None:
+                continue
+            handle.publish_sequence_omega_max(0.0)
+            self.get_logger().info(f'Restored omega_max for {namespace}')
 
     def _any_soft_mode(self) -> bool:
         for handle in self._handles.values():
@@ -640,14 +577,15 @@ class JointPositionSequence(Node):
     def _run_sequence(self) -> None:
         self._set_active(True)
         self.get_logger().info(f"Joint sequence started: {self._config.name}")
-        saved_omega_max: dict[str, str] = {}
+        applied_omega_max: set[str] = set()
 
         try:
             if self._any_soft_mode():
                 self.get_logger().warn('Sequence refused: soft_mode is active on one or more joints.')
                 return
 
-            saved_omega_max = self._apply_preset_omega_max()
+            applied_omega_max = self._apply_preset_omega_max()
+            time.sleep(0.05)
 
             while rclpy.ok():
                 for index, waypoint in enumerate(self._config.waypoints):
@@ -682,7 +620,7 @@ class JointPositionSequence(Node):
 
             self.get_logger().info('Joint sequence completed.')
         finally:
-            self._restore_omega_max(saved_omega_max)
+            self._restore_omega_max(applied_omega_max)
             self._hold_all_at_curpos()
             self._set_active(False)
             with self._sequence_lock:

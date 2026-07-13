@@ -15,7 +15,9 @@
 //   mit_kp, mit_kd         — override profile MIT gains on motor_command
 //
 // Subscribes (relative to namespace): motor_total_position, joint_despos,
-// soft_mode, hold_joint. Publishes joint_curpos, motor_command.
+// soft_mode, hold_joint, sequence_omega_max. Publishes joint_curpos, motor_command.
+// sequence_omega_max (motor rad/s): > 0 overrides omega_max during joint sequences;
+// <= 0 restores the launch-time baseline.
 // Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
 // reset before tracking joint_despos again.
 
@@ -104,6 +106,7 @@ public:
     if (omega_max_ <= 0.0f) {
       throw std::invalid_argument("omega_max must be > 0");
     }
+    baseline_omega_max_ = omega_max_;
     pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
 
     param_callback_handle_ = add_on_set_parameters_callback(
@@ -128,6 +131,11 @@ public:
       "hold_joint",
       10,
       std::bind(&JointTranslatorNode::hold_joint_callback, this, std::placeholders::_1));
+
+    sequence_omega_max_sub_ = create_subscription<std_msgs::msg::Float32>(
+      "sequence_omega_max",
+      10,
+      std::bind(&JointTranslatorNode::sequence_omega_max_callback, this, std::placeholders::_1));
 
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
@@ -199,6 +207,7 @@ private:
             return result;
           }
           omega_max_ = static_cast<float>(numeric);
+          baseline_omega_max_ = omega_max_;
           pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
           RCLCPP_INFO(
             get_logger(), "omega_max=%.3f pdelta_max=%.4f", omega_max_, pdelta_max_);
@@ -335,6 +344,20 @@ private:
       }
       RCLCPP_DEBUG(get_logger(), "hold_joint=%s", hold_joint_ ? "true" : "false");
     }
+  }
+
+  void sequence_omega_max_callback(const std_msgs::msg::Float32::SharedPtr msg)
+  {
+    if (msg->data > 0.0f) {
+      omega_max_ = msg->data;
+    } else {
+      omega_max_ = baseline_omega_max_;
+    }
+    pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
+    RCLCPP_INFO(
+      get_logger(),
+      "sequence_omega_max=%.3f (baseline=%.3f) pdelta_max=%.4f",
+      omega_max_, baseline_omega_max_, pdelta_max_);
   }
 
   float clamp_joint_despos(float joint_despos) const
@@ -549,6 +572,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr joint_despos_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sequence_omega_max_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
@@ -572,6 +596,7 @@ private:
   cm_interface::MotorMitProfile profile_{cm_interface::kAk70_10};
   float pd_kp_{0.0f};
   float omega_max_{0.0f};
+  float baseline_omega_max_{0.0f};
   float pdelta_max_{0.0f};
   float joint_angle_limit_rad_{0.0f};
   double mit_kp_{0.0};
