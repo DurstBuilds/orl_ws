@@ -99,43 +99,43 @@ presets:
           hip_motor: -15.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 2.0
+      - delay_sec: 4.0
         positions:
           knee_motor: -90.0
           hip_motor: -30.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 2.0
+      - delay_sec: 4.0
         positions:
           knee_motor: -90.0
           hip_motor: -45.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 2.0
+      - delay_sec: 4.0
         positions:
           knee_motor: -90.0
           hip_motor: -60.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 2.0
+      - delay_sec: 4.0
         positions:
           knee_motor: -90.0
           hip_motor: -75.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 2.0
+      - delay_sec: 4.0
         positions:
           knee_motor: -90.0
           hip_motor: -90.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 2.0
+      - delay_sec: 4.0
         positions:
           knee_motor: -90.0
           hip_motor: 0.0
           wheel_motor1: -180.0
           wheel_motor2: -180.0
-      - delay_sec: 2.0
+      - delay_sec: 4.0
         positions:
           knee_motor: 0.0
           hip_motor: 0.0
