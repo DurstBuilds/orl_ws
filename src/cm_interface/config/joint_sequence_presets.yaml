@@ -71,3 +71,67 @@ presets:
           hip_motor: 0.0
           wheel_motor1: 0.0
           wheel_motor2: 0.0
+
+  HipAnglesHolding:
+    position_tolerance_deg: 1.0
+    settle_timeout_sec: 10.0
+    omega_max:
+      knee_motor: 2.0
+      hip_motor: 2.0
+      wheel_motor1: 2.0
+      wheel_motor2: 2.0
+    waypoints:
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: 0.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 1.5
+        positions:
+          knee_motor: -90.0
+          hip_motor: -15.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 2.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -30.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 2.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -45.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 2.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -60.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 2.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -75.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 2.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: 0.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 2.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
