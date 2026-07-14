@@ -146,8 +146,8 @@ presets:
     position_tolerance_deg: 1.0
     settle_timeout_sec: 10.0
     omega_max:
-      knee_motor: 2.0
-      hip_motor: 10.0
+      knee_motor: 1.5
+      hip_motor: 20.0
       wheel_motor1: 2.0
       wheel_motor2: 2.0
     waypoints:
