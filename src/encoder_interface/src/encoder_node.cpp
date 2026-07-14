@@ -1,18 +1,26 @@
-// encoder_node: Poll Vishay RAIK060 multi-turn encoder over Linux spidev (SPI simple frame).
+// encoder_node: Poll Vishay RAIK060 multi-turn encoder over Linux spidev.
+//
+// At startup (optional), sends SPI command 0x24 (Apply "Zero position" offset) via an
+// advanced bidirectional frame, then polls with simple frames.
 //
 // Parameters:
-//   spi_device    — spidev path (default /dev/spidev1.2, SPI1 CE2 / GPIO16)
-//   spi_speed_hz  — SPI clock (100 kHz .. 3 MHz)
-//   poll_rate_hz  — publish rate
-//   frame_id      — EncoderState header frame_id
-//   cs_delay_us   — tFCD delay from /CS fall to first SCLK (>= 5 us)
+//   spi_device                      — spidev path (default /dev/spidev1.2, SPI1 CE2 / GPIO16)
+//   spi_speed_hz                    — SPI clock (100 kHz .. 3 MHz)
+//   poll_rate_hz                    — publish rate
+//   frame_id                        — EncoderState header frame_id
+//   cs_delay_us                     — tFCD delay from /CS fall to first SCLK (>= 5 us)
+//   apply_zero_position_on_startup  — send 0x24 once at start (default true)
+//   log_raw_frames                  — log RX bytes on CRC failure
 
 #include <array>
 #include <chrono>
 #include <cerrno>
+#include <cstdint>
 #include <cstring>
 #include <memory>
+#include <stdexcept>
 #include <string>
+#include <thread>
 
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -60,21 +68,34 @@ public:
 
   bool read_simple_frame_mt(std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> & rx)
   {
+    std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> tx{};
+    return transfer(tx.data(), rx.data(), encoder_interface::kSimpleFrameClockBytes);
+  }
+
+  bool send_command(
+    uint8_t command,
+    std::array<uint8_t, encoder_interface::kAdvancedFrameClockBytes> & rx)
+  {
+    const auto tx = encoder_interface::pack_spi_command_frame(command);
+    return transfer(tx.data(), rx.data(), encoder_interface::kAdvancedFrameClockBytes);
+  }
+
+private:
+  bool transfer(const uint8_t * tx, uint8_t * rx, uint32_t len)
+  {
     if (fd_ < 0) {
       return false;
     }
 
-    std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> tx{};
-
-    // Assert /CS, wait tFCD (>= 5 us) with no SCLK edges, then clock exactly 48 bits.
+    // Assert /CS, wait tFCD (>= 5 us) with no SCLK edges, then clock the frame.
     spi_ioc_transfer delay_xfer{};
     delay_xfer.delay_usecs = cs_delay_us_;
     delay_xfer.cs_change = 0;
 
     spi_ioc_transfer data_xfer{};
-    data_xfer.tx_buf = reinterpret_cast<uint64_t>(tx.data());
-    data_xfer.rx_buf = reinterpret_cast<uint64_t>(rx.data());
-    data_xfer.len = encoder_interface::kSimpleFrameClockBytes;
+    data_xfer.tx_buf = reinterpret_cast<uint64_t>(tx);
+    data_xfer.rx_buf = reinterpret_cast<uint64_t>(rx);
+    data_xfer.len = len;
     data_xfer.speed_hz = speed_hz_;
     data_xfer.cs_change = 0;
 
@@ -85,7 +106,6 @@ public:
     return true;
   }
 
-private:
   void close_fd()
   {
     if (fd_ >= 0) {
@@ -110,6 +130,8 @@ public:
     poll_rate_hz_ = declare_parameter<double>("poll_rate_hz", 100.0);
     frame_id_ = declare_parameter<std::string>("frame_id", "encoder_link");
     cs_delay_us_ = declare_parameter<int>("cs_delay_us", 20);
+    apply_zero_position_on_startup_ =
+      declare_parameter<bool>("apply_zero_position_on_startup", true);
     log_raw_frames_ = declare_parameter<bool>("log_raw_frames", false);
 
     if (spi_speed_hz_ < 100000 || spi_speed_hz_ > 3000000) {
@@ -126,6 +148,10 @@ public:
       spi_device_, static_cast<uint32_t>(spi_speed_hz_),
       static_cast<uint16_t>(cs_delay_us_));
 
+    if (apply_zero_position_on_startup_) {
+      apply_zero_position_offset();
+    }
+
     publisher_ = create_publisher<encoder_interface::msg::EncoderState>("encoder/state", 10);
 
     const auto period = std::chrono::duration<double>(1.0 / poll_rate_hz_);
@@ -135,11 +161,46 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "RAIK060 encoder node started: device=%s speed=%d Hz poll=%.1f Hz",
-      spi_device_.c_str(), spi_speed_hz_, poll_rate_hz_);
+      "RAIK060 encoder node started: device=%s speed=%d Hz poll=%.1f Hz zero_on_startup=%s",
+      spi_device_.c_str(), spi_speed_hz_, poll_rate_hz_,
+      apply_zero_position_on_startup_ ? "true" : "false");
   }
 
 private:
+  void apply_zero_position_offset()
+  {
+    using encoder_interface::kCmdApplyZeroPosition;
+
+    std::array<uint8_t, encoder_interface::kAdvancedFrameClockBytes> rx{};
+    if (!spi_->send_command(kCmdApplyZeroPosition, rx)) {
+      throw std::runtime_error(
+        std::string("SPI 0x24 Apply Zero position failed on ") + spi_device_ + ": " +
+        std::strerror(errno));
+    }
+
+    const auto ack = encoder_interface::parse_advanced_command_ack(rx);
+    if (!encoder_interface::spi_command_ack_ok(ack, kCmdApplyZeroPosition)) {
+      throw std::runtime_error(
+        "SPI 0x24 Apply Zero position ack invalid "
+        "(expected RW|cmd=0xA4 data=0x00 with CRC B valid; got RW|cmd=0x" +
+        to_hex2(ack.rw_command) + " data=0x" + to_hex2(ack.data) +
+        " crc_b_valid=" + (ack.crc_b_valid ? "true" : "false") + ")");
+    }
+
+    // Allow NVM write / position update to settle before poll loop.
+    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+
+    RCLCPP_INFO(
+      get_logger(),
+      "Applied encoder Zero position offset (SPI cmd 0x24) at current shaft angle");
+  }
+
+  static std::string to_hex2(uint8_t value)
+  {
+    static constexpr char kHex[] = "0123456789abcdef";
+    return std::string{kHex[(value >> 4) & 0x0F], kHex[value & 0x0F]};
+  }
+
   void poll_once()
   {
     std::array<uint8_t, encoder_interface::kSimpleFrameClockBytes> rx{};
@@ -197,6 +258,7 @@ private:
   double poll_rate_hz_{100.0};
   std::string frame_id_;
   int cs_delay_us_{20};
+  bool apply_zero_position_on_startup_{true};
   bool log_raw_frames_{false};
 
   std::unique_ptr<SpiDevice> spi_;

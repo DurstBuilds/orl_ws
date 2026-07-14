@@ -19,6 +19,9 @@ def _launch_setup(context, *args, **kwargs):
                 'poll_rate_hz': float(LaunchConfiguration('poll_rate_hz').perform(context)),
                 'frame_id': LaunchConfiguration('frame_id').perform(context),
                 'cs_delay_us': int(LaunchConfiguration('cs_delay_us').perform(context)),
+                'apply_zero_position_on_startup': LaunchConfiguration(
+                    'apply_zero_position_on_startup'
+                ).perform(context).strip().lower() in ('true', '1', 'yes'),
                 'log_raw_frames': LaunchConfiguration('log_raw_frames').perform(context).strip().lower()
                 in ('true', '1', 'yes'),
             }],
@@ -33,6 +36,11 @@ def generate_launch_description():
         DeclareLaunchArgument('poll_rate_hz', default_value='100.0'),
         DeclareLaunchArgument('frame_id', default_value='encoder_link'),
         DeclareLaunchArgument('cs_delay_us', default_value='20'),
+        DeclareLaunchArgument(
+            'apply_zero_position_on_startup',
+            default_value='true',
+            description='Send SPI cmd 0x24 (Apply Zero position offset) once at node start.',
+        ),
         DeclareLaunchArgument(
             'log_raw_frames',
             default_value='false',

@@ -1,12 +1,15 @@
-// raik060_spi_codec.hpp — Vishay RAIK060 multi-turn SPI simple frame parser.
+// raik060_spi_codec.hpp — Vishay RAIK060 multi-turn SPI frame helpers.
 //
-// Datasheet: RAIK060 (Document 32602), SPI Mode 1, 44-bit simple frame (MT).
+// Datasheet: RAIK060 (Document 32602), SPI Mode 1.
+// Simple (read-only) MT frame: 44 bits. Advanced (bidirectional) MT frame: 68 bits.
+// SPI commands require key 0x56 and RW=1 in the MOSI command field.
 
 #ifndef ENCODER_INTERFACE__RAIK060_SPI_CODEC_HPP_
 #define ENCODER_INTERFACE__RAIK060_SPI_CODEC_HPP_
 
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <cstdint>
 
 namespace encoder_interface
@@ -15,8 +18,14 @@ namespace encoder_interface
 constexpr uint32_t kPositionResolution = 262144;  // 18 bits
 constexpr int kSimpleFrameBits = 44;
 constexpr int kSimpleFrameClockBytes = 6;         // 48 clocks; first 44 bits used
+constexpr int kAdvancedFrameBits = 68;
+constexpr int kAdvancedFrameClockBytes = 9;       // 72 clocks; first 68 bits used
+constexpr int kAckBitOffset = 44;                 // after simple-frame MISO payload
 constexpr uint8_t kSpiMode = 0x01;                // SPI_MODE_1 (CPOL=0, CPHA=1)
 constexpr uint8_t kCrcPoly = 0x97;
+constexpr uint8_t kSpiKey = 0x56;
+constexpr uint8_t kCmdApplyZeroPosition = 0x24;
+constexpr uint8_t kCmdResetZeroPosition = 0x25;
 
 struct SimpleFrameMt
 {
@@ -27,7 +36,8 @@ struct SimpleFrameMt
   bool crc_valid{false};
 };
 
-inline bool get_bit_msb_first(const std::array<uint8_t, kSimpleFrameClockBytes> & data, int bit_index)
+template<size_t N>
+inline bool get_bit_msb_first(const std::array<uint8_t, N> & data, int bit_index)
 {
   const int byte_index = bit_index / 8;
   const int bit_in_byte = 7 - (bit_index % 8);
@@ -46,6 +56,54 @@ inline uint8_t compute_crc8_msb_first(uint64_t data, int num_bits)
     }
   }
   return crc;
+}
+
+// Pack MOSI for an advanced-frame command (Customer Mode).
+// Datasheet shorthand e.g. 0x56A0 = key 0x56 then RW|cmd (0xA0 for cmd 0x20).
+// Command bytes occupy the first 24 MOSI bits; remaining bits are don't-care.
+inline std::array<uint8_t, kAdvancedFrameClockBytes> pack_spi_command_frame(uint8_t command)
+{
+  std::array<uint8_t, kAdvancedFrameClockBytes> tx{};
+  tx[0] = kSpiKey;
+  tx[1] = static_cast<uint8_t>(0x80U | (command & 0x7FU));
+  tx[2] = 0x00;
+  return tx;
+}
+
+struct AdvancedCommandAck
+{
+  uint8_t rw_command{0};
+  uint8_t data{0};
+  bool crc_b_valid{false};
+};
+
+inline AdvancedCommandAck parse_advanced_command_ack(
+  const std::array<uint8_t, kAdvancedFrameClockBytes> & rx)
+{
+  AdvancedCommandAck ack;
+
+  uint16_t ack_raw = 0;
+  for (int bit = kAckBitOffset; bit < kAckBitOffset + 16; ++bit) {
+    ack_raw = static_cast<uint16_t>(
+      (ack_raw << 1) | (get_bit_msb_first(rx, bit) ? 1U : 0U));
+  }
+  ack.rw_command = static_cast<uint8_t>((ack_raw >> 8) & 0xFFU);
+  ack.data = static_cast<uint8_t>(ack_raw & 0xFFU);
+
+  uint8_t crc_received = 0;
+  for (int bit = kAckBitOffset + 16; bit < kAdvancedFrameBits; ++bit) {
+    crc_received = static_cast<uint8_t>(
+      (crc_received << 1) | (get_bit_msb_first(rx, bit) ? 1U : 0U));
+  }
+  const uint8_t crc_computed = compute_crc8_msb_first(ack_raw, 16);
+  ack.crc_b_valid = crc_received == static_cast<uint8_t>(~crc_computed);
+  return ack;
+}
+
+inline bool spi_command_ack_ok(const AdvancedCommandAck & ack, uint8_t command)
+{
+  const uint8_t expected = static_cast<uint8_t>(0x80U | (command & 0x7FU));
+  return ack.crc_b_valid && ack.rw_command == expected && ack.data == 0x00;
 }
 
 inline SimpleFrameMt parse_simple_frame_mt(const std::array<uint8_t, kSimpleFrameClockBytes> & rx)
