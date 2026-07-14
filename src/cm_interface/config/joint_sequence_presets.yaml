@@ -151,31 +151,31 @@ presets:
       wheel_motor1: 2.0
       wheel_motor2: 2.0
     waypoints:
-      - delay_sec: 1.0
+      - delay_sec: 0.5
         positions:
           knee_motor: 0.0
           hip_motor: 0.0
           wheel_motor1: 0.0
           wheel_motor2: 0.0
-      - delay_sec: 1.0
+      - delay_sec: 0.5
         positions:
           knee_motor: 80.0
           hip_motor: 80.0
           wheel_motor1: 0.0
           wheel_motor2: 0.0
-      - delay_sec: 1.0
+      - delay_sec: 0.5
         positions:
           knee_motor: 0.0
           hip_motor: 0.0
           wheel_motor1: 0.0
           wheel_motor2: 0.0
-      - delay_sec: 1.0
+      - delay_sec: 0.5
         positions:
           knee_motor: -80.0
           hip_motor: -80.0
           wheel_motor1: 0.0
           wheel_motor2: 0.0
-      - delay_sec: 1.0
+      - delay_sec: 0.5
         positions:
           knee_motor: 0.0
           hip_motor: 0.0
