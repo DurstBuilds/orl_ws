@@ -52,7 +52,7 @@
 namespace
 {
 
-constexpr float kSoftModeKd = 0.025f;
+constexpr float kSoftModeKd = 0.25f;
 constexpr double kDefaultLoopRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
 constexpr int kDefaultFeedbackPollMs = 15;
