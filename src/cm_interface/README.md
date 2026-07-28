@@ -121,7 +121,7 @@ Requires deadman held; right stick sets absolute `joint_despos`.
 | Button 5 held (no btn 4) | `hip` | Positive increment |
 | Button 4 held (no btn 5) | `hip` | Negative increment |
 | Button 1 (edge) | all | Toggle `soft_mode` |
-| Button 2 / X (edge) | `knee` | Toggle `motor_enabled` (zero MIT kp/kd when off; despos latched on re-enable) |
+| Button 2 / X (edge) | `knee` | Toggle `soft_mode` (knee only; same re-latch as global soft stop) |
 | Release input | all | `hold_joint=true`, snap `joint_despos` to `joint_curpos` |
 
 Hip `joint_despos` is clamped to ±`hip_angle_limit_deg` (default 90°) in teleop. The translator applies the same limit and limit-hold logic for the hip namespace.
@@ -138,8 +138,7 @@ Per-motor gear ratios in **boom_stack** use `namespace_gear_ratios`, e.g. `knee_
 | `joint_curpos` | `std_msgs/Float32` | Joint position (rad) |
 | `joint_despos` | `std_msgs/Float32` | Desired joint position (rad) |
 | `hold_joint` | `std_msgs/Bool` | `true` = translator holds (`deltaP=0`) |
-| `soft_mode` | `std_msgs/Bool` | `true` = motor damping-only MIT mode (all joints; set-origin on off) |
-| `motor_enabled` | `std_msgs/Bool` | `false` = MIT kp=0 kd=0 (knee teleop toggle; default enabled) |
+| `soft_mode` | `std_msgs/Bool` | `true` = motor damping-only MIT mode (set-origin + despos latch on off) |
 
 Global: `/joy` from `joy_node`.
 
@@ -150,11 +149,7 @@ When `soft_mode` is true:
 - **motor_node_continuous** sends low-stiffness MIT (Kd-only style hold).
 - **joint_translator_node** stops publishing `motor_command`.
 
-Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to current position to avoid chasing a stale target.
-
-## Knee motor enable
-
-Button 2 (X) toggles `motor_enabled` on knee namespace(s) only. When disabled, `joint_translator_node` sends MIT commands with `kp=0` and `kd=0` (fully passive). On re-enable, `joint_despos` is latched to `joint_curpos` in both teleop and translator to avoid a jump. Unlike `soft_mode`, this does not affect other joints and does not trigger a set-origin.
+Toggle from boom teleop (button 1 for all joints, button X for knee only). On soft-mode off, despos is re-pinned to current position after gateway set-origin and unwrapper reset.
 
 ## joint_translator_node behavior
 
@@ -216,6 +211,6 @@ cm_interface/
 ## Troubleshooting
 
 - **No `joint_curpos`**: Ensure `motor_total_position` is publishing (unwrapper needs `motor_state`).
-- **Motor does not move**: Check `hold_joint`, `soft_mode`, `motor_enabled`, and that `joint_despos` differs from `joint_curpos` beyond `motor_error_tolerance`.
+- **Motor does not move**: Check `hold_joint`, `soft_mode`, and that `joint_despos` differs from `joint_curpos` beyond `motor_error_tolerance`.
 - **Hip overshoot at limit**: Confirm `joint_angle_limit_deg` on hip translator and `hip_angle_limit_deg` on teleop; reduce `hip_velocity_constant` or increase `publish_hz`.
 - **CAN errors**: Verify `can_id`, interface name, drive power/enable, and that `can0` has `restart-ms 100` (see `can0_up.sh` and [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).

@@ -6,16 +6,16 @@ Namespace substring rules (case-insensitive):
   'wheel' — left stick X (both wheel motors share the same stick)
   'hip'   — buttons 4/5 (neg/pos); joint_despos clamped to hip_angle_limit_deg
 
-All listed namespaces receive soft_mode (button 1 edge). Knee namespace(s) also receive
-motor_enabled (button 2 / X edge): disabled sends MIT kp=0 kd=0; re-enable snaps despos
-to curpos. hold_joint is published once at startup (true), on rising edge when stick
-control begins (false), and on falling edge when control returns to neutral (true, with
-despos snapped to joint_curpos).
+Button 1 toggles soft_mode on all namespaces. Button 2 / X toggles soft_mode on knee
+namespace(s) only (same damping + set-origin re-latch path as global soft stop).
+hold_joint is published once at startup (true), on rising edge when stick control
+begins (false), and on falling edge when control returns to neutral (true, with despos
+snapped to joint_curpos).
 
 TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
   knee_velocity_constant, wheel_velocity_constant, hip_velocity_constant
   right_stick_x_axis, left_stick_x_axis, stick_deadzone
-  soft_mode_button_index, knee_enable_button_index, hip_neg_button_index, hip_pos_button_index
+  soft_mode_button_index, knee_soft_mode_button_index, hip_neg_button_index, hip_pos_button_index
   namespaces, namespace_gear_ratios, publish_hz, hip_angle_limit_deg
 """
 
@@ -40,10 +40,10 @@ class JoyState:
         self._lock = threading.Lock()
         self._right_x = 0.0
         self._left_x = 0.0
-        self._soft_mode = False
+        self._global_soft_mode = False
         self._prev_soft_mode_button_pressed = False
-        self._knee_motor_enabled = True
-        self._prev_knee_enable_button_pressed = False
+        self._knee_soft_mode = False
+        self._prev_knee_soft_mode_button_pressed = False
         self._hip_neg_pressed = False
         self._hip_pos_pressed = False
 
@@ -53,7 +53,7 @@ class JoyState:
         right_x_axis: int,
         left_x_axis: int,
         soft_mode_button_index: int,
-        knee_enable_button_index: int,
+        knee_soft_mode_button_index: int,
         hip_neg_button_index: int,
         hip_pos_button_index: int,
     ) -> None:
@@ -63,9 +63,9 @@ class JoyState:
             soft_mode_button_index < len(msg.buttons) and
             msg.buttons[soft_mode_button_index] == 1
         )
-        knee_enable_button_pressed = (
-            knee_enable_button_index < len(msg.buttons) and
-            msg.buttons[knee_enable_button_index] == 1
+        knee_soft_mode_button_pressed = (
+            knee_soft_mode_button_index < len(msg.buttons) and
+            msg.buttons[knee_soft_mode_button_index] == 1
         )
         hip_neg_pressed = (
             hip_neg_button_index < len(msg.buttons) and
@@ -82,11 +82,14 @@ class JoyState:
             self._hip_neg_pressed = hip_neg_pressed
             self._hip_pos_pressed = hip_pos_pressed
             if soft_mode_button_pressed and not self._prev_soft_mode_button_pressed:
-                self._soft_mode = not self._soft_mode
+                self._global_soft_mode = not self._global_soft_mode
             self._prev_soft_mode_button_pressed = soft_mode_button_pressed
-            if knee_enable_button_pressed and not self._prev_knee_enable_button_pressed:
-                self._knee_motor_enabled = not self._knee_motor_enabled
-            self._prev_knee_enable_button_pressed = knee_enable_button_pressed
+            if (
+                knee_soft_mode_button_pressed and
+                not self._prev_knee_soft_mode_button_pressed
+            ):
+                self._knee_soft_mode = not self._knee_soft_mode
+            self._prev_knee_soft_mode_button_pressed = knee_soft_mode_button_pressed
 
     @staticmethod
     def _read_axis(msg: Joy, axis_index: int) -> Optional[float]:
@@ -99,8 +102,8 @@ class JoyState:
             return (
                 self._right_x,
                 self._left_x,
-                self._soft_mode,
-                self._knee_motor_enabled,
+                self._global_soft_mode,
+                self._knee_soft_mode,
                 self._hip_neg_pressed,
                 self._hip_pos_pressed,
             )
@@ -155,24 +158,22 @@ class NamespaceTarget:
         self.has_curpos = False
         self.despos = 0.0
         self.control_was_active = False
+        self.last_soft_mode = False
 
         if namespace:
             despos_topic = f'/{namespace}/joint_despos'
             curpos_topic = f'/{namespace}/joint_curpos'
             soft_mode_topic = f'/{namespace}/soft_mode'
             hold_joint_topic = f'/{namespace}/hold_joint'
-            motor_enabled_topic = f'/{namespace}/motor_enabled'
         else:
             despos_topic = 'joint_despos'
             curpos_topic = 'joint_curpos'
             soft_mode_topic = 'soft_mode'
             hold_joint_topic = 'hold_joint'
-            motor_enabled_topic = 'motor_enabled'
 
         self.despos_publisher = node.create_publisher(Float32, despos_topic, 10)
         self.soft_mode_publisher = node.create_publisher(Bool, soft_mode_topic, 10)
         self.hold_joint_publisher = node.create_publisher(Bool, hold_joint_topic, 10)
-        self.motor_enabled_publisher = node.create_publisher(Bool, motor_enabled_topic, 10)
         node.create_subscription(Float32, curpos_topic, self._curpos_callback, 10)
 
     def _curpos_callback(self, msg: Float32) -> None:
@@ -196,10 +197,10 @@ class NamespaceTarget:
         msg.data = hold
         self.hold_joint_publisher.publish(msg)
 
-    def publish_motor_enabled(self, enabled: bool) -> None:
+    def publish_soft_mode(self, enabled: bool) -> None:
         msg = Bool()
         msg.data = enabled
-        self.motor_enabled_publisher.publish(msg)
+        self.soft_mode_publisher.publish(msg)
 
 
 class BoomJoystickControl(Node):
@@ -214,7 +215,7 @@ class BoomJoystickControl(Node):
         self.declare_parameter('right_stick_x_axis', 3)  # TWEAK: knee axis index
         self.declare_parameter('left_stick_x_axis', 0)  # TWEAK: wheel axis index
         self.declare_parameter('soft_mode_button_index', 1)  # TWEAK: toggle on rising edge
-        self.declare_parameter('knee_enable_button_index', 2)  # TWEAK: Xbox X; knee motor_enabled
+        self.declare_parameter('knee_soft_mode_button_index', 2)  # TWEAK: Xbox X; knee soft_mode
         self.declare_parameter('hip_neg_button_index', 5)  # TWEAK
         self.declare_parameter('hip_pos_button_index', 4)  # TWEAK
         self.declare_parameter('knee_velocity_constant', 0.2)  # TWEAK: rad per tick before /gear_ratio
@@ -224,6 +225,8 @@ class BoomJoystickControl(Node):
         self.declare_parameter('stick_deadzone', 0.05)  # TWEAK
         self.declare_parameter('namespaces', '')
         self.declare_parameter('namespace_gear_ratios', '')
+        # Back-compat alias for earlier knee_enable_button_index launches.
+        self.declare_parameter('knee_enable_button_index', 2)
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
         publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
@@ -249,9 +252,15 @@ class BoomJoystickControl(Node):
         self._soft_mode_button_index = (
             self.get_parameter('soft_mode_button_index').get_parameter_value().integer_value
         )
-        self._knee_enable_button_index = (
+        knee_soft_mode_button_index = (
+            self.get_parameter('knee_soft_mode_button_index').get_parameter_value().integer_value
+        )
+        knee_enable_button_index = (
             self.get_parameter('knee_enable_button_index').get_parameter_value().integer_value
         )
+        self._knee_soft_mode_button_index = knee_soft_mode_button_index
+        if knee_enable_button_index != 2:
+            self._knee_soft_mode_button_index = knee_enable_button_index
         self._hip_neg_button_index = (
             self.get_parameter('hip_neg_button_index').get_parameter_value().integer_value
         )
@@ -295,8 +304,6 @@ class BoomJoystickControl(Node):
                 wheel_velocity=wheel_vel * velocity_scale,
                 hip_velocity=hip_vel * velocity_scale,
             ))
-        self._last_soft_mode = False
-        self._last_knee_motor_enabled = True
         self._warned_waiting_curpos: set[str] = set()
 
         self._sequence_active = False
@@ -322,8 +329,18 @@ class BoomJoystickControl(Node):
             f'  Left X axis [{self._left_x_axis}] -> wheel (base {self._wheel_velocity_base:.4f} / gear_ratio)\n'
             f'  Hip buttons -> delta/tick (base {self._hip_velocity_base:.4f} / gear_ratio)\n'
             f'  Hip joint_despos clamped to +/-{hip_angle_limit_deg:.1f} deg\n'
-            f'  Button[{self._soft_mode_button_index}] toggles soft_mode\n'
-            f'  Button[{self._knee_enable_button_index}] toggles knee motor_enabled')
+            f'  Button[{self._soft_mode_button_index}] toggles soft_mode (all)\n'
+            f'  Button[{self._knee_soft_mode_button_index}] toggles knee soft_mode')
+
+    @staticmethod
+    def _effective_soft_mode(
+        target: NamespaceTarget,
+        global_soft_mode: bool,
+        knee_soft_mode: bool,
+    ) -> bool:
+        if 'knee' in target.namespace_lower:
+            return global_soft_mode or knee_soft_mode
+        return global_soft_mode
 
     def _publish_despos(self, target: NamespaceTarget, despos: float) -> None:
         if 'hip' in target.namespace_lower:
@@ -339,45 +356,38 @@ class BoomJoystickControl(Node):
             self._right_x_axis,
             self._left_x_axis,
             self._soft_mode_button_index,
-            self._knee_enable_button_index,
+            self._knee_soft_mode_button_index,
             self._hip_neg_button_index,
             self._hip_pos_button_index,
         )
 
     def _publish_timer_callback(self) -> None:
         """Map cached joy state to despos deltas; hold_joint on control edges only."""
-        right_x, left_x, soft_mode, knee_motor_enabled, hip_neg, hip_pos = self._state.get_state()
-
-        soft_mode_toggled_off = self._last_soft_mode and not soft_mode
-        if soft_mode != self._last_soft_mode:
-            soft_msg = Bool()
-            soft_msg.data = soft_mode
-            for target in self._targets:
-                target.soft_mode_publisher.publish(soft_msg)
-            self.get_logger().info(f'soft_mode={soft_mode}')
-            self._last_soft_mode = soft_mode
-
-        knee_motor_enabled_toggled_on = (
-            not self._last_knee_motor_enabled and knee_motor_enabled
+        right_x, left_x, global_soft_mode, knee_soft_mode, hip_neg, hip_pos = (
+            self._state.get_state()
         )
-        if knee_motor_enabled != self._last_knee_motor_enabled:
-            for target in self._targets:
-                if 'knee' not in target.namespace_lower:
-                    continue
+
+        for target in self._targets:
+            effective_soft_mode = self._effective_soft_mode(
+                target, global_soft_mode, knee_soft_mode
+            )
+            if effective_soft_mode == target.last_soft_mode:
+                continue
+
+            target.publish_soft_mode(effective_soft_mode)
+            ns_label = target.namespace or '(root)'
+            self.get_logger().info(f'{ns_label} soft_mode={effective_soft_mode}')
+
+            if target.last_soft_mode and not effective_soft_mode:
                 has_curpos, curpos = target.get_curpos()
                 if has_curpos:
                     with target.lock:
                         target.despos = curpos
                     self._publish_despos(target, curpos)
-                    if knee_motor_enabled:
-                        target.publish_hold_joint(True)
-                        target.control_was_active = False
-                target.publish_motor_enabled(knee_motor_enabled)
-                ns_label = target.namespace or '(root)'
-                self.get_logger().info(
-                    f'{ns_label} motor_enabled={knee_motor_enabled}'
-                )
-            self._last_knee_motor_enabled = knee_motor_enabled
+                    target.publish_hold_joint(True)
+                    target.control_was_active = False
+
+            target.last_soft_mode = effective_soft_mode
 
         if self._sequence_active:
             return
@@ -392,12 +402,13 @@ class BoomJoystickControl(Node):
                     self._warned_waiting_curpos.add(target.namespace)
                 continue
 
-            if soft_mode_toggled_off:
-                with target.lock:
-                    target.despos = curpos
-                self._publish_despos(target, curpos)
-
-            if 'knee' in target.namespace_lower and knee_motor_enabled_toggled_on:
+            if self._effective_soft_mode(target, global_soft_mode, knee_soft_mode):
+                if target.control_was_active:
+                    target.publish_hold_joint(True)
+                    with target.lock:
+                        target.despos = curpos
+                    self._publish_despos(target, curpos)
+                    target.control_was_active = False
                 continue
 
             control_active = False
@@ -411,11 +422,10 @@ class BoomJoystickControl(Node):
                     control_active = True
                     delta = target.hip_velocity
             elif 'knee' in target.namespace_lower:
-                if knee_motor_enabled:
-                    axis = right_x
-                    if abs(axis) > self._stick_deadzone:
-                        control_active = True
-                        delta = axis * target.knee_velocity
+                axis = right_x
+                if abs(axis) > self._stick_deadzone:
+                    control_active = True
+                    delta = axis * target.knee_velocity
             elif 'wheel' in target.namespace_lower:
                 axis = left_x
                 if abs(axis) > self._stick_deadzone:
