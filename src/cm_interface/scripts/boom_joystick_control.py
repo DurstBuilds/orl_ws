@@ -364,6 +364,14 @@ class BoomJoystickControl(Node):
             for target in self._targets:
                 if 'knee' not in target.namespace_lower:
                     continue
+                has_curpos, curpos = target.get_curpos()
+                if has_curpos:
+                    with target.lock:
+                        target.despos = curpos
+                    self._publish_despos(target, curpos)
+                    if knee_motor_enabled:
+                        target.publish_hold_joint(True)
+                        target.control_was_active = False
                 target.publish_motor_enabled(knee_motor_enabled)
                 ns_label = target.namespace or '(root)'
                 self.get_logger().info(
@@ -390,11 +398,7 @@ class BoomJoystickControl(Node):
                 self._publish_despos(target, curpos)
 
             if 'knee' in target.namespace_lower and knee_motor_enabled_toggled_on:
-                with target.lock:
-                    target.despos = curpos
-                self._publish_despos(target, curpos)
-                target.publish_hold_joint(True)
-                target.control_was_active = False
+                continue
 
             control_active = False
             delta = 0.0

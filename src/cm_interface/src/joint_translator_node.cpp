@@ -20,7 +20,8 @@
 // <= 0 restores the launch-time baseline.
 // Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
 // reset before tracking joint_despos again.
-// motor_enabled false: publish MIT kp=0 kd=0 (passive hold). Re-enable latches despos.
+// motor_enabled false: publish MIT kp=0 kd=0 (passive hold). Re-enable defers despos
+// latch to the next motor_total_position feedback (same pattern as soft_mode off).
 
 #include <cmath>
 #include <mutex>
@@ -173,6 +174,7 @@ private:
     bool has_despos{false};
     bool at_goal_latched{false};
     bool awaiting_post_soft_latch{false};
+    bool awaiting_post_motor_enable_latch{false};
   };
 
   ControlState read_state()
@@ -181,7 +183,8 @@ private:
     return ControlState{
       total_position_, joint_despos_, soft_mode_, motor_enabled_,
       hold_joint_, has_hold_joint_, has_total_position_,
-      has_joint_despos_, at_goal_latched_, awaiting_post_soft_latch_};
+      has_joint_despos_, at_goal_latched_, awaiting_post_soft_latch_,
+      awaiting_post_motor_enable_latch_};
   }
 
   rcl_interfaces::msg::SetParametersResult on_set_parameters(
@@ -271,6 +274,15 @@ private:
             "soft_mode off: latched joint_despos=%.4f at current position",
             joint_despos_);
         }
+      } else if (awaiting_post_motor_enable_latch_ && motor_enabled_) {
+        joint_despos_ = clamp_joint_despos(joint_curpos);
+        has_joint_despos_ = true;
+        at_goal_latched_ = true;
+        awaiting_post_motor_enable_latch_ = false;
+        RCLCPP_INFO(
+          get_logger(),
+          "motor_enabled: latched joint_despos=%.4f at current position",
+          joint_despos_);
       }
     }
 
@@ -316,6 +328,9 @@ private:
   void joint_despos_callback(const std_msgs::msg::Float32::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    if (awaiting_post_motor_enable_latch_) {
+      return;
+    }
     const float clamped_prev = has_joint_despos_ ? joint_despos_ : msg->data;
     const float clamped_new = clamp_joint_despos(msg->data);
     if (joint_despos_changed_enough(clamped_new, clamped_prev) ||
@@ -359,15 +374,8 @@ private:
     if (motor_enabled_ != msg->data) {
       const bool was_motor_enabled = motor_enabled_;
       motor_enabled_ = msg->data;
-      if (!was_motor_enabled && motor_enabled_ && has_total_position_) {
-        joint_despos_ = clamp_joint_despos(
-          static_cast<float>(total_position_ / gear_ratio_));
-        has_joint_despos_ = true;
-        at_goal_latched_ = true;
-        RCLCPP_INFO(
-          get_logger(),
-          "motor_enabled: latched joint_despos=%.4f at current position",
-          joint_despos_);
+      if (!was_motor_enabled && motor_enabled_) {
+        awaiting_post_motor_enable_latch_ = true;
       }
       RCLCPP_INFO(get_logger(), "motor_enabled=%s", motor_enabled_ ? "true" : "false");
     }
@@ -543,7 +551,7 @@ private:
       return;
     }
 
-    if (state.awaiting_post_soft_latch) {
+    if (state.awaiting_post_soft_latch || state.awaiting_post_motor_enable_latch) {
       publish_motor_damping_hold();
       return;
     }
@@ -634,6 +642,7 @@ private:
   bool has_latched_startup_despos_{false};
   bool at_goal_latched_{false};
   bool awaiting_post_soft_latch_{false};
+  bool awaiting_post_motor_enable_latch_{false};
 
   double gear_ratio_{0.0};
   double loop_hz_{kDefaultLoopHz};
