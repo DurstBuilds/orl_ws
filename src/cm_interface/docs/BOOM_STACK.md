@@ -237,6 +237,7 @@ ros2 launch cm_interface boom_stack.launch.py enable_logging:=true bag_output_di
 | Button 5 (not 4) | `hip` | Positive increment |
 | Button 4 (not 5) | `hip` | Negative increment |
 | Button 1 (edge) | all listed | Toggle `soft_mode` |
+| Button 2 / X (edge) | `knee` only | Toggle `motor_enabled` (zero MIT kp/kd when off; despos latched on re-enable) |
 | Release input | all listed | `hold_joint=true`, snap despos to curpos |
 
 ## Topics (per namespace `/{ns}/`)
@@ -249,7 +250,8 @@ ros2 launch cm_interface boom_stack.launch.py enable_logging:=true bag_output_di
 | `joint_curpos` | `std_msgs/Float32` | Joint position (rad) |
 | `joint_despos` | `std_msgs/Float32` | Desired joint position (rad) |
 | `hold_joint` | `std_msgs/Bool` | `true` → translator holds |
-| `soft_mode` | `std_msgs/Bool` | `true` → damping-only at motor |
+| `soft_mode` | `std_msgs/Bool` | `true` → damping-only at motor (all joints; set-origin on off) |
+| `motor_enabled` | `std_msgs/Bool` | `false` → MIT kp=0 kd=0 (knee teleop toggle; default enabled) |
 
 Global: `/joy`.
 
@@ -337,6 +339,12 @@ Live error frames: `candump -ta -e can0` (second terminal while running).
 1. Button 1 toggles `soft_mode` on all namespaces.
 2. Gateway sends low Kd; translator stops `motor_command`.
 3. On toggle off: gateway set-origin, unwrapper resets total, translator re-latches despos.
+
+### Knee motor enable (X button)
+
+1. Button 2 (X) toggles `motor_enabled` on knee namespace(s) only.
+2. When disabled: `joint_translator_node` publishes MIT `kp=0`, `kd=0` every loop tick (fully passive; unlike `soft_mode` low damping).
+3. On re-enable: teleop and translator latch `joint_despos` to `joint_curpos` before resuming stick control.
 
 ## Related files
 

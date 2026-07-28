@@ -15,11 +15,12 @@
 //   mit_kp, mit_kd         — override profile MIT gains on motor_command
 //
 // Subscribes (relative to namespace): motor_total_position, joint_despos,
-// soft_mode, hold_joint, sequence_omega_max. Publishes joint_curpos, motor_command.
+// soft_mode, hold_joint, motor_enabled, sequence_omega_max. Publishes joint_curpos, motor_command.
 // sequence_omega_max (motor rad/s): > 0 overrides omega_max during joint sequences;
 // <= 0 restores the launch-time baseline.
 // Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
 // reset before tracking joint_despos again.
+// motor_enabled false: publish MIT kp=0 kd=0 (passive hold). Re-enable latches despos.
 
 #include <cmath>
 #include <mutex>
@@ -132,6 +133,11 @@ public:
       10,
       std::bind(&JointTranslatorNode::hold_joint_callback, this, std::placeholders::_1));
 
+    motor_enabled_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "motor_enabled",
+      10,
+      std::bind(&JointTranslatorNode::motor_enabled_callback, this, std::placeholders::_1));
+
     sequence_omega_max_sub_ = create_subscription<std_msgs::msg::Float32>(
       "sequence_omega_max",
       10,
@@ -160,6 +166,7 @@ private:
     float total_position{0.0f};
     float joint_despos{0.0f};
     bool soft_mode{false};
+    bool motor_enabled{true};
     bool hold_joint{false};
     bool has_hold_joint{false};
     bool has_total{false};
@@ -172,7 +179,7 @@ private:
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
     return ControlState{
-      total_position_, joint_despos_, soft_mode_,
+      total_position_, joint_despos_, soft_mode_, motor_enabled_,
       hold_joint_, has_hold_joint_, has_total_position_,
       has_joint_despos_, at_goal_latched_, awaiting_post_soft_latch_};
   }
@@ -346,6 +353,26 @@ private:
     }
   }
 
+  void motor_enabled_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    if (motor_enabled_ != msg->data) {
+      const bool was_motor_enabled = motor_enabled_;
+      motor_enabled_ = msg->data;
+      if (!was_motor_enabled && motor_enabled_ && has_total_position_) {
+        joint_despos_ = clamp_joint_despos(
+          static_cast<float>(total_position_ / gear_ratio_));
+        has_joint_despos_ = true;
+        at_goal_latched_ = true;
+        RCLCPP_INFO(
+          get_logger(),
+          "motor_enabled: latched joint_despos=%.4f at current position",
+          joint_despos_);
+      }
+      RCLCPP_INFO(get_logger(), "motor_enabled=%s", motor_enabled_ ? "true" : "false");
+    }
+  }
+
   void sequence_omega_max_callback(const std_msgs::msg::Float32::SharedPtr msg)
   {
     if (msg->data > 0.0f) {
@@ -492,11 +519,27 @@ private:
     motor_command_pub_->publish(cmd);
   }
 
+  void publish_motor_passive()
+  {
+    motor_interfaces::msg::MotorCommand cmd;
+    cmd.position = 0.0f;
+    cmd.velocity = 0.0f;
+    cmd.torque = 0.0f;
+    cmd.kp = 0.0f;
+    cmd.kd = 0.0f;
+    motor_command_pub_->publish(cmd);
+  }
+
   void loop_timer_callback()
   {
     const auto state = read_state();
 
     if (state.soft_mode) {
+      return;
+    }
+
+    if (!state.motor_enabled) {
+      publish_motor_passive();
       return;
     }
 
@@ -572,6 +615,7 @@ private:
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr joint_despos_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr motor_enabled_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sequence_omega_max_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
@@ -582,6 +626,7 @@ private:
   float total_position_{0.0f};
   float joint_despos_{0.0f};
   bool soft_mode_{false};
+  bool motor_enabled_{true};
   bool hold_joint_{false};
   bool has_hold_joint_{false};
   bool has_total_position_{false};
