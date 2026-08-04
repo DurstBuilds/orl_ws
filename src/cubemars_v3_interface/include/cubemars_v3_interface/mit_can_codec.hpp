@@ -4,6 +4,8 @@
 // V3 firmware MIT codec (AK 3.0 manual sections 4.2 and 4.3.1).
 // MIT commands: extended ID (control_mode << 8) | drive_id, control mode = 8.
 // Periodic feedback: extended ID (0x29 << 8) | drive_id (streaming upload).
+// Command and feedback deliberately use different function IDs so RX routing
+// never confuses an echo of our own TX with motor telemetry.
 
 #include <cstdint>
 
@@ -17,6 +19,7 @@ namespace cubemars_v3_interface
 inline constexpr uint32_t kMitControlModeId = 8;
 inline constexpr uint32_t kFeedbackFunctionId = 0x29;
 
+/// Human-readable MIT fault labels for logging; codes match the AK 3.0 table.
 inline const char * mit_error_string(int code)
 {
   switch (code) {
@@ -32,6 +35,8 @@ inline const char * mit_error_string(int code)
   }
 }
 
+/// Saturate then linearly map a float into an unsigned bit field.
+/// Clamping here prevents wrap-around that would send the opposite extreme.
 inline int float_to_uint(float x, float x_min, float x_max, int bits)
 {
   if (x < x_min) {
@@ -59,11 +64,13 @@ inline uint32_t make_feedback_arbitration_id(int drive_id)
   return (kFeedbackFunctionId << 8) | static_cast<uint32_t>(drive_id & 0xFF);
 }
 
+/// SocketCAN requires CAN_EFF_FLAG so the kernel transmits a 29-bit ID.
 inline canid_t make_extended_can_id(int drive_id)
 {
   return static_cast<canid_t>(make_mit_arbitration_id(drive_id) | CAN_EFF_FLAG);
 }
 
+/// Extract the low 8-bit drive ID from an extended frame; -1 for standard IDs.
 inline int drive_id_from_frame(const struct can_frame & frame)
 {
   const canid_t raw = frame.can_id;
@@ -73,6 +80,8 @@ inline int drive_id_from_frame(const struct can_frame & frame)
   return static_cast<int>(raw & CAN_EFF_MASK) & 0xFF;
 }
 
+/// True only for streaming MIT feedback addressed to expected_drive_id.
+/// Rejects short/standard frames early so unpack never reads past DLC.
 inline bool feedback_frame_matches_drive(const struct can_frame & frame, int expected_drive_id)
 {
   if (frame.can_dlc < 7) {
@@ -87,6 +96,7 @@ inline bool feedback_frame_matches_drive(const struct can_frame & frame, int exp
   return arb_id == expected_arb;
 }
 
+/// Decoded streaming MIT feedback for one drive.
 struct MitFeedback
 {
   int drive_id{0};
@@ -97,6 +107,9 @@ struct MitFeedback
   float temperature_c{0.0f};
   int error_code{0};
 
+  /// Unpack a CAN frame if it is this drive's periodic feedback.
+  /// Scale factors follow manual §4.3.1 (0.1 rad, 10 rad/s, 0.01 N·m).
+  /// Error byte is optional (DLC 7 vs 8) depending on firmware config.
   bool unpack_reply(const struct can_frame & frame, int expected_drive_id)
   {
     if (!feedback_frame_matches_drive(frame, expected_drive_id)) {
@@ -116,6 +129,9 @@ struct MitFeedback
   }
 };
 
+/// Pack a V3 MIT command (manual §4.2): KP/KD, then P, V, torque.
+/// Bit fields are tightly packed across byte boundaries (12/16-bit splits);
+/// layout order differs from legacy CubeMars MIT and must not be rearranged.
 inline void pack_mit_command_frame(
   struct can_frame & frame,
   int drive_id,

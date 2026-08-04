@@ -1,4 +1,4 @@
-# V3 firmware CAN gateway for manual MIT control.
+"""Launch the V3 MIT CAN gateway with CSV-safe parameter coercion."""
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, OpaqueFunction
@@ -8,6 +8,7 @@ from launch.substitutions import LaunchConfiguration
 
 def _launch_setup(context, *args, **kwargs):
     # perform() + str() so CLI args like can_ids:=1 are not sent as integer parameters.
+    # The node accepts either type, but string keeps multi-drive CSV lists intact.
     namespaces = str(LaunchConfiguration('namespaces').perform(context)).strip()
     motor_models = str(LaunchConfiguration('motor_models').perform(context)).strip()
     can_ids = str(LaunchConfiguration('can_ids').perform(context)).strip()
@@ -37,6 +38,7 @@ def _launch_setup(context, *args, **kwargs):
 
 
 def generate_launch_description():
+    """Declare gateway args and build the node via OpaqueFunction for typed params."""
     return LaunchDescription([
         DeclareLaunchArgument('can_interface', default_value='can0'),
         DeclareLaunchArgument(

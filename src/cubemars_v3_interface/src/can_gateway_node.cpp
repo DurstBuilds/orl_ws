@@ -46,8 +46,11 @@ namespace
 constexpr double kDefaultLoopRateHz = 100.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
 constexpr int kDefaultBusWarmupMs = 100;
+/// Short poll so RX thread can exit promptly when rx_running_ clears.
 constexpr int kRxPollTimeoutMs = 5;
+/// Large RX socket buffer absorbs feedback bursts without dropping frames.
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
+/// Float compare epsilon for MIT TX dedup (avoids ENOBUFS from identical spam).
 constexpr float kCmdZeroEps = 1e-6f;
 
 using SteadyClock = std::chrono::steady_clock;
@@ -70,6 +73,7 @@ std::vector<std::string> split_csv(const std::string & value)
 }
 
 // Launch may pass can_ids:=1 as integer; node expects a CSV string.
+// dynamic_typing accepts either so CLI and YAML launch styles both work.
 std::string csv_param_as_string(
   rclcpp::Node & node,
   const std::string & name,
@@ -95,6 +99,7 @@ std::string csv_param_as_string(
 class CanGatewayNode : public rclcpp::Node
 {
 public:
+  /// Last MIT setpoints actually written to the bus (for TX deduplication).
   struct MitCommandSnapshot
   {
     float p{0.0f};
@@ -105,6 +110,7 @@ public:
     bool valid{false};
   };
 
+  /// Per-drive state: ROS I/O, held command, and comm-fault bookkeeping.
   struct DriveChannel
   {
     std::string ns;
@@ -114,6 +120,7 @@ public:
     rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_pub;
     rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr cmd_sub;
 
+    /// Held command re-sent at loop_rate_hz so the drive stays engaged.
     motor_interfaces::msg::MotorCommand pending_command;
     bool has_pending_command{false};
     MitCommandSnapshot last_sent_;
@@ -121,6 +128,7 @@ public:
     SteadyTime last_feedback_time{};
     bool has_feedback{false};
     bool comm_fault{false};
+    /// Ensures we emit at most one zero-hold MIT frame per fault episode.
     bool zero_hold_sent{false};
   };
 
@@ -138,6 +146,7 @@ public:
     const auto motor_models = split_csv(csv_param_as_string(*this, "motor_models", "ak60_6"));
     const auto drive_ids_str = split_csv(csv_param_as_string(*this, "can_ids", "1"));
 
+    // Parallel CSV lists define one drive each; lengths must match or IDs collide.
     if (namespaces.size() != motor_models.size() || namespaces.size() != drive_ids_str.size()) {
       throw std::invalid_argument(
         "namespaces, motor_models, and can_ids must have the same number of entries");
@@ -162,6 +171,7 @@ public:
           "can_ids[" + std::to_string(i) + "] for namespace '" + ch.ns +
           "': invalid integer '" + drive_ids_str[i] + "'");
       }
+      // V3 packs drive_id in the low byte of the extended arbitration ID.
       if (ch.drive_id < 0 || ch.drive_id > 0xFF) {
         throw std::invalid_argument(
           "can_ids[" + std::to_string(i) + "] for namespace '" + ch.ns +
@@ -184,6 +194,7 @@ public:
         "Failed to open CAN interface '" + can_interface_ + "'; gateway cannot start");
     }
 
+    // KeepLast(1): only the newest command matters for MIT hold semantics.
     const auto cmd_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
     for (auto & ch : drives_) {
       const std::string prefix = "/" + ch.ns;
@@ -210,6 +221,7 @@ public:
       "%s | %zu drives | hold refresh %.0f Hz | feedback_timeout %d ms",
       can_interface_.c_str(), drives_.size(), loop_rate_hz_, feedback_timeout_ms_);
 
+    // RX before startup wait so streaming feedback can arrive during warmup.
     start_rx_thread();
     startup_all_drives();
 
@@ -296,6 +308,7 @@ private:
     }
   }
 
+  /// Dedicated RX path: keep CAN reads off the ROS executor thread.
   void rx_thread_main()
   {
     struct pollfd pfd{};
@@ -314,6 +327,7 @@ private:
         continue;
       }
 
+      // Drain the socket fully after each POLLIN to minimize latency under burst.
       while (rx_running_) {
         struct can_frame frame{};
         const ssize_t nbytes = read(can_socket_, &frame, sizeof(frame));
@@ -325,6 +339,7 @@ private:
     }
   }
 
+  /// Match an extended feedback frame to a configured drive and publish state.
   bool route_feedback_frame(const struct can_frame & frame)
   {
     bool matched = false;
@@ -355,6 +370,7 @@ private:
         ch.zero_hold_sent = false;
       }
 
+      // After a fault, force the next MIT TX even if setpoints look unchanged.
       if (recovered) {
         ch.last_sent_.valid = false;
       }
@@ -390,6 +406,7 @@ private:
     ch.state_pub->publish(msg);
   }
 
+  /// True when the candidate setpoints match the last successful TX.
   static bool mit_command_equal(
     const MitCommandSnapshot & a,
     float p, float v, float kp, float kd, float t)
@@ -404,6 +421,8 @@ private:
            std::fabs(a.t - t) < kCmdZeroEps;
   }
 
+  /// Transmit one MIT frame. Skips identical setpoints unless force is set
+  /// (hold refresh / zero-hold / post-fault re-engage need a real bus write).
   bool send_mit(
     DriveChannel & ch,
     float p_des, float v_des, float kp, float kd, float t_ff,
@@ -428,6 +447,8 @@ private:
     return true;
   }
 
+  /// Wait for bus settle + first feedback before arming the comm-fault watchdog.
+  /// Avoids false zero-holds while drives are still powering up.
   void startup_all_drives()
   {
     if (bus_warmup_ms_ > 0) {
@@ -480,6 +501,7 @@ private:
       RCLCPP_INFO(get_logger(), "[STARTUP] Gateway ready.");
     }
 
+    // Arm only after the initial wait so cold-start silence is not a fault.
     comm_fault_checks_armed_ = true;
   }
 
@@ -494,6 +516,7 @@ private:
     return age_ms <= feedback_timeout_ms_;
   }
 
+  /// Enter comm fault once per episode; returns true if this call newly latched it.
   bool mark_comm_fault(DriveChannel & ch)
   {
     std::lock_guard<std::mutex> lock(feedback_mutex_);
@@ -509,6 +532,8 @@ private:
     return true;
   }
 
+  /// Safe stop: zero MIT setpoints once so the drive coasts rather than holding
+  /// a stale high-gain command after feedback disappears.
   void send_zero_hold_once(DriveChannel & ch)
   {
     if (ch.zero_hold_sent) {
@@ -519,6 +544,7 @@ private:
     }
   }
 
+  /// Periodic MIT refresh while a command is held (drive drops out without it).
   void refresh_pending_command(DriveChannel & ch)
   {
     if (!ch.has_pending_command) {
@@ -528,6 +554,7 @@ private:
     send_mit(ch, cmd.position, cmd.velocity, cmd.kp, cmd.kd, cmd.torque, true);
   }
 
+  /// Timer tick: detect stale feedback, apply zero-hold, refresh active MIT holds.
   void watchdog_callback()
   {
     if (can_socket_ < 0 || !comm_fault_checks_armed_) {
@@ -567,6 +594,7 @@ private:
       return;
     }
 
+    // Reject commands during comm fault until streaming feedback recovers.
     {
       std::lock_guard<std::mutex> lock(feedback_mutex_);
       if (ch->comm_fault) {
@@ -593,10 +621,12 @@ private:
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};
   rclcpp::TimerBase::SharedPtr watchdog_timer_;
+  /// False until startup completes; suppresses premature zero-hold.
   bool comm_fault_checks_armed_{false};
 
   std::atomic<bool> rx_running_{false};
   std::thread rx_thread_;
+  /// Guards feedback timestamps / fault flags shared by RX thread and timer/subs.
   mutable std::mutex feedback_mutex_;
 };
 
