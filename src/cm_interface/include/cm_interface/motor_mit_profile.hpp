@@ -46,9 +46,9 @@ inline constexpr MotorMitProfile kAk70_10{
   -25.0f, 25.0f,   // t_min, t_max
   0.0f, 500.0f,    // kp_min, kp_max
   0.0f, 5.0f,      // kd_min, kd_max
-  0.7f, 0.005f,    // pd_kp, pd_kd
-  20.0f,           // omega_max (rad/s)
-  10.0f, 0.05f,    // mit_kp, mit_kd (Nm/rad)
+  0.02f, 0.005f,    // pd_kp, pd_kd
+  15.0f,           // omega_max (rad/s)
+  5.0f, 0.05f,    // mit_kp, mit_kd (Nm/rad)
 };
 
 inline constexpr MotorMitProfile kAk10_9{
@@ -59,9 +59,9 @@ inline constexpr MotorMitProfile kAk10_9{
   -65.0f, 65.0f,  // t_min, t_max
   0.0f, 500.0f,  // kp_min, kp_max
   0.0f, 5.0f,    // kd_min, kd_max
-  0.2f, 0.01f,    // pd_kp, pd_kd
+  0.02f, 0.01f,    // pd_kp, pd_kd
   5.0f,         // omega_max (rad/s)
-  30.0f, 0.1f,   // mit_kp, mit_kd (Nm/rad)
+  50.0f, 0.1f,   // mit_kp, mit_kd (Nm/rad)
 };
 
 inline constexpr MotorMitProfile kAk80_64{
@@ -72,9 +72,9 @@ inline constexpr MotorMitProfile kAk80_64{
   -144.0f, 144.0f,  // t_min, t_max
   0.0f, 500.0f,     // kp_min, kp_max
   0.0f, 5.0f,       // kd_min, kd_max
-  0.030f, 0.0005f,  // pd_kp, pd_kd
-  4.0f,             // omega_max (rad/s)
-  75.0f, 0.25f,     // mit_kp, mit_kd (Nm/rad)
+  0.020f, 0.0005f,  // pd_kp, pd_kd
+  3.0f,             // omega_max (rad/s)
+  50.0f, 0.25f,     // mit_kp (50.0 normally), mit_kd (0.25 normally) (Nm/rad)
 };
 
 inline const MotorMitProfile & get_motor_mit_profile(const std::string & motor_model)

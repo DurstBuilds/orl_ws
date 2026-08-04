@@ -21,13 +21,13 @@ def generate_launch_description():
             ),
         ),
         DeclareLaunchArgument(
-            'start_button_index',
-            default_value='7',
-            description='Joy button index to start/abort the sequence (default Start).',
+            'joint_sequence',
+            default_value='KneeTumble',
+            description='Initial preset selection when sequence_file defines presets.',
         ),
         DeclareLaunchArgument(
             'hip_angle_limit_deg',
-            default_value='45.0',
+            default_value='90.0',
             description='Hip joint limit (deg) when clamping sequence targets.',
         ),
         DeclareLaunchArgument(
@@ -42,9 +42,7 @@ def generate_launch_description():
             parameters=[{
                 'joy_topic': LaunchConfiguration('joy_topic'),
                 'sequence_file': LaunchConfiguration('sequence_file'),
-                'start_button_index': ParameterValue(
-                    LaunchConfiguration('start_button_index'), value_type=int
-                ),
+                'joint_sequence': LaunchConfiguration('joint_sequence'),
                 'hip_angle_limit_deg': ParameterValue(
                     LaunchConfiguration('hip_angle_limit_deg'), value_type=float
                 ),

@@ -156,7 +156,7 @@ def generate_launch_description():
     )
     joint_angle_limit_deg_arg = DeclareLaunchArgument(
         'joint_angle_limit_deg',
-        default_value='45.0',
+        default_value='90.0',
         description='Hip only: clamp joint_despos in joint_translator (deg). Non-hip namespaces use 0.',
     )
     motor_error_tolerance_arg = DeclareLaunchArgument(

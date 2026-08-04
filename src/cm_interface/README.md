@@ -6,7 +6,7 @@ ROS 2 interface for AK-series actuators over CAN using the MIT control mode. The
 
 Each motor stack (optionally in its own namespace) contains three cooperating nodes:
 
-```text
+```
 Teleop (joystick)          joint_translator_node          motor_node_continuous
      |                              |                                |
  joint_despos  ----------------->  motor_command  ---------------->  CAN / MIT
@@ -79,7 +79,9 @@ Optional joint test sequence: `enable_joint_sequence:=true` (see below).
 Runs preset `joint_despos` waypoints when you press **Start** (button 7) on the gamepad. Between waypoints the node waits until all listed joints settle within tolerance, then applies the per-step `delay_sec` from the YAML file.
 
 ```bash
-ros2 launch cm_interface boom_stack.launch.py enable_joint_sequence:=true
+ros2 launch cm_interface boom_stack.launch.py \
+  enable_joint_sequence:=true \
+  joint_sequence:=KneeTumble
 ```
 
 Or launch the sequence node separately after `boom_stack`:
@@ -88,9 +90,9 @@ Or launch the sequence node separately after `boom_stack`:
 ros2 launch cm_interface joint_position_sequence.launch.py
 ```
 
-Edit waypoints in `config/joint_sequence_presets.yaml` (installed under `share/cm_interface/config/`). Positions are in **degrees** per namespace (`knee_motor`, `hip_motor`, `wheel_motor1`, `wheel_motor2`). While a sequence runs, `boom_joystick_control` pauses `joint_despos` / `hold_joint` publishing (`/joint_sequence/active` is true). Press Start again to abort. The sequence will not start if any joint is in `soft_mode`.
+Edit presets in `config/joint_sequence_presets.yaml` (installed under `share/cm_interface/config/`). Select one with `joint_sequence:=<PresetName>` (e.g. `KneeTumble`, `HipSuperman`). Positions are in **degrees** per namespace (`knee_motor`, `hip_motor`, `wheel_motor1`, `wheel_motor2`). While a sequence runs, `boom_joystick_control` pauses `joint_despos` / `hold_joint` publishing (`/joint_sequence/active` is true). Press Start again to abort. The sequence will not start if any joint is in `soft_mode`.
 
-Launch args (when using `boom_stack`): `sequence_file`, `joint_sequence_start_button` (default 7), `joint_sequence_loop`.
+Launch args (when using `boom_stack`): `sequence_file`, `joint_sequence`, `joint_sequence_start_button` (default 7), `joint_sequence_loop`.
 
 ### Single motor (boom teleop)
 
@@ -119,9 +121,10 @@ Requires deadman held; right stick sets absolute `joint_despos`.
 | Button 5 held (no btn 4) | `hip` | Positive increment |
 | Button 4 held (no btn 5) | `hip` | Negative increment |
 | Button 1 (edge) | all | Toggle `soft_mode` |
+| Button 2 / X (edge) | `knee` | Toggle `soft_mode` (knee only; same re-latch as global soft stop) |
 | Release input | all | `hold_joint=true`, snap `joint_despos` to `joint_curpos` |
 
-Hip `joint_despos` is clamped to ±`hip_angle_limit_deg` (default 45°) in teleop. The translator applies the same limit and limit-hold logic for the hip namespace.
+Hip `joint_despos` is clamped to ±`hip_angle_limit_deg` (default 90°) in teleop. The translator applies the same limit and limit-hold logic for the hip namespace.
 
 Per-motor gear ratios in **boom_stack** use `namespace_gear_ratios`, e.g. `knee_motor:1.6,hip_motor:33,...` (defaults from `boom_motor_config.py`).
 
@@ -135,7 +138,7 @@ Per-motor gear ratios in **boom_stack** use `namespace_gear_ratios`, e.g. `knee_
 | `joint_curpos` | `std_msgs/Float32` | Joint position (rad) |
 | `joint_despos` | `std_msgs/Float32` | Desired joint position (rad) |
 | `hold_joint` | `std_msgs/Bool` | `true` = translator holds (`deltaP=0`) |
-| `soft_mode` | `std_msgs/Bool` | `true` = motor damping-only MIT mode |
+| `soft_mode` | `std_msgs/Bool` | `true` = motor damping-only MIT mode (set-origin + despos latch on off) |
 
 Global: `/joy` from `joy_node`.
 
@@ -146,7 +149,7 @@ When `soft_mode` is true:
 - **motor_node_continuous** sends low-stiffness MIT (Kd-only style hold).
 - **joint_translator_node** stops publishing `motor_command`.
 
-Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to current position to avoid chasing a stale target.
+Toggle from boom teleop (button 1 for all joints, button X for knee only). On soft-mode off, despos is re-pinned to current position after gateway set-origin and unwrapper reset.
 
 ## joint_translator_node behavior
 
@@ -155,7 +158,7 @@ Toggle from boom teleop (button 1). On soft-mode off, despos is re-pinned to cur
 - **Parameters** (common):
   - `motor_model`, `gear_ratio`, `loop_hz` (default 200)
   - `motor_error_tolerance` (motor rad, default 0.001)
-  - `joint_angle_limit_deg` (0 = disabled; hip stack uses 45°)
+  - `joint_angle_limit_deg` (0 = disabled; hip stack uses 90°)
   - `omega_max` (`auto` or rad/s cap on per-tick delta). In **boom_stack**, use `namespace_omega_max` for per-namespace values (see [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).
   - `mit_kp`, `mit_kd` (override profile defaults)
 

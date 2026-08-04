@@ -321,9 +321,7 @@ def _launch_setup(context, *args, **kwargs):
                 name='joint_position_sequence_node',
                 parameters=[{
                     'sequence_file': LaunchConfiguration('sequence_file'),
-                    'start_button_index': ParameterValue(
-                        LaunchConfiguration('joint_sequence_start_button'), value_type=int
-                    ),
+                    'joint_sequence': LaunchConfiguration('joint_sequence'),
                     'hip_angle_limit_deg': hip_angle_limit_deg,
                     'loop': ParameterValue(
                         LaunchConfiguration('joint_sequence_loop'), value_type=bool
@@ -430,7 +428,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'hip_angle_limit_deg',
-            default_value='45.0',
+            default_value='90.0',
             description='Hip joint limit (deg) for teleop and hip joint_translator_node.',
         ),
         DeclareLaunchArgument(
@@ -500,7 +498,7 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'enable_joint_sequence',
-            default_value='false',
+            default_value='true',
             description=(
                 'If true, run joint_position_sequence_node (Start button runs YAML waypoints).'
             ),
@@ -511,9 +509,9 @@ def generate_launch_description():
             description='Waypoint YAML for joint sequence; empty uses installed preset.',
         ),
         DeclareLaunchArgument(
-            'joint_sequence_start_button',
-            default_value='7',
-            description='Joy button index to start/abort joint position sequence.',
+            'joint_sequence',
+            default_value='KneeTumble',
+            description='Preset name in sequence_file when using presets mapping.',
         ),
         DeclareLaunchArgument(
             'joint_sequence_loop',

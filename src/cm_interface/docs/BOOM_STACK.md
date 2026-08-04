@@ -125,7 +125,7 @@ Default stack:
 | Namespace | Motor model | CAN ID | Gear ratio | Joint limit |
 |-----------|-------------|--------|------------|-------------|
 | `knee_motor` | ak80_64 | 4 | 1.6 | — (0 = off) |
-| `hip_motor` | ak70_10 | 3 | 33.0 | ±45° (launch + entry) |
+| `hip_motor` | ak70_10 | 3 | 33.0 | ±90° (launch + entry) |
 | `wheel_motor1` | ak10_9 | 1 | 1.0 | — |
 | `wheel_motor2` | ak10_9 | 2 | 1.0 | — |
 
@@ -174,7 +174,7 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
 | `namespace_omega_max` | from `boom_motor_config.py` | Per-namespace cap: `ns:auto` or `ns:<rad/s>`, comma-separated (e.g. `knee_motor:4.0,hip_motor:auto,wheel_motor1:15.0,wheel_motor2:15.0`) |
 | `omega_max` | `auto` | Fallback for any namespace not listed in `namespace_omega_max` (`auto` uses each motor profile’s `omega_max`) |
 | `motor_error_tolerance` | 0.001 | Motor-space goal/hold tolerance (rad), all translators |
-| `hip_angle_limit_deg` | 45.0 | Hip teleop clamp and hip translator limit |
+| `hip_angle_limit_deg` | 90.0 | Hip teleop clamp and hip translator limit |
 
 Example — slower knee, profile-default hip, faster wheels:
 
@@ -237,6 +237,7 @@ ros2 launch cm_interface boom_stack.launch.py enable_logging:=true bag_output_di
 | Button 5 (not 4) | `hip` | Positive increment |
 | Button 4 (not 5) | `hip` | Negative increment |
 | Button 1 (edge) | all listed | Toggle `soft_mode` |
+| Button 2 / X (edge) | `knee` only | Toggle `soft_mode` (same re-latch as global soft stop) |
 | Release input | all listed | `hold_joint=true`, snap despos to curpos |
 
 ## Topics (per namespace `/{ns}/`)
@@ -249,7 +250,7 @@ ros2 launch cm_interface boom_stack.launch.py enable_logging:=true bag_output_di
 | `joint_curpos` | `std_msgs/Float32` | Joint position (rad) |
 | `joint_despos` | `std_msgs/Float32` | Desired joint position (rad) |
 | `hold_joint` | `std_msgs/Bool` | `true` → translator holds |
-| `soft_mode` | `std_msgs/Bool` | `true` → damping-only at motor |
+| `soft_mode` | `std_msgs/Bool` | `true` → damping-only at motor; off triggers set-origin + despos latch |
 
 Global: `/joy`.
 
@@ -334,7 +335,7 @@ Live error frames: `candump -ta -e can0` (second terminal while running).
 
 ### Soft mode sequence
 
-1. Button 1 toggles `soft_mode` on all namespaces.
+1. Button 1 toggles `soft_mode` on all namespaces; button X toggles `soft_mode` on knee only.
 2. Gateway sends low Kd; translator stops `motor_command`.
 3. On toggle off: gateway set-origin, unwrapper resets total, translator re-latches despos.
 

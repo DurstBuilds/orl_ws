@@ -1,25 +1,183 @@
 # Preset joint positions for joint_position_sequence_node (degrees).
-# Edit waypoints for your bench test; hip targets are clamped to ±hip_angle_limit_deg.
+# Select one at launch with: joint_sequence:=KneeTumble (or HipSuperman).
+# Hip targets are clamped to ±hip_angle_limit_deg at runtime.
+# omega_max values are motor rad/s caps applied during sequence execution.
 
-position_tolerance_deg: 10.0
-settle_timeout_sec: 30.0
+presets:
+  KneeTumble:
+    position_tolerance_deg: 1.0
+    settle_timeout_sec: 10.0
+    omega_max:
+      knee_motor: 2.0
+      hip_motor: 2.0
+      wheel_motor1: 2.0
+      wheel_motor2: 2.0
+    waypoints:
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 90.0
+          hip_motor: 0.0
+          wheel_motor1: 180.0
+          wheel_motor2: 180.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
 
-waypoints:
-  - delay_sec: 3.0
-    positions:
-      knee_motor: 0.0
-      hip_motor: 0.0
-      wheel_motor1: 0.0
-      wheel_motor2: 0.0
-  - delay_sec: 3.0
-    positions:
-      knee_motor: 90.0
-      hip_motor: 0.0
-      wheel_motor1: 45.0
-      wheel_motor2: 45.0
-  - delay_sec: 3.0
-    positions:
-      knee_motor: 0.0
-      hip_motor: 0.0
-      wheel_motor1: 0.0
-      wheel_motor2: 0.0
+  HipSuperman:
+    position_tolerance_deg: 1.0
+    settle_timeout_sec: 10.0
+    omega_max:
+      knee_motor: 2.0
+      hip_motor: 2.0
+      wheel_motor1: 2.0
+      wheel_motor2: 2.0
+    waypoints:
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: 0.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 1.5
+        positions:
+          knee_motor: -90.0
+          hip_motor: -90.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: 0.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 2.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+
+  HipAnglesHolding:
+    position_tolerance_deg: 1.0
+    settle_timeout_sec: 10.0
+    omega_max:
+      knee_motor: 1.0
+      hip_motor: 10.0
+      wheel_motor1: 1.0
+      wheel_motor2: 1.0
+    waypoints:
+      - delay_sec: 1.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 1.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: 0.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 1.5
+        positions:
+          knee_motor: -90.0
+          hip_motor: -15.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 4.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -30.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 4.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -45.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 4.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -60.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 4.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -75.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 4.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: -90.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 4.0
+        positions:
+          knee_motor: -90.0
+          hip_motor: 0.0
+          wheel_motor1: -180.0
+          wheel_motor2: -180.0
+      - delay_sec: 4.0
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+
+  HipReversal:
+    position_tolerance_deg: 1.0
+    settle_timeout_sec: 10.0
+    omega_max:
+      knee_motor: 2.25
+      hip_motor: 45.0
+      wheel_motor1: 2.0
+      wheel_motor2: 2.0
+    waypoints:
+      - delay_sec: 0.5
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 0.5
+        positions:
+          knee_motor: 80.0
+          hip_motor: 80.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 0.5
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 0.5
+        positions:
+          knee_motor: -80.0
+          hip_motor: -80.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0
+      - delay_sec: 0.5
+        positions:
+          knee_motor: 0.0
+          hip_motor: 0.0
+          wheel_motor1: 0.0
+          wheel_motor2: 0.0

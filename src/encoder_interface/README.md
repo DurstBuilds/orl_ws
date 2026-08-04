@@ -1,6 +1,10 @@
 # encoder_interface
 
-ROS 2 SPI driver for the Vishay **RAIK060I11318FB693** multi-turn absolute encoder (SPI simple frame, read-only).
+ROS 2 SPI driver for the Vishay **RAIK060I11318FB693** multi-turn absolute encoder.
+
+Reads position via SPI simple frame. At startup (default), sends SPI command **0x24**
+(“Apply Zero position” offset) so the current shaft angle becomes origin; the offset is
+stored in the encoder NVM.
 
 ## Build
 
@@ -55,7 +59,13 @@ Perform encoder self-calibration after mechanical mounting (push-button on the s
 ros2 launch encoder_interface encoder.launch.py
 ```
 
-Parameters: `spi_device` (default `/dev/spidev1.2`), `spi_speed_hz` (default 500 kHz), `poll_rate_hz` (default 100), `frame_id`, `cs_delay_us` (default 20), `log_raw_frames` (default false).
+Parameters: `spi_device` (default `/dev/spidev1.2`), `spi_speed_hz` (default 500 kHz), `poll_rate_hz` (default 100), `frame_id`, `cs_delay_us` (default 20), `apply_zero_position_on_startup` (default true — SPI cmd `0x24`), `log_raw_frames` (default false).
+
+Skip zeroing:
+
+```bash
+ros2 launch encoder_interface encoder.launch.py apply_zero_position_on_startup:=false
+```
 
 ## Troubleshooting CRC errors
 
