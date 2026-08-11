@@ -31,6 +31,8 @@ from std_msgs.msg import Bool, Float32
 
 SOFT_OFF_HOLD_SEC = 0.5
 POST_READY_SOFT_GRACE_SEC = 2.0
+# Origin reset pauses ready briefly; reconnect takes seconds.
+RECONNECT_READY_PAUSE_SEC = 1.0
 
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
@@ -347,6 +349,8 @@ class BoomJoystickControl(Node):
         self._soft_off_grace_until = 0.0
         self._soft_off_hold_started_at: Optional[float] = None
         self._soft_off_done_for_press = False
+        self._user_exited_soft_mode = False
+        self._stack_not_ready_since: Optional[float] = None
         self._startup_soft_mode_republishes_remaining = (
             int(3.0 * publish_hz) if start_in_soft_mode else 0
         )
@@ -403,8 +407,14 @@ class BoomJoystickControl(Node):
         was_ready = self._stack_ready
         self._stack_ready = msg.data
         if msg.data and not was_ready:
+            pause_sec = 0.0
+            if self._stack_not_ready_since is not None:
+                pause_sec = time.monotonic() - self._stack_not_ready_since
+            if pause_sec > RECONNECT_READY_PAUSE_SEC:
+                self._user_exited_soft_mode = False
+
             _, _, global_soft_mode, knee_soft_mode, _, _ = self._state.get_state()
-            if self._start_in_soft_mode and global_soft_mode:
+            if self._start_in_soft_mode and not self._user_exited_soft_mode:
                 self._state.reset_to_soft_mode()
                 global_soft_mode = True
                 knee_soft_mode = False
@@ -414,6 +424,7 @@ class BoomJoystickControl(Node):
             publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
             self._ready_soft_mode_republishes_remaining = int(3.0 * publish_hz)
             self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
+            self._stack_not_ready_since = None
             for target in self._targets:
                 has_curpos, curpos = target.get_curpos()
                 if has_curpos:
@@ -425,6 +436,7 @@ class BoomJoystickControl(Node):
             self.get_logger().info('Stack ready: teleop resumed.')
             self._logged_teleop_paused = False
         elif not msg.data and was_ready:
+            self._stack_not_ready_since = time.monotonic()
             self.get_logger().info('Stack not ready: teleop paused.')
             self._logged_teleop_paused = True
 
@@ -452,6 +464,9 @@ class BoomJoystickControl(Node):
             self._hip_pos_button_index,
             allow_soft_mode_toggles=self._stack_ready,
         )
+        _, _, global_soft_mode, _, _, _ = self._state.get_state()
+        if global_soft_mode:
+            self._user_exited_soft_mode = False
 
     def _try_hold_to_exit_global_soft_mode(self) -> None:
         """Exit global soft_mode only after grace period and sustained button 1 press."""
@@ -475,6 +490,7 @@ class BoomJoystickControl(Node):
             now - self._soft_off_hold_started_at >= SOFT_OFF_HOLD_SEC
         ):
             self._soft_off_done_for_press = True
+            self._user_exited_soft_mode = True
             self._state.set_global_soft_mode(False)
             self.get_logger().info(
                 f'Button[{self._soft_mode_button_index}] held: global soft_mode=false'
@@ -490,7 +506,7 @@ class BoomJoystickControl(Node):
             self._startup_soft_mode_republishes_remaining -= 1
         elif not self._stack_ready and self._start_in_soft_mode:
             _, _, global_soft_mode, _, _, _ = self._state.get_state()
-            if global_soft_mode:
+            if global_soft_mode and not self._user_exited_soft_mode:
                 self._republish_current_soft_mode_state()
 
         if not self._stack_ready:
