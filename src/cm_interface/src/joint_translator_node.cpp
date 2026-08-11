@@ -232,7 +232,9 @@ private:
       has_total_position_ = true;
 
       if (!has_latched_startup_despos_) {
-        if (std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
+        // Soft-mode boot skips set-origin; latch at current pose. Non-soft boot waits
+        // for post-origin feedback (joint space near zero).
+        if (!soft_mode_ && std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 2000,
             "startup: deferring despos latch until post-origin feedback "
@@ -244,8 +246,9 @@ private:
           has_latched_startup_despos_ = true;
           RCLCPP_INFO(
             get_logger(),
-            "startup: latched joint_despos=%.4f at current position",
-            joint_despos_);
+            "startup: latched joint_despos=%.4f at current position%s",
+            joint_despos_,
+            soft_mode_ ? " (soft_mode)" : "");
         }
       } else if (awaiting_post_soft_latch_ && !soft_mode_) {
         if (std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
