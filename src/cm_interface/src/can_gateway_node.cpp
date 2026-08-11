@@ -1311,10 +1311,10 @@ private:
       return;
     }
 
-    if (msg->data && ch->origin_reset_state != SoftOriginResetState::Idle) {
+    if (msg->data && any_origin_reset_in_progress()) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 2000,
-        "[%s] Ignoring soft_mode=true during origin reset (can_id=%d).",
+        "[%s] Ignoring soft_mode=true while stack origin reset is in progress (can_id=%d).",
         ch->ns.c_str(), ch->can_id);
       return;
     }

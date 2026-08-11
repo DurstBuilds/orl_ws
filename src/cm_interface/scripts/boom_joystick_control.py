@@ -403,14 +403,17 @@ class BoomJoystickControl(Node):
         was_ready = self._stack_ready
         self._stack_ready = msg.data
         if msg.data and not was_ready:
-            if self._start_in_soft_mode:
+            _, _, global_soft_mode, knee_soft_mode, _, _ = self._state.get_state()
+            if self._start_in_soft_mode and global_soft_mode:
                 self._state.reset_to_soft_mode()
+                global_soft_mode = True
+                knee_soft_mode = False
             self._soft_off_grace_until = time.monotonic() + POST_READY_SOFT_GRACE_SEC
             self._soft_off_hold_started_at = None
             self._soft_off_done_for_press = False
             publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
             self._ready_soft_mode_republishes_remaining = int(3.0 * publish_hz)
-            self._republish_soft_mode_for_all(True, False)
+            self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
             for target in self._targets:
                 has_curpos, curpos = target.get_curpos()
                 if has_curpos:
@@ -432,6 +435,11 @@ class BoomJoystickControl(Node):
             )
             target.publish_soft_mode(effective_soft_mode)
             target.last_soft_mode = effective_soft_mode
+
+    def _republish_current_soft_mode_state(self) -> None:
+        """Republish joy soft_mode state without overriding user intent."""
+        _, _, global_soft_mode, knee_soft_mode, _, _ = self._state.get_state()
+        self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
 
     def _joy_callback(self, msg: Joy) -> None:
         self._state.update(
@@ -475,13 +483,15 @@ class BoomJoystickControl(Node):
     def _publish_timer_callback(self) -> None:
         """Map cached joy state to despos deltas; hold_joint on control edges only."""
         if self._ready_soft_mode_republishes_remaining > 0:
-            self._republish_soft_mode_for_all(True, False)
+            self._republish_current_soft_mode_state()
             self._ready_soft_mode_republishes_remaining -= 1
         elif self._startup_soft_mode_republishes_remaining > 0:
-            self._republish_soft_mode_for_all(True, False)
+            self._republish_current_soft_mode_state()
             self._startup_soft_mode_republishes_remaining -= 1
         elif not self._stack_ready and self._start_in_soft_mode:
-            self._republish_soft_mode_for_all(True, False)
+            _, _, global_soft_mode, _, _, _ = self._state.get_state()
+            if global_soft_mode:
+                self._republish_current_soft_mode_state()
 
         if not self._stack_ready:
             if not self._logged_teleop_paused:
