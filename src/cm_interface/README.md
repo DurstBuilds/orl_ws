@@ -214,3 +214,184 @@ cm_interface/
 - **Motor does not move**: Check `hold_joint`, `soft_mode`, and that `joint_despos` differs from `joint_curpos` beyond `motor_error_tolerance`.
 - **Hip overshoot at limit**: Confirm `joint_angle_limit_deg` on hip translator and `hip_angle_limit_deg` on teleop; reduce `hip_velocity_constant` or increase `publish_hz`.
 - **CAN errors**: Verify `can_id`, interface name, drive power/enable, and that `can0` has `restart-ms 100` (see `can0_up.sh` and [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).
+- **Motors powered after Pi boot**: `can_gateway_node` stays alive in standby and retries connect every `gateway_standby_retry_ms` (default 5 s). Toggle soft_mode off (button 1) once all drives report feedback.
+
+## Raspberry Pi boot setup
+
+Use this section to bring up SocketCAN and `boom_stack.launch.py` automatically when the Pi powers on. Boot order matters: **CAN first, then the ROS stack**.
+
+The gateway defaults to **standby reconnect** (`gateway_standby_retry_ms:=5000`) and **soft_mode on all drives** (`start_in_soft_mode:=true`) so the stack can start before motor power is applied. See [docs/BOOM_STACK.md](docs/BOOM_STACK.md) for tuning and troubleshooting.
+
+### 1. MCP251x device tree (one-time)
+
+Edit `/boot/firmware/config.txt` (Bookworm) or `/boot/config.txt` (older images) and enable your CAN HAT overlay. Example for a common MCP2515 on SPI:
+
+```ini
+dtparam=spi=on
+dtoverlay=mcp2515-can0,oscillator=16000000,interrupt=25
+```
+
+Reboot, then confirm the interface exists (it may still be down):
+
+```bash
+ip link show can0
+```
+
+Adjust `oscillator` and `interrupt` to match your HAT wiring.
+
+### 2. Passwordless `sudo` for `ip link` (recommended)
+
+[`scripts/can0_up.sh`](scripts/can0_up.sh) runs `sudo ip link` to set bitrate and `restart-ms`. For systemd at boot, allow your ROS user to run it without a password:
+
+```bash
+sudo visudo -f /etc/sudoers.d/can0-up
+```
+
+Add **one line only** — use your Linux username with **no** angle brackets. Example for user `cubemarspi`:
+
+```text
+cubemarspi ALL=(ALL) NOPASSWD: /sbin/ip
+```
+
+Wrong (causes `syntax error`): `<cubemarspi> ALL=(ALL) NOPASSWD: /sbin/ip`
+
+Save and exit (`Ctrl+O`, `Enter`, `Ctrl+X` in nano). Validate:
+
+```bash
+sudo visudo -c -f /etc/sudoers.d/can0-up
+```
+
+You should see `parsed OK`. If you already broke sudo, fix as root:
+
+```bash
+sudo rm /etc/sudoers.d/can0-up
+sudo visudo -f /etc/sudoers.d/can0-up
+# paste the correct line (no <>), save, then re-run visudo -c above
+```
+
+### 3. systemd: bring up CAN at boot
+
+Use a **simple root service** with direct `ip` commands (no ROS workspace required). System unit files must be created with `sudo`:
+
+```bash
+sudo tee /etc/systemd/system/can0-up.service > /dev/null <<'EOF'
+[Unit]
+Description=Bring up SocketCAN can0 (1 Mbit/s, restart-ms 100)
+After=network-pre.target
+Before=boom-stack.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/bash -c '/sbin/ip link set can0 down 2>/dev/null || true; /sbin/ip link set can0 type can bitrate 1000000 restart-ms 100; /sbin/ip link set can0 up'
+ExecStop=/sbin/ip link set can0 down
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Manual equivalent (what the unit runs):
+
+```bash
+sudo ip link set can0 down 2>/dev/null || true
+sudo ip link set can0 type can bitrate 1000000 restart-ms 100
+sudo ip link set can0 up
+```
+
+Enable and test:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable can0-up.service
+sudo systemctl start can0-up.service
+systemctl status can0-up.service
+ip -details link show can0 | grep -E 'state|can state|restart-ms|bitrate'
+```
+
+Success looks like `state UP` and `can state ERROR-ACTIVE` (or `ERROR-PASSIVE`), not `STOPPED`.
+
+**If `can0-up.service` fails**, read the log:
+
+```bash
+journalctl -xeu can0-up.service --no-pager
+```
+
+Common causes:
+
+| Log message | Fix |
+|-------------|-----|
+| `No such file or directory` on `source .../install/setup.bash` | Old unit still used `ros2 run`; replace with the simple unit above |
+| Literal `<WORKSPACE>` or `<USER>` in the unit | Re-create the file with `sudo tee`; do not leave `<>` placeholders |
+| `Cannot find device "can0"` | Enable MCP251x overlay in `config.txt` and reboot |
+| `ip: command not found` | Use full path `/sbin/ip` (already in unit above) |
+| `RTNETLINK answers: Operation not supported` | Wrong overlay / oscillator / SPI wiring |
+
+Optional: run the installed helper instead of raw `ip` (requires built workspace):
+
+```bash
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && source /home/cubemarspi/orl_ws/install/setup.bash && ros2 run cm_interface can0_up.sh can0 1000000 100'
+```
+
+Use real paths; run as `User=cubemarspi` only if passwordless sudo for `/sbin/ip` is configured (section 2).
+
+### 4. systemd: launch boom stack at boot
+
+`WorkingDirectory` and all `source` paths must be **full absolute paths** (start with `/`). Wrong: `orl_ws`, `<WORKSPACE>`. Right: `/home/cubemarspi/orl_ws`.
+
+Find your workspace path:
+
+```bash
+echo "$HOME/orl_ws"
+ls "$HOME/orl_ws/install/setup.bash"
+```
+
+Create the unit (edit paths if your workspace or ROS distro differs):
+
+```bash
+sudo tee /etc/systemd/system/boom-stack.service > /dev/null <<'EOF'
+[Unit]
+Description=ROS 2 boom stack (can_gateway + teleop)
+After=network-online.target can0-up.service
+Wants=network-online.target can0-up.service
+
+[Service]
+Type=simple
+User=cubemarspi
+WorkingDirectory=/home/cubemarspi/orl_ws
+Environment=ROS_DISTRO=jazzy
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && source /home/cubemarspi/orl_ws/install/setup.bash && ros2 launch cm_interface boom_stack.launch.py enable_logging:=false'
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+```
+
+Validate before enabling:
+
+```bash
+systemd-analyze verify /etc/systemd/system/boom-stack.service
+```
+
+Adjust launch arguments as needed (`joy_dev:=0`, `gateway_standby_retry_ms:=5000`, `start_in_soft_mode:=true` are defaults).
+
+Enable and test:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable boom-stack.service
+sudo systemctl start boom-stack.service
+journalctl -u boom-stack -f
+```
+
+Useful checks after boot:
+
+```bash
+ros2 topic echo /knee_motor/soft_mode --once
+ros2 topic hz /knee_motor/motor_state
+systemctl status can0-up boom-stack
+```
+
+If the gateway logs `[STANDBY] CAN interface ... not available`, fix `can0-up.service` first. If CAN is up but motors are off, expect `[STANDBY] Connecting drives ...` every few seconds until power is applied; then press button 1 to exit soft_mode when ready to move.

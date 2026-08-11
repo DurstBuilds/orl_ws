@@ -23,10 +23,12 @@ if str(_launch_dir) not in sys.path:
 from boom_motor_config import (  # noqa: E402
     BOOM_MOTOR_STACKS,
     DEFAULT_CAN_IDS,
+    DEFAULT_GATEWAY_STANDBY_RETRY_MS,
     DEFAULT_MOTOR_MODELS,
     DEFAULT_NAMESPACES,
     DEFAULT_NAMESPACE_GEAR_RATIOS,
     DEFAULT_NAMESPACE_OMEGA_MAX,
+    DEFAULT_START_IN_SOFT_MODE,
     JOINT_CURPOS_TOPICS,
     MOTOR_COMMAND_TOPICS,
     MOTOR_STATE_TOPICS,
@@ -270,6 +272,12 @@ def _launch_setup(context, *args, **kwargs):
                     'bus_warmup_ms': ParameterValue(
                         LaunchConfiguration('gateway_bus_warmup_ms'), value_type=int
                     ),
+                    'standby_retry_ms': ParameterValue(
+                        LaunchConfiguration('gateway_standby_retry_ms'), value_type=int
+                    ),
+                    'start_in_soft_mode': ParameterValue(
+                        LaunchConfiguration('start_in_soft_mode'), value_type=bool
+                    ),
                 }],
             )
         )
@@ -308,6 +316,9 @@ def _launch_setup(context, *args, **kwargs):
             'namespace_gear_ratios': LaunchConfiguration('namespace_gear_ratios'),
             'publish_hz': ParameterValue(LaunchConfiguration('publish_hz'), value_type=float),
             'hip_angle_limit_deg': hip_angle_limit_deg,
+            'start_in_soft_mode': ParameterValue(
+                LaunchConfiguration('start_in_soft_mode'), value_type=bool
+            ),
         }],
     )
 
@@ -465,6 +476,18 @@ def generate_launch_description():
             'gateway_bus_warmup_ms',
             default_value='100',
             description='Delay after CAN bind before first enable (ms).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_standby_retry_ms',
+            default_value=DEFAULT_GATEWAY_STANDBY_RETRY_MS,
+            description=(
+                'can_gateway_node retry interval (ms) when CAN or motors are not ready at boot.'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'start_in_soft_mode',
+            default_value=DEFAULT_START_IN_SOFT_MODE,
+            description='If true, all drives start in soft_mode (damping only) until toggled off.',
         ),
         DeclareLaunchArgument(
             'motor_tx_rate_hz',
