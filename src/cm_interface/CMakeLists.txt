@@ -82,6 +82,7 @@ install(PROGRAMS
 
 install(PROGRAMS
   scripts/can0_up.sh
+  scripts/boom_stack_stop.sh
   DESTINATION lib/${PROJECT_NAME}
 )
 

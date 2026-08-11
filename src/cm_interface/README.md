@@ -360,13 +360,38 @@ Type=simple
 User=cubemarspi
 WorkingDirectory=/home/cubemarspi/orl_ws
 Environment=ROS_DISTRO=jazzy
-ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && source /home/cubemarspi/orl_ws/install/setup.bash && ros2 launch cm_interface boom_stack.launch.py enable_logging:=false'
+KillSignal=SIGINT
+KillMode=control-group
+TimeoutStopSec=20
+ExecStart=/bin/bash -lc 'source /opt/ros/jazzy/setup.bash && source /home/cubemarspi/orl_ws/install/setup.bash && exec ros2 launch cm_interface boom_stack.launch.py enable_logging:=false'
+ExecStop=/home/cubemarspi/orl_ws/install/cm_interface/lib/cm_interface/boom_stack_stop.sh
 Restart=on-failure
 RestartSec=10
 
 [Install]
 WantedBy=multi-user.target
 EOF
+```
+
+Use **`exec ros2 launch`** so `ros2 launch` is the service main process (not `bash`). **`ExecStop`** runs [`boom_stack_stop.sh`](scripts/boom_stack_stop.sh) because C++ nodes (`can_gateway_node`, translators, unwrappers) often keep running after launch exits under systemd (`Unit process … remains running after unit stopped`).
+
+After updating the unit, install the stop script, kill orphans once, then test stop:
+
+```bash
+cd ~/orl_ws
+source /opt/ros/jazzy/setup.bash
+colcon build --packages-select cm_interface
+chmod +x install/cm_interface/lib/cm_interface/boom_stack_stop.sh
+
+pkill -f 'ros2 launch cm_interface boom_stack' || true
+pkill -x can_gateway_node || true
+pkill -x joint_translator_node || true
+pkill -x motor_unwrapper_node || true
+
+sudo systemctl daemon-reload
+sudo systemctl start boom-stack.service
+sudo systemctl stop boom-stack.service
+ros2 node list   # should be empty
 ```
 
 Validate before enabling:
