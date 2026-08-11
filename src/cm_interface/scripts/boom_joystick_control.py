@@ -425,6 +425,10 @@ class BoomJoystickControl(Node):
             self._ready_soft_mode_republishes_remaining = int(3.0 * publish_hz)
             self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
             self._stack_not_ready_since = None
+            origin_recovery_ready = (
+                self._user_exited_soft_mode and
+                pause_sec <= RECONNECT_READY_PAUSE_SEC
+            )
             for target in self._targets:
                 has_curpos, curpos = target.get_curpos()
                 if has_curpos:
@@ -432,7 +436,8 @@ class BoomJoystickControl(Node):
                         target.despos = curpos
                     self._publish_despos(target, curpos)
                     target.control_was_active = False
-                target.publish_hold_joint(True)
+                if not origin_recovery_ready:
+                    target.publish_hold_joint(True)
             self.get_logger().info('Stack ready: teleop resumed.')
             self._logged_teleop_paused = False
         elif not msg.data and was_ready:

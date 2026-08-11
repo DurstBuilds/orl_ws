@@ -284,6 +284,13 @@ def _launch_setup(context, *args, **kwargs):
                     'start_in_soft_mode': ParameterValue(
                         LaunchConfiguration('start_in_soft_mode'), value_type=bool
                     ),
+                    'gateway_debug_command_tx': ParameterValue(
+                        LaunchConfiguration('gateway_debug_command_tx'), value_type=bool
+                    ),
+                    'gateway_origin_reset_batch_debounce_ms': ParameterValue(
+                        LaunchConfiguration('gateway_origin_reset_batch_debounce_ms'),
+                        value_type=int,
+                    ),
                 }],
             )
         )
@@ -494,6 +501,21 @@ def generate_launch_description():
             'start_in_soft_mode',
             default_value=DEFAULT_START_IN_SOFT_MODE,
             description='If true, all drives start in soft_mode (damping only) until toggled off.',
+        ),
+        DeclareLaunchArgument(
+            'gateway_debug_command_tx',
+            default_value='false',
+            description=(
+                'If true, can_gateway_node logs motor_command drops and MIT TX path (1 Hz throttle).'
+            ),
+        ),
+        DeclareLaunchArgument(
+            'gateway_origin_reset_batch_debounce_ms',
+            default_value='50',
+            description=(
+                'Wait up to this many ms for all drives to receive soft_mode=false before '
+                'starting sequential origin reset (can_id order).'
+            ),
         ),
         DeclareLaunchArgument(
             'motor_tx_rate_hz',

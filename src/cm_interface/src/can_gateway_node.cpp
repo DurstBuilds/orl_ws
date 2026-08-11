@@ -14,6 +14,8 @@
 //   bus_warmup_ms          — delay after bind before first enable
 //   standby_retry_ms       — retry CAN open / drive connect when not ready (default 5000)
 //   start_in_soft_mode     — all drives start in damping-only mode (default true)
+//   gateway_debug_command_tx — log motor_command drops and MIT TX path (default false)
+//   gateway_origin_reset_batch_debounce_ms — wait for all soft_off before origin (default 50)
 //
 // Publishes /boom_stack/ready (latched) when all drives have fresh MIT feedback.
 // Full-stack reconnect: any fault resets and re-enables all drives in can_id order.
@@ -70,6 +72,8 @@ constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kDefaultStartupStaggerMs = 200;
 constexpr int kDefaultStandbyRetryMs = 5000;
 constexpr int kDefaultSoftOffGraceMs = 2500;
+constexpr int kDefaultOriginResetBatchDebounceMs = 50;
+constexpr int kDebugCommandTxThrottleMs = 1000;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 // Wrapped motor position must be within this after set-origin before motor_state is published.
 constexpr float kPostOriginPositionTolRad = 0.15f;
@@ -187,6 +191,12 @@ public:
     standby_retry_ms_ = declare_parameter<int>("standby_retry_ms", kDefaultStandbyRetryMs);
     soft_off_grace_ms_ = declare_parameter<int>("soft_off_grace_ms", kDefaultSoftOffGraceMs);
     start_in_soft_mode_ = declare_parameter<bool>("start_in_soft_mode", true);
+    debug_command_tx_ = declare_parameter<bool>("gateway_debug_command_tx", false);
+    origin_reset_batch_debounce_ms_ = declare_parameter<int>(
+      "gateway_origin_reset_batch_debounce_ms", kDefaultOriginResetBatchDebounceMs);
+    if (origin_reset_batch_debounce_ms_ < 0) {
+      throw std::invalid_argument("gateway_origin_reset_batch_debounce_ms must be >= 0");
+    }
 
     const auto namespaces = split_csv(csv_param_as_string(
       *this, "namespaces", "knee_motor,hip_motor,wheel_motor1,wheel_motor2"));
@@ -407,6 +417,46 @@ private:
     return false;
   }
 
+  void note_origin_reset_batch_started()
+  {
+    if (!origin_reset_batch_started_) {
+      origin_reset_batch_started_ = true;
+      origin_reset_batch_started_at_ = SteadyClock::now();
+    }
+  }
+
+  void clear_origin_reset_batch_if_done()
+  {
+    if (!any_origin_reset_in_progress()) {
+      origin_reset_batch_started_ = false;
+    }
+  }
+
+  /** True when every drive has soft_mode off and at least one is Pending. */
+  bool origin_reset_batch_ready() const
+  {
+    bool any_pending = false;
+    for (const auto & ch : drives_) {
+      if (ch.soft_mode) {
+        return false;
+      }
+      if (ch.origin_reset_state == SoftOriginResetState::Pending) {
+        any_pending = true;
+      }
+    }
+    return any_pending;
+  }
+
+  bool origin_reset_debounce_expired() const
+  {
+    if (!origin_reset_batch_started_) {
+      return false;
+    }
+    const auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      SteadyClock::now() - origin_reset_batch_started_at_).count();
+    return elapsed_ms >= origin_reset_batch_debounce_ms_;
+  }
+
   /** Promote the lowest can_id Pending drive to Active when none is running. */
   void promote_next_origin_reset()
   {
@@ -414,6 +464,10 @@ private:
       if (ch.origin_reset_state == SoftOriginResetState::Active) {
         return;
       }
+    }
+
+    if (!origin_reset_batch_ready() && !origin_reset_debounce_expired()) {
+      return;
     }
 
     DriveChannel * next = nullptr;
@@ -700,6 +754,7 @@ private:
 
     DriveChannel * active = find_active_origin_reset_drive();
     if (active == nullptr) {
+      clear_origin_reset_batch_if_done();
       if (!stack_ready_ && all_drives_startup_ready() && !any_origin_reset_in_progress()) {
         update_stack_ready_state();
       }
@@ -1225,29 +1280,65 @@ private:
    */
   void service_drive_tx(DriveChannel & ch)
   {
+    const bool debug_tx = debug_command_tx_ && ch.has_pending_command &&
+      (std::fabs(ch.pending_command.position) > 1e-6f ||
+      ch.pending_command.kp > 0.0f);
+
     if (ch.soft_mode) {
+      if (debug_tx) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), kDebugCommandTxThrottleMs,
+          "[%s] TX path: soft_mode damping (pending pos=%.5f ignored, can_id=%d).",
+          ch.ns.c_str(), ch.pending_command.position, ch.can_id);
+      }
       send_mit(ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
       return;
     }
 
     if (ch.comm_fault) {
+      if (debug_tx) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), kDebugCommandTxThrottleMs,
+          "[%s] TX path: comm_fault zero hold (pending pos=%.5f ignored, can_id=%d).",
+          ch.ns.c_str(), ch.pending_command.position, ch.can_id);
+      }
       send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
       return;
     }
 
     if (comm_fault_checks_armed_ && ch.has_feedback && !feedback_is_fresh(ch)) {
       mark_comm_fault(ch);
+      if (debug_tx) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), kDebugCommandTxThrottleMs,
+          "[%s] TX path: stale feedback comm_fault (pending pos=%.5f ignored, can_id=%d).",
+          ch.ns.c_str(), ch.pending_command.position, ch.can_id);
+      }
       send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
       return;
     }
 
     if (!ch.has_feedback) {
+      if (debug_tx) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), kDebugCommandTxThrottleMs,
+          "[%s] TX path: no feedback Kd hold (pending pos=%.5f ignored, can_id=%d).",
+          ch.ns.c_str(), ch.pending_command.position, ch.can_id);
+      }
       send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
       return;
     }
 
     if (ch.has_pending_command) {
       const auto & cmd = ch.pending_command;
+      if (debug_command_tx_ &&
+        (std::fabs(cmd.position) > 1e-6f || cmd.kp > 0.0f))
+      {
+        RCLCPP_INFO_THROTTLE(
+          get_logger(), *get_clock(), kDebugCommandTxThrottleMs,
+          "[%s] TX path: MIT apply pos=%.5f kp=%.1f kd=%.3f (can_id=%d).",
+          ch.ns.c_str(), cmd.position, cmd.kp, cmd.kd, ch.can_id);
+      }
       send_mit(ch, cmd.position, cmd.velocity, cmd.kp, cmd.kd, cmd.torque, false);
       return;
     }
@@ -1289,11 +1380,28 @@ private:
   void on_motor_command(
     int can_id, const motor_interfaces::msg::MotorCommand::SharedPtr msg)
   {
-    if (!stack_ready_) {
+    DriveChannel * ch = find_drive_by_can_id(can_id);
+    if (ch == nullptr) {
       return;
     }
-    DriveChannel * ch = find_drive_by_can_id(can_id);
-    if (ch == nullptr || ch->soft_mode) {
+
+    const bool significant = std::fabs(msg->position) > 1e-6f || msg->kp > 0.0f;
+    if (!stack_ready_) {
+      if (debug_command_tx_ && significant) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), kDebugCommandTxThrottleMs,
+          "[%s] motor_command dropped: stack_ready=false (pos=%.5f, can_id=%d).",
+          ch->ns.c_str(), msg->position, ch->can_id);
+      }
+      return;
+    }
+    if (ch->soft_mode) {
+      if (debug_command_tx_ && significant) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), kDebugCommandTxThrottleMs,
+          "[%s] motor_command dropped: internal soft_mode=true (pos=%.5f, can_id=%d).",
+          ch->ns.c_str(), msg->position, ch->can_id);
+      }
       return;
     }
     ch->pending_command = *msg;
@@ -1320,6 +1428,14 @@ private:
     }
 
     if (!msg->data && ch->origin_reset_state != SoftOriginResetState::Idle) {
+      if (ch->soft_mode) {
+        ch->soft_mode = false;
+        ch->has_pending_command = false;
+        RCLCPP_INFO(
+          get_logger(),
+          "[%s] soft_mode=false applied during origin queue (can_id=%d).",
+          ch->ns.c_str(), ch->can_id);
+      }
       return;
     }
 
@@ -1368,6 +1484,7 @@ private:
       ch->has_pending_command = false;
       ch->origin_reset_state = SoftOriginResetState::Pending;
       ch->origin_set_origin_sent = false;
+      note_origin_reset_batch_started();
       set_stack_ready(false);
       send_mit(*ch, 0.0f, 0.0f, 0.0f, ch->profile.mit_kd, 0.0f, true);
     }
@@ -1388,6 +1505,10 @@ private:
   int standby_retry_ms_{kDefaultStandbyRetryMs};
   int soft_off_grace_ms_{kDefaultSoftOffGraceMs};
   bool start_in_soft_mode_{true};
+  bool debug_command_tx_{false};
+  int origin_reset_batch_debounce_ms_{kDefaultOriginResetBatchDebounceMs};
+  bool origin_reset_batch_started_{false};
+  SteadyTime origin_reset_batch_started_at_{};
 
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};

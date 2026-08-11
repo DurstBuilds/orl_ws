@@ -21,6 +21,7 @@
 // Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
 // reset before tracking joint_despos again.
 
+#include <chrono>
 #include <cmath>
 #include <mutex>
 #include <stdexcept>
@@ -43,6 +44,10 @@ constexpr float kDefaultMotorErrorTolerance = 1e-2f;
 constexpr float kMitKdMax = 5.0f;
 constexpr float kJointAngleLimitEps = 1e-4f;
 constexpr float kStartupOriginJointTolRad = 0.15f;
+constexpr double kDefaultReconnectReadyPauseSec = 1.0;
+
+using SteadyClock = std::chrono::steady_clock;
+using SteadyTime = SteadyClock::time_point;
 constexpr double kDefaultJointAngleLimitDeg = 0.0;
 
 float clamp(float value, float low, float high)
@@ -108,6 +113,13 @@ public:
     }
     baseline_omega_max_ = omega_max_;
     pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
+
+    latch_on_stack_ready_ = declare_parameter<bool>("latch_on_stack_ready", true);
+    reconnect_ready_pause_sec_ = declare_parameter<double>(
+      "reconnect_ready_pause_sec", kDefaultReconnectReadyPauseSec);
+    if (reconnect_ready_pause_sec_ < 0.0) {
+      throw std::invalid_argument("reconnect_ready_pause_sec must be >= 0");
+    }
 
     const bool start_in_soft_mode = declare_parameter<bool>("start_in_soft_mode", true);
     soft_mode_ = start_in_soft_mode;
@@ -361,16 +373,31 @@ private:
     std::lock_guard<std::mutex> lock(state_mutex_);
     const bool was_ready = stack_ready_;
     stack_ready_ = msg->data;
-    if (stack_ready_ && !was_ready && has_total_position_ && !soft_mode_) {
+    if (!stack_ready_ && was_ready) {
+      stack_not_ready_since_ = SteadyClock::now();
+      stack_not_ready_since_valid_ = true;
+    } else if (stack_ready_ && !was_ready && has_total_position_ && !soft_mode_) {
       const float joint_curpos = static_cast<float>(total_position_ / gear_ratio_);
       joint_despos_ = clamp_joint_despos(joint_curpos);
       has_joint_despos_ = true;
-      at_goal_latched_ = true;
       awaiting_post_soft_latch_ = false;
+
+      bool should_latch = latch_on_stack_ready_;
+      if (stack_not_ready_since_valid_) {
+        const double pause_sec = std::chrono::duration<double>(
+          SteadyClock::now() - stack_not_ready_since_).count();
+        should_latch = latch_on_stack_ready_ && (pause_sec > reconnect_ready_pause_sec_);
+      }
+
+      if (should_latch) {
+        at_goal_latched_ = true;
+      }
+      stack_not_ready_since_valid_ = false;
       RCLCPP_INFO(
         get_logger(),
-        "stack ready: latched joint_despos=%.4f at current position",
-        joint_despos_);
+        "stack ready: latched joint_despos=%.4f at current position%s",
+        joint_despos_,
+        should_latch ? "" : " (no goal latch; origin recovery)");
     }
   }
 
@@ -637,6 +664,10 @@ private:
   bool at_goal_latched_{false};
   bool awaiting_post_soft_latch_{false};
   bool stack_ready_{false};
+  bool stack_not_ready_since_valid_{false};
+  SteadyTime stack_not_ready_since_{};
+  bool latch_on_stack_ready_{true};
+  double reconnect_ready_pause_sec_{kDefaultReconnectReadyPauseSec};
 
   double gear_ratio_{0.0};
   double loop_hz_{kDefaultLoopHz};
