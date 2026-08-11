@@ -148,7 +148,6 @@ class NamespaceTarget:
         knee_velocity: float,
         wheel_velocity: float,
         hip_velocity: float,
-        *,
         initial_soft_mode: bool = False,
     ) -> None:
         self.namespace = namespace
