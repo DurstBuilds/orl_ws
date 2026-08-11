@@ -28,6 +28,9 @@ from std_msgs.msg import Bool, Float32
 # TWEAK: joystick mapping for this node (edit here, not in launch files).
 START_BUTTON_INDEX = 7
 BACK_BUTTON_INDEX = 6
+BACK_BUTTON_GRACE_SEC = 10.0  # ignore set-origin until joy/spurious edges settle
+BACK_BUTTON_HOLD_SEC = 0.5  # require sustained back press before set-origin
+JOY_GAP_SEC = 1.0  # resync button edges after joy dropout/reconnect
 DPAD_VERTICAL_AXIS = 7
 DPAD_AXIS_THRESHOLD = 0.5
 ORIGIN_NAMESPACES = ''  # comma-separated; empty = all namespaces from presets
@@ -316,6 +319,10 @@ class JointPositionSequence(Node):
         self._abort_requested = False
         self._prev_start_pressed = False
         self._prev_back_pressed = False
+        self._back_button_enabled_at = time.monotonic() + BACK_BUTTON_GRACE_SEC
+        self._back_hold_started_at: Optional[float] = None
+        self._back_origin_done_for_press = False
+        self._last_joy_time = time.monotonic()
         self._prev_dpad_direction = 0
         self._sequence_lock = threading.Lock()
         self._sequence_thread: Optional[threading.Thread] = None
@@ -327,7 +334,7 @@ class JointPositionSequence(Node):
             f'Loaded {len(self._preset_names)} presets from {sequence_file}.\n'
             f'  Selected joint sequence: {self._config.name}\n'
             f'  Press button[{self._start_button_index}] to start (again to abort); '
-            f'button[{self._back_button_index}] to set origin; '
+            f'button[{self._back_button_index}] (hold {BACK_BUTTON_HOLD_SEC:.1f}s) to set origin; '
             f'axis[{self._dpad_vertical_axis}] to scroll presets.\n'
             f'  tolerance={self._config.position_tolerance_deg:.2f} deg, '
             f'settle_timeout={self._config.settle_timeout_sec:.1f} s, loop={self._loop}.\n'
@@ -384,22 +391,46 @@ class JointPositionSequence(Node):
             self._active_publisher.publish(msg)
 
     def _joy_callback(self, msg: Joy) -> None:
-        self._handle_dpad_scroll(msg)
+        now = time.monotonic()
+        joy_gap = now - self._last_joy_time > JOY_GAP_SEC
+        self._last_joy_time = now
 
         back_pressed = (
             self._back_button_index < len(msg.buttons)
             and msg.buttons[self._back_button_index] == 1
         )
-        back_rising = back_pressed and not self._prev_back_pressed
-        self._prev_back_pressed = back_pressed
-        if back_rising:
-            self._handle_set_origin()
-            return
-
         start_pressed = (
             self._start_button_index < len(msg.buttons)
             and msg.buttons[self._start_button_index] == 1
         )
+
+        if joy_gap:
+            # Resync edges after controller reconnect; spurious rising edges are common.
+            self._prev_back_pressed = back_pressed
+            self._prev_start_pressed = start_pressed
+            self._back_button_enabled_at = now + BACK_BUTTON_GRACE_SEC
+            self._back_hold_started_at = None
+            self._back_origin_done_for_press = False
+            self._handle_dpad_scroll(msg)
+            return
+
+        self._handle_dpad_scroll(msg)
+
+        if back_pressed:
+            if self._back_hold_started_at is None:
+                self._back_hold_started_at = now
+            elif (
+                not self._back_origin_done_for_press
+                and now - self._back_hold_started_at >= BACK_BUTTON_HOLD_SEC
+                and now >= self._back_button_enabled_at
+            ):
+                self._back_origin_done_for_press = True
+                self._handle_set_origin()
+        else:
+            self._back_hold_started_at = None
+            self._back_origin_done_for_press = False
+        self._prev_back_pressed = back_pressed
+
         rising_edge = start_pressed and not self._prev_start_pressed
         self._prev_start_pressed = start_pressed
 

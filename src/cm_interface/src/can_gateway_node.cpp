@@ -699,7 +699,7 @@ private:
     std::vector<size_t> order;
     order.reserve(drives_.size());
     for (size_t i = 0; i < drives_.size(); ++i) {
-      if (!drives_[i].has_feedback) {
+      if (drive_needs_connect(drives_[i])) {
         order.push_back(i);
       }
     }
@@ -727,15 +727,18 @@ private:
       if (i > 0 && startup_stagger_ms_ > 0) {
         maintain_startup_drives(startup_stagger_ms_);
       }
-      connect_one_drive(drives_[order[i]]);
+      auto & ch = drives_[order[i]];
+      reset_drive_for_reconnect(ch);
+      connect_one_drive(ch);
     }
 
     for (auto & ch : drives_) {
-      if (!ch.has_feedback) {
+      if (drive_needs_connect(ch)) {
         RCLCPP_WARN(
           get_logger(),
           "[STARTUP] [%s] can_id=%d no MIT feedback yet; retrying connect sequence.",
           ch.ns.c_str(), ch.can_id);
+        reset_drive_for_reconnect(ch);
         connect_one_drive(ch);
       }
       RCLCPP_INFO(
@@ -810,6 +813,32 @@ private:
     return !drives_.empty();
   }
 
+  /** True when a drive needs enable/reconnect (cold start, power cycle, or comm fault). */
+  bool drive_needs_connect(const DriveChannel & ch) const
+  {
+    if (!ch.has_feedback) {
+      return true;
+    }
+    if (ch.comm_fault) {
+      return true;
+    }
+    if (comm_fault_checks_armed_ && !feedback_is_fresh(ch)) {
+      return true;
+    }
+    return false;
+  }
+
+  /** Clear stale connection state before a standby reconnect attempt. */
+  void reset_drive_for_reconnect(DriveChannel & ch)
+  {
+    ch.has_feedback = false;
+    ch.comm_fault = false;
+    ch.startup_enable_done = false;
+    ch.has_pending_command = false;
+    ch.has_last_feedback = false;
+    ch.has_last_position = false;
+  }
+
   /**
    * After staggered enable, loop MIT hold + RX until all drives report fresh feedback
    * (or retry enable). Arms comm-fault checks only when every drive is ready.
@@ -848,6 +877,7 @@ private:
             "[STARTUP] [%s] can_id=%d %s after refresh; retrying enable sequence.",
             ch.ns.c_str(), ch.can_id,
             ch.has_feedback ? "feedback still stale" : "no MIT feedback");
+          reset_drive_for_reconnect(ch);
           connect_one_drive(ch);
         }
       }
@@ -935,6 +965,7 @@ private:
       return;
     }
 
+    republished_soft_mode_on_connect_ = false;
     RCLCPP_INFO(
       get_logger(),
       "[STANDBY] Connecting drives (motors or CAN may not be ready yet)...");
@@ -949,6 +980,7 @@ private:
       return;
     }
     ch.comm_fault = true;
+    republished_soft_mode_on_connect_ = false;
     RCLCPP_ERROR(
       get_logger(),
       "[%s] can_id=%d comm fault: no fresh MIT feedback for %d ms; zero hold",
