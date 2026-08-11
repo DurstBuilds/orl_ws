@@ -72,14 +72,16 @@ private:
   {
     if (soft_mode_ && !msg->data) {
       reset_total_on_next_feedback_ = true;
+      reset_reason_ = "soft_mode off";
     }
     soft_mode_ = msg->data;
   }
 
   void stack_ready_callback(const std_msgs::msg::Bool::SharedPtr msg)
   {
-    if (msg->data && !stack_ready_) {
+    if (msg->data && !stack_ready_ && !soft_mode_) {
       reset_total_on_next_feedback_ = true;
+      reset_reason_ = "stack ready";
       RCLCPP_INFO(get_logger(), "stack ready: will reset total position on next feedback");
     }
     stack_ready_ = msg->data;
@@ -96,7 +98,8 @@ private:
       has_last_ = true;
       RCLCPP_INFO(
         get_logger(),
-        "soft_mode off: reset total position to wrapped %.4f rad",
+        "%s: reset total position to wrapped %.4f rad",
+        reset_reason_,
         new_wrapped);
       publish_total(new_wrapped);
       return;
@@ -147,6 +150,7 @@ private:
   bool soft_mode_{false};
   bool stack_ready_{false};
   bool reset_total_on_next_feedback_{false};
+  const char * reset_reason_{"soft_mode off"};
   float last_wrapped_{0.0f};
   float total_position_{0.0f};
   double origin_jump_threshold_{kDefaultOriginJumpThreshold};

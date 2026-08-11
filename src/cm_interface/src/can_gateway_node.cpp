@@ -348,11 +348,34 @@ private:
     ch.soft_mode_pub->publish(msg);
   }
 
+  /** Set soft_mode internally and publish; skips drives mid origin reset when enabling. */
+  void sync_drive_soft_mode(DriveChannel & ch, bool soft_mode)
+  {
+    if (soft_mode && ch.origin_reset_state != SoftOriginResetState::Idle) {
+      return;
+    }
+    if (ch.soft_mode == soft_mode) {
+      publish_drive_soft_mode(ch);
+      return;
+    }
+    ch.soft_mode = soft_mode;
+    if (ch.soft_mode) {
+      ch.origin_reset_state = SoftOriginResetState::Idle;
+      ch.origin_set_origin_sent = false;
+      ch.suppress_state_publish = false;
+    }
+    publish_drive_soft_mode(ch);
+  }
+
   /** Publish soft_mode on every namespace (boot default or after late motor connect). */
   void publish_all_soft_mode_state()
   {
-    for (const auto & ch : drives_) {
-      publish_drive_soft_mode(ch);
+    for (auto & ch : drives_) {
+      if (start_in_soft_mode_) {
+        sync_drive_soft_mode(ch, true);
+      } else {
+        publish_drive_soft_mode(ch);
+      }
     }
   }
 
@@ -854,7 +877,11 @@ private:
     publish_cached_state(ch);
     ch.startup_enable_done = true;
     ch.connect_state = ch.has_feedback ? ConnectState::Connected : ConnectState::Fault;
-    publish_drive_soft_mode(ch);
+    if (start_in_soft_mode_) {
+      sync_drive_soft_mode(ch, true);
+    } else {
+      publish_drive_soft_mode(ch);
+    }
   }
 
   /**
@@ -1242,10 +1269,14 @@ private:
     step_soft_origin_resets();
     poll_bus_feedback(feedback_poll_ms_);
 
-    if (stack_ready_ && any_drive_needs_connect()) {
+    if (any_origin_reset_in_progress()) {
+      if (stack_ready_) {
+        set_stack_ready(false);
+      }
+    } else if (stack_ready_ && any_drive_needs_connect()) {
       set_stack_ready(false);
       republished_soft_mode_on_connect_ = false;
-    } else if (!stack_ready_ && all_drives_startup_ready() && !any_origin_reset_in_progress()) {
+    } else if (!stack_ready_ && all_drives_startup_ready()) {
       update_stack_ready_state();
     }
 
@@ -1276,7 +1307,23 @@ private:
   void on_soft_mode(int can_id, const std_msgs::msg::Bool::SharedPtr msg)
   {
     DriveChannel * ch = find_drive_by_can_id(can_id);
-    if (ch == nullptr || ch->soft_mode == msg->data) {
+    if (ch == nullptr) {
+      return;
+    }
+
+    if (msg->data && ch->origin_reset_state != SoftOriginResetState::Idle) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "[%s] Ignoring soft_mode=true during origin reset (can_id=%d).",
+        ch->ns.c_str(), ch->can_id);
+      return;
+    }
+
+    if (!msg->data && ch->origin_reset_state != SoftOriginResetState::Idle) {
+      return;
+    }
+
+    if (ch->soft_mode == msg->data) {
       return;
     }
 
@@ -1284,6 +1331,14 @@ private:
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
         "[%s] Ignoring soft_mode=false while drives are not connected.",
+        ch->ns.c_str());
+      return;
+    }
+
+    if (!msg->data && start_in_soft_mode_ && !republished_soft_mode_on_connect_) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "[%s] Ignoring soft_mode=false before initial stack soft_mode sync.",
         ch->ns.c_str());
       return;
     }
