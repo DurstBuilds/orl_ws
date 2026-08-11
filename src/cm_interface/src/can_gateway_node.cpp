@@ -15,6 +15,9 @@
 //   standby_retry_ms       — retry CAN open / drive connect when not ready (default 5000)
 //   start_in_soft_mode     — all drives start in damping-only mode (default true)
 //
+// Publishes /boom_stack/ready (latched) when all drives have fresh MIT feedback.
+// Full-stack reconnect: any fault resets and re-enables all drives in can_id order.
+//
 // Startup: enables drives sorted by can_id (AK80/knee last). If CAN or motors are
 // not ready at launch, standby_retry_callback retries every standby_retry_ms.
 // Soft-mode off triggers set-origin + Kd hold on that drive.
@@ -116,6 +119,20 @@ std::string csv_param_as_string(
 class CanGatewayNode : public rclcpp::Node
 {
 public:
+  enum class ConnectState
+  {
+    Disconnected,
+    Connecting,
+    Connected,
+    Fault,
+  };
+
+  enum class SoftOriginResetState
+  {
+    Idle,
+    Active,
+  };
+
   struct DriveChannel
   {
     std::string ns;
@@ -134,11 +151,14 @@ public:
     SteadyTime last_feedback_time{};
     bool has_feedback{false};
     bool comm_fault{false};
+    ConnectState connect_state{ConnectState::Disconnected};
     float last_position_rad{0.0f};
     bool has_last_position{false};
     float soft_mode_on_position_rad{0.0f};
     bool has_soft_mode_on_position{false};
-    bool pending_soft_origin_reset{false};
+    SoftOriginResetState origin_reset_state{SoftOriginResetState::Idle};
+    bool origin_set_origin_sent{false};
+    SteadyTime origin_reset_deadline{};
     bool startup_enable_done{false};
     bool suppress_state_publish{false};
     bool has_last_feedback{false};
@@ -251,9 +271,14 @@ public:
         get_logger(), "Drive %s: %s can_id=%d", ch.ns.c_str(), ch.profile.name, ch.can_id);
     }
 
+    stack_ready_pub_ = create_publisher<std_msgs::msg::Bool>(
+      "/boom_stack/ready",
+      rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable());
+
     if (start_in_soft_mode_) {
       publish_all_soft_mode_state();
     }
+    set_stack_ready(false);
 
     RCLCPP_INFO(
       get_logger(),
@@ -323,6 +348,38 @@ private:
     for (const auto & ch : drives_) {
       publish_drive_soft_mode(ch);
     }
+  }
+
+  /** Publish /boom_stack/ready and log transitions. */
+  void set_stack_ready(bool ready)
+  {
+    if (stack_ready_ == ready) {
+      return;
+    }
+    stack_ready_ = ready;
+    std_msgs::msg::Bool msg;
+    msg.data = ready;
+    stack_ready_pub_->publish(msg);
+    RCLCPP_INFO(
+      get_logger(), "[STACK] boom_stack ready=%s", ready ? "true" : "false");
+  }
+
+  /** Sync stack_ready with drive health; republish soft_mode when becoming ready. */
+  void update_stack_ready_state()
+  {
+    const bool ready = all_drives_startup_ready();
+    if (ready) {
+      if (!comm_fault_checks_armed_) {
+        comm_fault_checks_armed_ = true;
+        RCLCPP_INFO(get_logger(), "[STARTUP] All drives recovered; comm fault checks armed.");
+      }
+      if (start_in_soft_mode_ && !republished_soft_mode_on_connect_) {
+        publish_all_soft_mode_state();
+        republished_soft_mode_on_connect_ = true;
+        RCLCPP_INFO(get_logger(), "[STARTUP] Republished soft_mode for all drives.");
+      }
+    }
+    set_stack_ready(ready);
   }
 
   /** Open/bind one raw SocketCAN socket with a large RX buffer; no per-drive filters. */
@@ -452,6 +509,7 @@ private:
       ch.last_feedback_time = SteadyClock::now();
       ch.has_feedback = true;
       ch.comm_fault = false;
+      ch.connect_state = ConnectState::Connected;
       ch.last_position_rad = fb.position_rad;
       ch.has_last_position = true;
 
@@ -534,21 +592,60 @@ private:
   }
 
   /**
-   * Handle soft_mode off: set origin at the current pose, apply Kd hold, then resume
-   * publishing once wrapped position is near zero.
+   * Non-blocking soft_mode off origin reset: one step per drive per loop tick.
    */
-  void process_pending_soft_origin_resets()
+  void step_soft_origin_resets()
   {
+    const int max_wait_ms = std::max(
+      startup_origin_poll_ms_ * 2,
+      feedback_poll_ms_ * 10);
+
     for (auto & ch : drives_) {
-      if (!ch.pending_soft_origin_reset) {
+      if (ch.origin_reset_state != SoftOriginResetState::Active) {
         continue;
       }
-      ch.pending_soft_origin_reset = false;
-      ch.suppress_state_publish = true;
-      process_pending_rx();
-      send_set_origin(ch, startup_origin_poll_ms_);
-      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
-      wait_for_post_origin_position(ch);
+
+      if (!ch.origin_set_origin_sent) {
+        ch.suppress_state_publish = true;
+        struct can_frame frame{};
+        cm_interface::pack_control_frame(frame, ch.can_id, 0xFE);
+        if (write_frame(frame)) {
+          RCLCPP_INFO(get_logger(), "[STARTUP] [%s] set motor origin.", ch.ns.c_str());
+        } else {
+          RCLCPP_ERROR(get_logger(), "[STARTUP] [%s] set origin failed.", ch.ns.c_str());
+        }
+        ch.origin_set_origin_sent = true;
+        ch.origin_reset_deadline =
+          SteadyClock::now() + std::chrono::milliseconds(max_wait_ms);
+        send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+        continue;
+      }
+
+      send_startup_mit_hold(ch);
+
+      const bool near_origin = ch.has_last_position &&
+        std::fabs(ch.last_position_rad) <= kPostOriginPositionTolRad;
+      const bool timed_out = SteadyClock::now() >= ch.origin_reset_deadline;
+
+      if (!near_origin && !timed_out) {
+        continue;
+      }
+
+      if (!near_origin) {
+        RCLCPP_WARN(
+          get_logger(),
+          "[STARTUP] [%s] post-origin position not near zero (%.4f rad); "
+          "downstream may see stale feedback",
+          ch.ns.c_str(), ch.has_last_position ? ch.last_position_rad : 0.0f);
+      } else {
+        RCLCPP_INFO(
+          get_logger(),
+          "[STARTUP] [%s] post-origin position %.4f rad",
+          ch.ns.c_str(), ch.last_position_rad);
+      }
+
+      ch.origin_reset_state = SoftOriginResetState::Idle;
+      ch.origin_set_origin_sent = false;
       ch.suppress_state_publish = false;
       publish_cached_state(ch);
       RCLCPP_INFO(
@@ -659,6 +756,7 @@ private:
   void connect_one_drive(DriveChannel & ch)
   {
     const int settle_ms = enable_settle_ms_for(ch);
+    ch.connect_state = ConnectState::Connecting;
     ch.suppress_state_publish = true;
     send_enable(ch);
     std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
@@ -676,11 +774,13 @@ private:
     ch.suppress_state_publish = false;
     publish_cached_state(ch);
     ch.startup_enable_done = true;
+    ch.connect_state = ch.has_feedback ? ConnectState::Connected : ConnectState::Fault;
+    publish_drive_soft_mode(ch);
   }
 
   /**
-   * Bus warmup (once), then connect drives in ascending can_id order with stagger gaps.
-   * Only drives missing feedback are enabled; already-connected drives are refreshed.
+   * Bus warmup (once), then full-stack reconnect in ascending can_id order.
+   * If any drive needs reconnect, all drives are reset and re-enabled together.
    */
   void run_startup_connect_pass(bool apply_bus_warmup)
   {
@@ -696,17 +796,26 @@ private:
       bus_warmup_done_ = true;
     }
 
-    std::vector<size_t> order;
-    order.reserve(drives_.size());
-    for (size_t i = 0; i < drives_.size(); ++i) {
-      if (drive_needs_connect(drives_[i])) {
-        order.push_back(i);
-      }
-    }
-    if (order.empty()) {
+    if (!any_drive_needs_connect()) {
+      update_stack_ready_state();
       return;
     }
 
+    set_stack_ready(false);
+    republished_soft_mode_on_connect_ = false;
+    RCLCPP_INFO(
+      get_logger(),
+      "[STANDBY] Full-stack reconnect (motors or CAN may not be ready yet)...");
+
+    for (auto & ch : drives_) {
+      reset_drive_for_reconnect(ch);
+      if (start_in_soft_mode_) {
+        ch.soft_mode = true;
+      }
+    }
+
+    std::vector<size_t> order(drives_.size());
+    std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [this](size_t a, size_t b) {
       return drives_[a].can_id < drives_[b].can_id;
     });
@@ -727,9 +836,7 @@ private:
       if (i > 0 && startup_stagger_ms_ > 0) {
         maintain_startup_drives(startup_stagger_ms_);
       }
-      auto & ch = drives_[order[i]];
-      reset_drive_for_reconnect(ch);
-      connect_one_drive(ch);
+      connect_one_drive(drives_[order[i]]);
     }
 
     for (auto & ch : drives_) {
@@ -739,6 +846,9 @@ private:
           "[STARTUP] [%s] can_id=%d no MIT feedback yet; retrying connect sequence.",
           ch.ns.c_str(), ch.can_id);
         reset_drive_for_reconnect(ch);
+        if (start_in_soft_mode_) {
+          ch.soft_mode = true;
+        }
         connect_one_drive(ch);
       }
       RCLCPP_INFO(
@@ -747,6 +857,18 @@ private:
     }
 
     refresh_all_drive_feedback();
+    update_stack_ready_state();
+  }
+
+  /** True if at least one drive needs enable/reconnect. */
+  bool any_drive_needs_connect() const
+  {
+    for (const auto & ch : drives_) {
+      if (drive_needs_connect(ch)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   /** Nominal service-loop period in ms (ceil of 1000 / loop_rate_hz). */
@@ -816,13 +938,16 @@ private:
   /** True when a drive needs enable/reconnect (cold start, power cycle, or comm fault). */
   bool drive_needs_connect(const DriveChannel & ch) const
   {
+    if (!ch.startup_enable_done) {
+      return true;
+    }
     if (!ch.has_feedback) {
       return true;
     }
     if (ch.comm_fault) {
       return true;
     }
-    if (comm_fault_checks_armed_ && !feedback_is_fresh(ch)) {
+    if (!feedback_is_fresh(ch)) {
       return true;
     }
     return false;
@@ -833,10 +958,13 @@ private:
   {
     ch.has_feedback = false;
     ch.comm_fault = false;
+    ch.connect_state = ConnectState::Disconnected;
     ch.startup_enable_done = false;
     ch.has_pending_command = false;
     ch.has_last_feedback = false;
     ch.has_last_position = false;
+    ch.origin_reset_state = SoftOriginResetState::Idle;
+    ch.origin_set_origin_sent = false;
   }
 
   /**
@@ -878,6 +1006,9 @@ private:
             ch.ns.c_str(), ch.can_id,
             ch.has_feedback ? "feedback still stale" : "no MIT feedback");
           reset_drive_for_reconnect(ch);
+          if (start_in_soft_mode_) {
+            ch.soft_mode = true;
+          }
           connect_one_drive(ch);
         }
       }
@@ -956,19 +1087,12 @@ private:
         comm_fault_checks_armed_ = true;
         RCLCPP_INFO(get_logger(), "[STANDBY] All drives ready; comm fault checks armed.");
       }
-      if (start_in_soft_mode_ && !republished_soft_mode_on_connect_) {
-        publish_all_soft_mode_state();
-        republished_soft_mode_on_connect_ = true;
-        RCLCPP_INFO(get_logger(), "[STANDBY] Republished soft_mode for all drives.");
-      }
+      update_stack_ready_state();
       startup_in_progress_ = false;
       return;
     }
 
     republished_soft_mode_on_connect_ = false;
-    RCLCPP_INFO(
-      get_logger(),
-      "[STANDBY] Connecting drives (motors or CAN may not be ready yet)...");
     run_startup_connect_pass(!bus_warmup_done_);
     startup_in_progress_ = false;
   }
@@ -980,7 +1104,9 @@ private:
       return;
     }
     ch.comm_fault = true;
+    ch.connect_state = ConnectState::Fault;
     republished_soft_mode_on_connect_ = false;
+    set_stack_ready(false);
     RCLCPP_ERROR(
       get_logger(),
       "[%s] can_id=%d comm fault: no fresh MIT feedback for %d ms; zero hold",
@@ -1034,17 +1160,14 @@ private:
     }
 
     process_pending_rx();
-    process_pending_soft_origin_resets();
+    step_soft_origin_resets();
     poll_bus_feedback(feedback_poll_ms_);
 
-    if (!comm_fault_checks_armed_ && all_drives_startup_ready()) {
-      comm_fault_checks_armed_ = true;
-      RCLCPP_INFO(get_logger(), "[STARTUP] All drives recovered; comm fault checks armed.");
-      if (start_in_soft_mode_ && !republished_soft_mode_on_connect_) {
-        publish_all_soft_mode_state();
-        republished_soft_mode_on_connect_ = true;
-        RCLCPP_INFO(get_logger(), "[STARTUP] Republished soft_mode for all drives.");
-      }
+    if (stack_ready_ && any_drive_needs_connect()) {
+      set_stack_ready(false);
+      republished_soft_mode_on_connect_ = false;
+    } else if (!stack_ready_ && all_drives_startup_ready()) {
+      update_stack_ready_state();
     }
 
     for (auto & ch : drives_) {
@@ -1056,6 +1179,9 @@ private:
   void on_motor_command(
     int can_id, const motor_interfaces::msg::MotorCommand::SharedPtr msg)
   {
+    if (!stack_ready_) {
+      return;
+    }
     DriveChannel * ch = find_drive_by_can_id(can_id);
     if (ch == nullptr || ch->soft_mode) {
       return;
@@ -1075,15 +1201,26 @@ private:
       return;
     }
 
+    if (!msg->data && !stack_ready_) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 5000,
+        "[%s] Ignoring soft_mode=false while stack is not ready.",
+        ch->ns.c_str());
+      return;
+    }
+
     ch->soft_mode = msg->data;
     if (ch->soft_mode) {
       ch->soft_mode_on_position_rad = ch->last_position_rad;
       ch->has_soft_mode_on_position = ch->has_last_position;
       ch->has_pending_command = false;
+      ch->origin_reset_state = SoftOriginResetState::Idle;
+      ch->origin_set_origin_sent = false;
       send_mit(*ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
     } else {
       ch->has_pending_command = false;
-      ch->pending_soft_origin_reset = true;
+      ch->origin_reset_state = SoftOriginResetState::Active;
+      ch->origin_set_origin_sent = false;
       send_mit(*ch, 0.0f, 0.0f, 0.0f, ch->profile.mit_kd, 0.0f, true);
     }
 
@@ -1105,6 +1242,7 @@ private:
 
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};
+  rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr stack_ready_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
   rclcpp::TimerBase::SharedPtr standby_timer_;
   rclcpp::TimerBase::SharedPtr standby_initial_timer_;
@@ -1112,6 +1250,7 @@ private:
   bool startup_in_progress_{false};
   bool bus_warmup_done_{false};
   bool republished_soft_mode_on_connect_{false};
+  bool stack_ready_{false};
 };
 
 int main(int argc, char ** argv)

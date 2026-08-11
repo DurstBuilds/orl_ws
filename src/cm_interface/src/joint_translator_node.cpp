@@ -130,6 +130,11 @@ public:
       10,
       std::bind(&JointTranslatorNode::soft_mode_callback, this, std::placeholders::_1));
 
+    stack_ready_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "/boom_stack/ready",
+      rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+      std::bind(&JointTranslatorNode::stack_ready_callback, this, std::placeholders::_1));
+
     hold_joint_sub_ = create_subscription<std_msgs::msg::Bool>(
       "hold_joint",
       10,
@@ -351,6 +356,24 @@ private:
     }
   }
 
+  void stack_ready_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    const bool was_ready = stack_ready_;
+    stack_ready_ = msg->data;
+    if (stack_ready_ && !was_ready && has_total_position_) {
+      const float joint_curpos = static_cast<float>(total_position_ / gear_ratio_);
+      joint_despos_ = clamp_joint_despos(joint_curpos);
+      has_joint_despos_ = true;
+      at_goal_latched_ = true;
+      awaiting_post_soft_latch_ = false;
+      RCLCPP_INFO(
+        get_logger(),
+        "stack ready: latched joint_despos=%.4f at current position",
+        joint_despos_);
+    }
+  }
+
   void hold_joint_callback(const std_msgs::msg::Bool::SharedPtr msg)
   {
     std::lock_guard<std::mutex> lock(state_mutex_);
@@ -514,6 +537,11 @@ private:
   {
     const auto state = read_state();
 
+    if (!stack_ready_) {
+      publish_motor_damping_hold();
+      return;
+    }
+
     if (state.soft_mode) {
       return;
     }
@@ -589,6 +617,7 @@ private:
   rclcpp::Subscription<motor_interfaces::msg::MotorTotalPosition>::SharedPtr motor_total_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr joint_despos_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stack_ready_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sequence_omega_max_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
@@ -607,6 +636,7 @@ private:
   bool has_latched_startup_despos_{false};
   bool at_goal_latched_{false};
   bool awaiting_post_soft_latch_{false};
+  bool stack_ready_{false};
 
   double gear_ratio_{0.0};
   double loop_hz_{kDefaultLoopHz};

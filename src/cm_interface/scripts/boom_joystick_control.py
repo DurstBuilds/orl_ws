@@ -315,12 +315,18 @@ class BoomJoystickControl(Node):
 
         self._sequence_active = False
         self._start_in_soft_mode = start_in_soft_mode
+        self._stack_ready = False
+        self._logged_teleop_paused = False
+        self._ready_soft_mode_republishes_remaining = 0
         self._startup_soft_mode_republishes_remaining = (
             int(3.0 * publish_hz) if start_in_soft_mode else 0
         )
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_subscription(
             Bool, '/joint_sequence/active', self._sequence_active_callback, 10
+        )
+        self.create_subscription(
+            Bool, '/boom_stack/ready', self._stack_ready_callback, 10
         )
         self.create_timer(1.0 / publish_hz, self._publish_timer_callback)
 
@@ -364,6 +370,34 @@ class BoomJoystickControl(Node):
     def _sequence_active_callback(self, msg: Bool) -> None:
         self._sequence_active = msg.data
 
+    def _stack_ready_callback(self, msg: Bool) -> None:
+        was_ready = self._stack_ready
+        self._stack_ready = msg.data
+        if msg.data and not was_ready:
+            publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
+            self._ready_soft_mode_republishes_remaining = int(3.0 * publish_hz)
+            for target in self._targets:
+                has_curpos, curpos = target.get_curpos()
+                if has_curpos:
+                    with target.lock:
+                        target.despos = curpos
+                    self._publish_despos(target, curpos)
+                    target.control_was_active = False
+                target.publish_hold_joint(True)
+            self.get_logger().info('Stack ready: teleop resumed.')
+            self._logged_teleop_paused = False
+        elif not msg.data and was_ready:
+            self.get_logger().info('Stack not ready: teleop paused.')
+            self._logged_teleop_paused = True
+
+    def _republish_soft_mode_for_all(self, global_soft_mode: bool, knee_soft_mode: bool) -> None:
+        for target in self._targets:
+            effective_soft_mode = self._effective_soft_mode(
+                target, global_soft_mode, knee_soft_mode
+            )
+            target.publish_soft_mode(effective_soft_mode)
+            target.last_soft_mode = effective_soft_mode
+
     def _joy_callback(self, msg: Joy) -> None:
         self._state.update(
             msg,
@@ -381,13 +415,20 @@ class BoomJoystickControl(Node):
             self._state.get_state()
         )
 
-        if self._startup_soft_mode_republishes_remaining > 0:
-            for target in self._targets:
-                effective_soft_mode = self._effective_soft_mode(
-                    target, global_soft_mode, knee_soft_mode
-                )
-                target.publish_soft_mode(effective_soft_mode)
+        if self._ready_soft_mode_republishes_remaining > 0:
+            self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
+            self._ready_soft_mode_republishes_remaining -= 1
+        elif self._startup_soft_mode_republishes_remaining > 0:
+            self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
             self._startup_soft_mode_republishes_remaining -= 1
+        elif not self._stack_ready and self._start_in_soft_mode:
+            self._republish_soft_mode_for_all(True, False)
+
+        if not self._stack_ready:
+            if not self._logged_teleop_paused:
+                self.get_logger().info('Teleop paused until /boom_stack/ready is true.')
+                self._logged_teleop_paused = True
+            return
 
         for target in self._targets:
             effective_soft_mode = self._effective_soft_mode(
@@ -395,10 +436,6 @@ class BoomJoystickControl(Node):
             )
             if effective_soft_mode == target.last_soft_mode:
                 continue
-
-            target.publish_soft_mode(effective_soft_mode)
-            ns_label = target.namespace or '(root)'
-            self.get_logger().info(f'{ns_label} soft_mode={effective_soft_mode}')
 
             if target.last_soft_mode and not effective_soft_mode:
                 has_curpos, curpos = target.get_curpos()
@@ -409,6 +446,9 @@ class BoomJoystickControl(Node):
                     target.publish_hold_joint(True)
                     target.control_was_active = False
 
+            target.publish_soft_mode(effective_soft_mode)
+            ns_label = target.namespace or '(root)'
+            self.get_logger().info(f'{ns_label} soft_mode={effective_soft_mode}')
             target.last_soft_mode = effective_soft_mode
 
         if self._sequence_active:

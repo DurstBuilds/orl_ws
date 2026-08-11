@@ -52,6 +52,11 @@ public:
       10,
       std::bind(&MotorUnwrapperNode::soft_mode_callback, this, std::placeholders::_1));
 
+    stack_ready_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "/boom_stack/ready",
+      rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+      std::bind(&MotorUnwrapperNode::stack_ready_callback, this, std::placeholders::_1));
+
     publisher_ = create_publisher<motor_interfaces::msg::MotorTotalPosition>(
       "motor_total_position", 10);
 
@@ -69,6 +74,15 @@ private:
       reset_total_on_next_feedback_ = true;
     }
     soft_mode_ = msg->data;
+  }
+
+  void stack_ready_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (msg->data && !stack_ready_) {
+      reset_total_on_next_feedback_ = true;
+      RCLCPP_INFO(get_logger(), "stack ready: will reset total position on next feedback");
+    }
+    stack_ready_ = msg->data;
   }
 
   void motor_state_callback(const motor_interfaces::msg::MotorState::SharedPtr msg)
@@ -126,10 +140,12 @@ private:
 
   rclcpp::Subscription<motor_interfaces::msg::MotorState>::SharedPtr subscription_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr stack_ready_sub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorTotalPosition>::SharedPtr publisher_;
 
   bool has_last_{false};
   bool soft_mode_{false};
+  bool stack_ready_{false};
   bool reset_total_on_next_feedback_{false};
   float last_wrapped_{0.0f};
   float total_position_{0.0f};

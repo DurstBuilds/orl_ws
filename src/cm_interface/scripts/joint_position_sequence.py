@@ -326,8 +326,10 @@ class JointPositionSequence(Node):
         self._prev_dpad_direction = 0
         self._sequence_lock = threading.Lock()
         self._sequence_thread: Optional[threading.Thread] = None
+        self._stack_ready = False
 
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
+        self.create_subscription(Bool, '/boom_stack/ready', self._stack_ready_callback, 10)
         self.create_timer(1.0 / active_publish_hz, self._active_timer_callback)
 
         self.get_logger().info(
@@ -341,6 +343,9 @@ class JointPositionSequence(Node):
             f'  Origin namespaces: {", ".join(self._origin_namespaces)}\n'
             f'  Waypoint namespaces: {", ".join(all_namespaces)}'
         )
+
+    def _stack_ready_callback(self, msg: Bool) -> None:
+        self._stack_ready = msg.data
 
     def _is_sequence_running(self) -> bool:
         with self._sequence_lock:
@@ -437,6 +442,10 @@ class JointPositionSequence(Node):
         if not rising_edge:
             return
 
+        if not self._stack_ready:
+            self.get_logger().warn('Sequence refused: stack is not ready.')
+            return
+
         with self._sequence_lock:
             if self._sequence_thread is not None and self._sequence_thread.is_alive():
                 self._abort_requested = True
@@ -449,6 +458,9 @@ class JointPositionSequence(Node):
             self._sequence_thread.start()
 
     def _handle_set_origin(self) -> None:
+        if not self._stack_ready:
+            self.get_logger().warn('Set origin refused: stack is not ready.')
+            return
         if self._is_sequence_running():
             self.get_logger().warn('Set origin refused: joint sequence is running.')
             return
@@ -611,6 +623,9 @@ class JointPositionSequence(Node):
         applied_omega_max: set[str] = set()
 
         try:
+            if not self._stack_ready:
+                self.get_logger().warn('Sequence refused: stack is not ready.')
+                return
             if self._any_soft_mode():
                 self.get_logger().warn('Sequence refused: soft_mode is active on one or more joints.')
                 return

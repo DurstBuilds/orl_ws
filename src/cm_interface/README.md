@@ -214,13 +214,14 @@ cm_interface/
 - **Motor does not move**: Check `hold_joint`, `soft_mode`, and that `joint_despos` differs from `joint_curpos` beyond `motor_error_tolerance`.
 - **Hip overshoot at limit**: Confirm `joint_angle_limit_deg` on hip translator and `hip_angle_limit_deg` on teleop; reduce `hip_velocity_constant` or increase `publish_hz`.
 - **CAN errors**: Verify `can_id`, interface name, drive power/enable, and that `can0` has `restart-ms 100` (see `can0_up.sh` and [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).
-- **Motors powered after Pi boot**: `can_gateway_node` stays alive in standby and retries connect every `gateway_standby_retry_ms` (default 5 s). Toggle soft_mode off (button 1) once all drives report feedback.
+- **Motors powered after Pi boot**: `can_gateway_node` stays alive in standby and retries **full-stack reconnect** every `gateway_standby_retry_ms` (default 5 s). When all drives have fresh MIT feedback, it publishes `/boom_stack/ready` true. Teleop and joint sequences stay paused until then. Toggle soft_mode off (button 1) once ready to move.
+- **Power cycle while service running**: Any comm fault triggers full-stack reconnect (all motors reset and re-enabled in can_id order: wheel1 → wheel2 → hip → knee). Expect `[STACK] boom_stack ready=false` then `ready=true` when recovery completes. Do not use the stick until teleop logs `Stack ready: teleop resumed.`
 
 ## Raspberry Pi boot setup
 
 Use this section to bring up SocketCAN and `boom_stack.launch.py` automatically when the Pi powers on. Boot order matters: **CAN first, then the ROS stack**.
 
-The gateway defaults to **standby reconnect** (`gateway_standby_retry_ms:=5000`) and **soft_mode on all drives** (`start_in_soft_mode:=true`) so the stack can start before motor power is applied. See [docs/BOOM_STACK.md](docs/BOOM_STACK.md) for tuning and troubleshooting.
+The gateway defaults to **standby reconnect** (`gateway_standby_retry_ms:=5000`) and **soft_mode on all drives** (`start_in_soft_mode:=true`) so the stack can start before motor power is applied. It publishes **`/boom_stack/ready`** when every drive is connected with fresh feedback; teleop, translators, and joint sequences wait for that signal before accepting motion commands. See [docs/BOOM_STACK.md](docs/BOOM_STACK.md) for tuning and troubleshooting.
 
 ### 1. MCP251x device tree (one-time)
 
@@ -414,9 +415,10 @@ journalctl -u boom-stack -f
 Useful checks after boot:
 
 ```bash
+ros2 topic echo /boom_stack/ready --once
 ros2 topic echo /knee_motor/soft_mode --once
 ros2 topic hz /knee_motor/motor_state
 systemctl status can0-up boom-stack
 ```
 
-If the gateway logs `[STANDBY] CAN interface ... not available`, fix `can0-up.service` first. If CAN is up but motors are off, expect `[STANDBY] Connecting drives ...` every few seconds until power is applied; then press button 1 to exit soft_mode when ready to move.
+If the gateway logs `[STANDBY] CAN interface ... not available`, fix `can0-up.service` first. If CAN is up but motors are off, expect `[STANDBY] Full-stack reconnect ...` every few seconds until power is applied; wait for `[STACK] boom_stack ready=true` and `Stack ready: teleop resumed.` before moving joints. Then press button 1 to exit soft_mode when ready to move.
