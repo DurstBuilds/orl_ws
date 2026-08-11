@@ -149,6 +149,9 @@ def _translator_stack_group(
             name='motor_unwrapper_node',
             parameters=[{
                 'origin_jump_threshold': origin_jump_threshold_for_stack(stack),
+                'start_in_soft_mode': ParameterValue(
+                    LaunchConfiguration('start_in_soft_mode'), value_type=bool
+                ),
             }],
         ),
         Node(
@@ -162,6 +165,9 @@ def _translator_stack_group(
                 'joint_angle_limit_deg': joint_angle_limit_deg,
                 'motor_error_tolerance': ParameterValue(
                     LaunchConfiguration('motor_error_tolerance'), value_type=float
+                ),
+                'start_in_soft_mode': ParameterValue(
+                    LaunchConfiguration('start_in_soft_mode'), value_type=bool
                 ),
             }],
         ),

@@ -109,6 +109,9 @@ public:
     baseline_omega_max_ = omega_max_;
     pdelta_max_ = omega_max_ / static_cast<float>(loop_hz_);
 
+    const bool start_in_soft_mode = declare_parameter<bool>("start_in_soft_mode", true);
+    soft_mode_ = start_in_soft_mode;
+
     param_callback_handle_ = add_on_set_parameters_callback(
       std::bind(&JointTranslatorNode::on_set_parameters, this, std::placeholders::_1));
 
@@ -149,9 +152,10 @@ public:
       get_logger(),
       "motor_model=%s gear_ratio=%.4f loop_hz=%.1f "
       "omega_max=%.3f pdelta_max=%.4f motor_error_tolerance=%.4f "
-      "joint_angle_limit_deg=%.1f pd_kp=%.4f mit_kp=%.2f mit_kd=%.3f",
+      "joint_angle_limit_deg=%.1f pd_kp=%.4f mit_kp=%.2f mit_kd=%.3f start_in_soft_mode=%s",
       profile_.name, gear_ratio_, loop_hz_, omega_max_, pdelta_max_,
-      motor_error_tolerance_, joint_angle_limit_deg, pd_kp_, mit_kp_, mit_kd_);
+      motor_error_tolerance_, joint_angle_limit_deg, pd_kp_, mit_kp_, mit_kd_,
+      soft_mode_ ? "true" : "false");
   }
 
 private:
@@ -221,6 +225,30 @@ private:
     return result;
   }
 
+  /** Latch joint_despos at startup; caller must hold state_mutex_. */
+  void try_latch_startup_despos(float joint_curpos)
+  {
+    if (has_latched_startup_despos_) {
+      return;
+    }
+    if (!soft_mode_ && std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "startup: deferring despos latch until post-origin feedback "
+        "(joint_curpos=%.4f rad)",
+        joint_curpos);
+      return;
+    }
+    joint_despos_ = clamp_joint_despos(joint_curpos);
+    has_joint_despos_ = true;
+    has_latched_startup_despos_ = true;
+    RCLCPP_INFO(
+      get_logger(),
+      "startup: latched joint_despos=%.4f at current position%s",
+      joint_despos_,
+      soft_mode_ ? " (soft_mode)" : "");
+  }
+
   void motor_total_position_callback(
     const motor_interfaces::msg::MotorTotalPosition::SharedPtr msg)
   {
@@ -231,26 +259,9 @@ private:
       total_position_ = msg->total_position;
       has_total_position_ = true;
 
-      if (!has_latched_startup_despos_) {
-        // Soft-mode boot skips set-origin; latch at current pose. Non-soft boot waits
-        // for post-origin feedback (joint space near zero).
-        if (!soft_mode_ && std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
-          RCLCPP_WARN_THROTTLE(
-            get_logger(), *get_clock(), 2000,
-            "startup: deferring despos latch until post-origin feedback "
-            "(joint_curpos=%.4f rad)",
-            joint_curpos);
-        } else {
-          joint_despos_ = clamp_joint_despos(joint_curpos);
-          has_joint_despos_ = true;
-          has_latched_startup_despos_ = true;
-          RCLCPP_INFO(
-            get_logger(),
-            "startup: latched joint_despos=%.4f at current position%s",
-            joint_despos_,
-            soft_mode_ ? " (soft_mode)" : "");
-        }
-      } else if (awaiting_post_soft_latch_ && !soft_mode_) {
+      try_latch_startup_despos(joint_curpos);
+
+      if (has_latched_startup_despos_ && awaiting_post_soft_latch_ && !soft_mode_) {
         if (std::fabs(joint_curpos) > kStartupOriginJointTolRad) {
           RCLCPP_WARN_THROTTLE(
             get_logger(), *get_clock(), 2000,
@@ -333,6 +344,10 @@ private:
         awaiting_post_soft_latch_ = true;
       }
       RCLCPP_INFO(get_logger(), "soft_mode=%s", soft_mode_ ? "true" : "false");
+      if (soft_mode_ && has_total_position_) {
+        try_latch_startup_despos(
+          static_cast<float>(total_position_ / gear_ratio_));
+      }
     }
   }
 

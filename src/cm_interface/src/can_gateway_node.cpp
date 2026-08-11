@@ -123,6 +123,7 @@ public:
     cm_interface::MotorMitProfile profile{cm_interface::kAk70_10};
 
     rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr soft_mode_pub;
     rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr cmd_sub;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_sub;
 
@@ -229,6 +230,8 @@ public:
       const std::string prefix = "/" + ch.ns;
       ch.state_pub = create_publisher<motor_interfaces::msg::MotorState>(
         prefix + "/motor_state", 10);
+      ch.soft_mode_pub = create_publisher<std_msgs::msg::Bool>(
+        prefix + "/soft_mode", 10);
 
       ch.cmd_sub = create_subscription<motor_interfaces::msg::MotorCommand>(
         prefix + "/motor_command",
@@ -246,6 +249,10 @@ public:
 
       RCLCPP_INFO(
         get_logger(), "Drive %s: %s can_id=%d", ch.ns.c_str(), ch.profile.name, ch.can_id);
+    }
+
+    if (start_in_soft_mode_) {
+      publish_all_soft_mode_state();
     }
 
     RCLCPP_INFO(
@@ -297,6 +304,25 @@ private:
       }
     }
     return nullptr;
+  }
+
+  /** Publish current soft_mode for one drive (for late subscribers after connect). */
+  void publish_drive_soft_mode(const DriveChannel & ch)
+  {
+    if (!ch.soft_mode_pub) {
+      return;
+    }
+    std_msgs::msg::Bool msg;
+    msg.data = ch.soft_mode;
+    ch.soft_mode_pub->publish(msg);
+  }
+
+  /** Publish soft_mode on every namespace (boot default or after late motor connect). */
+  void publish_all_soft_mode_state()
+  {
+    for (const auto & ch : drives_) {
+      publish_drive_soft_mode(ch);
+    }
   }
 
   /** Open/bind one raw SocketCAN socket with a large RX buffer; no per-drive filters. */
@@ -900,6 +926,11 @@ private:
         comm_fault_checks_armed_ = true;
         RCLCPP_INFO(get_logger(), "[STANDBY] All drives ready; comm fault checks armed.");
       }
+      if (start_in_soft_mode_ && !republished_soft_mode_on_connect_) {
+        publish_all_soft_mode_state();
+        republished_soft_mode_on_connect_ = true;
+        RCLCPP_INFO(get_logger(), "[STANDBY] Republished soft_mode for all drives.");
+      }
       startup_in_progress_ = false;
       return;
     }
@@ -977,6 +1008,11 @@ private:
     if (!comm_fault_checks_armed_ && all_drives_startup_ready()) {
       comm_fault_checks_armed_ = true;
       RCLCPP_INFO(get_logger(), "[STARTUP] All drives recovered; comm fault checks armed.");
+      if (start_in_soft_mode_ && !republished_soft_mode_on_connect_) {
+        publish_all_soft_mode_state();
+        republished_soft_mode_on_connect_ = true;
+        RCLCPP_INFO(get_logger(), "[STARTUP] Republished soft_mode for all drives.");
+      }
     }
 
     for (auto & ch : drives_) {
@@ -1043,6 +1079,7 @@ private:
   bool comm_fault_checks_armed_{false};
   bool startup_in_progress_{false};
   bool bus_warmup_done_{false};
+  bool republished_soft_mode_on_connect_{false};
 };
 
 int main(int argc, char ** argv)

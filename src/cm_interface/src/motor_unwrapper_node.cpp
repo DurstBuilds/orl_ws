@@ -40,6 +40,7 @@ public:
     if (origin_jump_threshold_ <= 0.0) {
       throw std::invalid_argument("origin_jump_threshold must be > 0");
     }
+    soft_mode_ = declare_parameter<bool>("start_in_soft_mode", true);
 
     subscription_ = create_subscription<motor_interfaces::msg::MotorState>(
       "motor_state",
@@ -57,7 +58,8 @@ public:
     RCLCPP_INFO(
       get_logger(),
       "Subscribed to motor_state and soft_mode; publishing motor_total_position "
-      "(unwrap range [-pi, pi]).");
+      "(unwrap range [-pi, pi]); start_in_soft_mode=%s",
+      soft_mode_ ? "true" : "false");
   }
 
 private:

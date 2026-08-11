@@ -315,6 +315,10 @@ class BoomJoystickControl(Node):
         self._warned_waiting_curpos: set[str] = set()
 
         self._sequence_active = False
+        self._start_in_soft_mode = start_in_soft_mode
+        self._startup_soft_mode_republishes_remaining = (
+            int(3.0 * publish_hz) if start_in_soft_mode else 0
+        )
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_subscription(
             Bool, '/joint_sequence/active', self._sequence_active_callback, 10
@@ -377,6 +381,14 @@ class BoomJoystickControl(Node):
         right_x, left_x, global_soft_mode, knee_soft_mode, hip_neg, hip_pos = (
             self._state.get_state()
         )
+
+        if self._startup_soft_mode_republishes_remaining > 0:
+            for target in self._targets:
+                effective_soft_mode = self._effective_soft_mode(
+                    target, global_soft_mode, knee_soft_mode
+                )
+                target.publish_soft_mode(effective_soft_mode)
+            self._startup_soft_mode_republishes_remaining -= 1
 
         for target in self._targets:
             effective_soft_mode = self._effective_soft_mode(
