@@ -120,7 +120,7 @@ Requires deadman held; right stick sets absolute `joint_despos`.
 | Left stick X | `wheel` | Same for wheel velocity constant |
 | Button 5 held (no btn 4) | `hip` | Positive increment |
 | Button 4 held (no btn 5) | `hip` | Negative increment |
-| Button 1 (edge) | all | Toggle `soft_mode` |
+| Button 1 (hold 0.5 s) | all | Exit `soft_mode` (press briefly to re-enter soft stop) |
 | Button 2 / X (edge) | `knee` | Toggle `soft_mode` (knee only; same re-latch as global soft stop) |
 | Release input | all | `hold_joint=true`, snap `joint_despos` to `joint_curpos` |
 
@@ -214,8 +214,8 @@ cm_interface/
 - **Motor does not move**: Check `hold_joint`, `soft_mode`, and that `joint_despos` differs from `joint_curpos` beyond `motor_error_tolerance`.
 - **Hip overshoot at limit**: Confirm `joint_angle_limit_deg` on hip translator and `hip_angle_limit_deg` on teleop; reduce `hip_velocity_constant` or increase `publish_hz`.
 - **CAN errors**: Verify `can_id`, interface name, drive power/enable, and that `can0` has `restart-ms 100` (see `can0_up.sh` and [docs/BOOM_STACK.md](docs/BOOM_STACK.md)).
-- **Motors powered after Pi boot**: `can_gateway_node` stays alive in standby and retries **full-stack reconnect** every `gateway_standby_retry_ms` (default 5 s). When all drives have fresh MIT feedback, it publishes `/boom_stack/ready` true. Teleop and joint sequences stay paused until then. Toggle soft_mode off (button 1) once ready to move.
-- **Power cycle while service running**: Any comm fault triggers full-stack reconnect (all motors reset and re-enabled in can_id order: wheel1 → wheel2 → hip → knee). Expect `[STACK] boom_stack ready=false` then `ready=true` when recovery completes. Do not use the stick until teleop logs `Stack ready: teleop resumed.`
+- **Power cycle while service running**: Any comm fault triggers full-stack reconnect (all motors reset and re-enabled in can_id order: wheel1 → wheel2 → hip → knee). Expect `[STACK] boom_stack ready=false` then `ready=true` when recovery completes. **Do not press button 1 during reconnect** — wait for `Stack ready: teleop resumed.`, then **hold button 1 for ~0.5 s** to exit soft_mode. Set-origin runs one motor at a time (knee last).
+- **Motors powered after Pi boot**: Same as power cycle: wait for `/boom_stack/ready` true, then hold button 1 to exit soft_mode before moving joints.
 
 ## Raspberry Pi boot setup
 
@@ -421,4 +421,4 @@ ros2 topic hz /knee_motor/motor_state
 systemctl status can0-up boom-stack
 ```
 
-If the gateway logs `[STANDBY] CAN interface ... not available`, fix `can0-up.service` first. If CAN is up but motors are off, expect `[STANDBY] Full-stack reconnect ...` every few seconds until power is applied; wait for `[STACK] boom_stack ready=true` and `Stack ready: teleop resumed.` before moving joints. Then press button 1 to exit soft_mode when ready to move.
+If the gateway logs `[STANDBY] CAN interface ... not available`, fix `can0-up.service` first. If CAN is up but motors are off, expect `[STANDBY] Full-stack reconnect ...` every few seconds until power is applied; wait for `[STACK] boom_stack ready=true` and `Stack ready: teleop resumed.` before moving joints. **Hold button 1 ~0.5 s** (do not tap during reconnect) to exit soft_mode when ready to move.

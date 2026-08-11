@@ -21,12 +21,16 @@ TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
 
 import math
 import threading
+import time
 from typing import Optional
 
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
+
+SOFT_OFF_HOLD_SEC = 0.5
+POST_READY_SOFT_GRACE_SEC = 2.0
 
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
@@ -47,6 +51,8 @@ class JoyState:
         self._prev_knee_soft_mode_button_pressed = False
         self._hip_neg_pressed = False
         self._hip_pos_pressed = False
+        self._soft_mode_button_pressed = False
+        self._knee_soft_mode_button_pressed = False
 
     def update(
         self,
@@ -57,6 +63,8 @@ class JoyState:
         knee_soft_mode_button_index: int,
         hip_neg_button_index: int,
         hip_pos_button_index: int,
+        *,
+        allow_soft_mode_toggles: bool = True,
     ) -> None:
         right_x = self._read_axis(msg, right_x_axis) or 0.0
         left_x = -self._read_axis(msg, left_x_axis) or 0.0
@@ -82,15 +90,33 @@ class JoyState:
             self._left_x = left_x
             self._hip_neg_pressed = hip_neg_pressed
             self._hip_pos_pressed = hip_pos_pressed
-            if soft_mode_button_pressed and not self._prev_soft_mode_button_pressed:
-                self._global_soft_mode = not self._global_soft_mode
-            self._prev_soft_mode_button_pressed = soft_mode_button_pressed
-            if (
-                knee_soft_mode_button_pressed and
-                not self._prev_knee_soft_mode_button_pressed
-            ):
-                self._knee_soft_mode = not self._knee_soft_mode
-            self._prev_knee_soft_mode_button_pressed = knee_soft_mode_button_pressed
+            self._soft_mode_button_pressed = soft_mode_button_pressed
+            self._knee_soft_mode_button_pressed = knee_soft_mode_button_pressed
+            if allow_soft_mode_toggles:
+                if soft_mode_button_pressed and not self._prev_soft_mode_button_pressed:
+                    if not self._global_soft_mode:
+                        self._global_soft_mode = True
+                self._prev_soft_mode_button_pressed = soft_mode_button_pressed
+                if (
+                    knee_soft_mode_button_pressed and
+                    not self._prev_knee_soft_mode_button_pressed
+                ):
+                    self._knee_soft_mode = not self._knee_soft_mode
+                self._prev_knee_soft_mode_button_pressed = knee_soft_mode_button_pressed
+
+    def reset_to_soft_mode(self) -> None:
+        """Force damping-only state after stack recovery."""
+        with self._lock:
+            self._global_soft_mode = True
+            self._knee_soft_mode = False
+
+    def set_global_soft_mode(self, enabled: bool) -> None:
+        with self._lock:
+            self._global_soft_mode = enabled
+
+    def is_soft_mode_button_pressed(self) -> bool:
+        with self._lock:
+            return self._soft_mode_button_pressed
 
     @staticmethod
     def _read_axis(msg: Joy, axis_index: int) -> Optional[float]:
@@ -318,6 +344,9 @@ class BoomJoystickControl(Node):
         self._stack_ready = False
         self._logged_teleop_paused = False
         self._ready_soft_mode_republishes_remaining = 0
+        self._soft_off_grace_until = 0.0
+        self._soft_off_hold_started_at: Optional[float] = None
+        self._soft_off_done_for_press = False
         self._startup_soft_mode_republishes_remaining = (
             int(3.0 * publish_hz) if start_in_soft_mode else 0
         )
@@ -349,7 +378,7 @@ class BoomJoystickControl(Node):
             f'  Hip buttons -> delta/tick (base {self._hip_velocity_base:.4f} / gear_ratio)\n'
             f'  Hip joint_despos clamped to +/-{hip_angle_limit_deg:.1f} deg\n'
             f'  start_in_soft_mode={start_in_soft_mode}\n'
-            f'  Button[{self._soft_mode_button_index}] toggles soft_mode (all)\n'
+            f'  Button[{self._soft_mode_button_index}] hold {SOFT_OFF_HOLD_SEC:.1f}s to exit soft_mode (all)\n'
             f'  Button[{self._knee_soft_mode_button_index}] toggles knee soft_mode')
 
     @staticmethod
@@ -374,8 +403,14 @@ class BoomJoystickControl(Node):
         was_ready = self._stack_ready
         self._stack_ready = msg.data
         if msg.data and not was_ready:
+            if self._start_in_soft_mode:
+                self._state.reset_to_soft_mode()
+            self._soft_off_grace_until = time.monotonic() + POST_READY_SOFT_GRACE_SEC
+            self._soft_off_hold_started_at = None
+            self._soft_off_done_for_press = False
             publish_hz = self.get_parameter('publish_hz').get_parameter_value().double_value
             self._ready_soft_mode_republishes_remaining = int(3.0 * publish_hz)
+            self._republish_soft_mode_for_all(True, False)
             for target in self._targets:
                 has_curpos, curpos = target.get_curpos()
                 if has_curpos:
@@ -407,19 +442,43 @@ class BoomJoystickControl(Node):
             self._knee_soft_mode_button_index,
             self._hip_neg_button_index,
             self._hip_pos_button_index,
+            allow_soft_mode_toggles=self._stack_ready,
         )
+
+    def _try_hold_to_exit_global_soft_mode(self) -> None:
+        """Exit global soft_mode only after grace period and sustained button 1 press."""
+        if not self._state.is_soft_mode_button_pressed():
+            self._soft_off_hold_started_at = None
+            self._soft_off_done_for_press = False
+            return
+
+        _, _, global_soft_mode, _, _, _ = self._state.get_state()
+        if not global_soft_mode:
+            return
+
+        now = time.monotonic()
+        if now < self._soft_off_grace_until:
+            return
+
+        if self._soft_off_hold_started_at is None:
+            self._soft_off_hold_started_at = now
+        elif (
+            not self._soft_off_done_for_press and
+            now - self._soft_off_hold_started_at >= SOFT_OFF_HOLD_SEC
+        ):
+            self._soft_off_done_for_press = True
+            self._state.set_global_soft_mode(False)
+            self.get_logger().info(
+                f'Button[{self._soft_mode_button_index}] held: global soft_mode=false'
+            )
 
     def _publish_timer_callback(self) -> None:
         """Map cached joy state to despos deltas; hold_joint on control edges only."""
-        right_x, left_x, global_soft_mode, knee_soft_mode, hip_neg, hip_pos = (
-            self._state.get_state()
-        )
-
         if self._ready_soft_mode_republishes_remaining > 0:
-            self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
+            self._republish_soft_mode_for_all(True, False)
             self._ready_soft_mode_republishes_remaining -= 1
         elif self._startup_soft_mode_republishes_remaining > 0:
-            self._republish_soft_mode_for_all(global_soft_mode, knee_soft_mode)
+            self._republish_soft_mode_for_all(True, False)
             self._startup_soft_mode_republishes_remaining -= 1
         elif not self._stack_ready and self._start_in_soft_mode:
             self._republish_soft_mode_for_all(True, False)
@@ -430,11 +489,19 @@ class BoomJoystickControl(Node):
                 self._logged_teleop_paused = True
             return
 
+        self._try_hold_to_exit_global_soft_mode()
+        right_x, left_x, global_soft_mode, knee_soft_mode, hip_neg, hip_pos = (
+            self._state.get_state()
+        )
+
         for target in self._targets:
             effective_soft_mode = self._effective_soft_mode(
                 target, global_soft_mode, knee_soft_mode
             )
             if effective_soft_mode == target.last_soft_mode:
+                continue
+
+            if not effective_soft_mode and time.monotonic() < self._soft_off_grace_until:
                 continue
 
             if target.last_soft_mode and not effective_soft_mode:

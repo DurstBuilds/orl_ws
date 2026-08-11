@@ -69,6 +69,7 @@ constexpr int kDefaultStartupOriginPollMs = 100;
 constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kDefaultStartupStaggerMs = 200;
 constexpr int kDefaultStandbyRetryMs = 5000;
+constexpr int kDefaultSoftOffGraceMs = 2500;
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 // Wrapped motor position must be within this after set-origin before motor_state is published.
 constexpr float kPostOriginPositionTolRad = 0.15f;
@@ -130,6 +131,7 @@ public:
   enum class SoftOriginResetState
   {
     Idle,
+    Pending,
     Active,
   };
 
@@ -183,6 +185,7 @@ public:
       "startup_origin_poll_ms", kDefaultStartupOriginPollMs);
     bus_warmup_ms_ = declare_parameter<int>("bus_warmup_ms", kDefaultBusWarmupMs);
     standby_retry_ms_ = declare_parameter<int>("standby_retry_ms", kDefaultStandbyRetryMs);
+    soft_off_grace_ms_ = declare_parameter<int>("soft_off_grace_ms", kDefaultSoftOffGraceMs);
     start_in_soft_mode_ = declare_parameter<bool>("start_in_soft_mode", true);
 
     const auto namespaces = split_csv(csv_param_as_string(
@@ -203,6 +206,9 @@ public:
     }
     if (standby_retry_ms_ <= 0) {
       throw std::invalid_argument("standby_retry_ms must be > 0");
+    }
+    if (soft_off_grace_ms_ < 0) {
+      throw std::invalid_argument("soft_off_grace_ms must be >= 0");
     }
 
     drives_.reserve(namespaces.size());
@@ -357,6 +363,9 @@ private:
       return;
     }
     stack_ready_ = ready;
+    if (ready) {
+      stack_ready_since_ = SteadyClock::now();
+    }
     std_msgs::msg::Bool msg;
     msg.data = ready;
     stack_ready_pub_->publish(msg);
@@ -364,10 +373,78 @@ private:
       get_logger(), "[STACK] boom_stack ready=%s", ready ? "true" : "false");
   }
 
+  /** True if any drive is queued for or executing a soft_mode-off origin reset. */
+  bool any_origin_reset_in_progress() const
+  {
+    for (const auto & ch : drives_) {
+      if (ch.origin_reset_state != SoftOriginResetState::Idle) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** Promote the lowest can_id Pending drive to Active when none is running. */
+  void promote_next_origin_reset()
+  {
+    for (const auto & ch : drives_) {
+      if (ch.origin_reset_state == SoftOriginResetState::Active) {
+        return;
+      }
+    }
+
+    DriveChannel * next = nullptr;
+    for (auto & ch : drives_) {
+      if (ch.origin_reset_state != SoftOriginResetState::Pending) {
+        continue;
+      }
+      if (next == nullptr || ch.can_id < next->can_id) {
+        next = &ch;
+      }
+    }
+    if (next == nullptr) {
+      return;
+    }
+
+    next->origin_reset_state = SoftOriginResetState::Active;
+    next->origin_set_origin_sent = false;
+    next->suppress_state_publish = true;
+    set_stack_ready(false);
+    RCLCPP_INFO(
+      get_logger(),
+      "[STARTUP] [%s] can_id=%d queued origin reset now active.",
+      next->ns.c_str(), next->can_id);
+  }
+
+  DriveChannel * find_active_origin_reset_drive()
+  {
+    DriveChannel * active = nullptr;
+    for (auto & ch : drives_) {
+      if (ch.origin_reset_state != SoftOriginResetState::Active) {
+        continue;
+      }
+      if (active == nullptr || ch.can_id < active->can_id) {
+        active = &ch;
+      }
+    }
+    return active;
+  }
+
+  int origin_reset_max_wait_ms_for(const DriveChannel & ch) const
+  {
+    const int base_ms = std::max(
+      startup_origin_poll_ms_ * 2,
+      feedback_poll_ms_ * 10);
+    if (is_ak80_drive(ch)) {
+      return std::max(base_ms, ak80_enable_settle_ms_ * 2);
+    }
+    return base_ms;
+  }
+
   /** Sync stack_ready with drive health; republish soft_mode when becoming ready. */
   void update_stack_ready_state()
   {
-    const bool ready = all_drives_startup_ready();
+    const bool ready = all_drives_startup_ready() && !any_origin_reset_in_progress();
     if (ready) {
       if (!comm_fault_checks_armed_) {
         comm_fault_checks_armed_ = true;
@@ -592,65 +669,67 @@ private:
   }
 
   /**
-   * Non-blocking soft_mode off origin reset: one step per drive per loop tick.
+   * Sequential soft_mode-off origin reset: one Active drive at a time by can_id.
    */
   void step_soft_origin_resets()
   {
-    const int max_wait_ms = std::max(
-      startup_origin_poll_ms_ * 2,
-      feedback_poll_ms_ * 10);
+    promote_next_origin_reset();
 
-    for (auto & ch : drives_) {
-      if (ch.origin_reset_state != SoftOriginResetState::Active) {
-        continue;
+    DriveChannel * active = find_active_origin_reset_drive();
+    if (active == nullptr) {
+      if (!stack_ready_ && all_drives_startup_ready() && !any_origin_reset_in_progress()) {
+        update_stack_ready_state();
       }
-
-      if (!ch.origin_set_origin_sent) {
-        ch.suppress_state_publish = true;
-        struct can_frame frame{};
-        cm_interface::pack_control_frame(frame, ch.can_id, 0xFE);
-        if (write_frame(frame)) {
-          RCLCPP_INFO(get_logger(), "[STARTUP] [%s] set motor origin.", ch.ns.c_str());
-        } else {
-          RCLCPP_ERROR(get_logger(), "[STARTUP] [%s] set origin failed.", ch.ns.c_str());
-        }
-        ch.origin_set_origin_sent = true;
-        ch.origin_reset_deadline =
-          SteadyClock::now() + std::chrono::milliseconds(max_wait_ms);
-        send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
-        continue;
-      }
-
-      send_startup_mit_hold(ch);
-
-      const bool near_origin = ch.has_last_position &&
-        std::fabs(ch.last_position_rad) <= kPostOriginPositionTolRad;
-      const bool timed_out = SteadyClock::now() >= ch.origin_reset_deadline;
-
-      if (!near_origin && !timed_out) {
-        continue;
-      }
-
-      if (!near_origin) {
-        RCLCPP_WARN(
-          get_logger(),
-          "[STARTUP] [%s] post-origin position not near zero (%.4f rad); "
-          "downstream may see stale feedback",
-          ch.ns.c_str(), ch.has_last_position ? ch.last_position_rad : 0.0f);
-      } else {
-        RCLCPP_INFO(
-          get_logger(),
-          "[STARTUP] [%s] post-origin position %.4f rad",
-          ch.ns.c_str(), ch.last_position_rad);
-      }
-
-      ch.origin_reset_state = SoftOriginResetState::Idle;
-      ch.origin_set_origin_sent = false;
-      ch.suppress_state_publish = false;
-      publish_cached_state(ch);
-      RCLCPP_INFO(
-        get_logger(), "[%s] soft_mode off: origin reset at current position", ch.ns.c_str());
+      return;
     }
+
+    auto & ch = *active;
+    const int max_wait_ms = origin_reset_max_wait_ms_for(ch);
+
+    if (!ch.origin_set_origin_sent) {
+      struct can_frame frame{};
+      cm_interface::pack_control_frame(frame, ch.can_id, 0xFE);
+      if (write_frame(frame)) {
+        RCLCPP_INFO(get_logger(), "[STARTUP] [%s] set motor origin.", ch.ns.c_str());
+      } else {
+        RCLCPP_ERROR(get_logger(), "[STARTUP] [%s] set origin failed.", ch.ns.c_str());
+      }
+      ch.origin_set_origin_sent = true;
+      ch.origin_reset_deadline =
+        SteadyClock::now() + std::chrono::milliseconds(max_wait_ms);
+      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+      return;
+    }
+
+    send_startup_mit_hold(ch);
+
+    const bool near_origin = ch.has_last_position &&
+      std::fabs(ch.last_position_rad) <= kPostOriginPositionTolRad;
+    const bool timed_out = SteadyClock::now() >= ch.origin_reset_deadline;
+
+    if (!near_origin && !timed_out) {
+      return;
+    }
+
+    if (!near_origin) {
+      RCLCPP_WARN(
+        get_logger(),
+        "[STARTUP] [%s] post-origin position not near zero (%.4f rad); "
+        "downstream may see stale feedback",
+        ch.ns.c_str(), ch.has_last_position ? ch.last_position_rad : 0.0f);
+    } else {
+      RCLCPP_INFO(
+        get_logger(),
+        "[STARTUP] [%s] post-origin position %.4f rad",
+        ch.ns.c_str(), ch.last_position_rad);
+    }
+
+    ch.origin_reset_state = SoftOriginResetState::Idle;
+    ch.origin_set_origin_sent = false;
+    ch.suppress_state_publish = false;
+    publish_cached_state(ch);
+    RCLCPP_INFO(
+      get_logger(), "[%s] soft_mode off: origin reset at current position", ch.ns.c_str());
   }
 
   /** Send set-origin (0xFE) then briefly poll for the resulting MIT reply. */
@@ -1166,7 +1245,7 @@ private:
     if (stack_ready_ && any_drive_needs_connect()) {
       set_stack_ready(false);
       republished_soft_mode_on_connect_ = false;
-    } else if (!stack_ready_ && all_drives_startup_ready()) {
+    } else if (!stack_ready_ && all_drives_startup_ready() && !any_origin_reset_in_progress()) {
       update_stack_ready_state();
     }
 
@@ -1201,12 +1280,24 @@ private:
       return;
     }
 
-    if (!msg->data && !stack_ready_) {
+    if (!msg->data && !all_drives_startup_ready()) {
       RCLCPP_WARN_THROTTLE(
         get_logger(), *get_clock(), 5000,
-        "[%s] Ignoring soft_mode=false while stack is not ready.",
+        "[%s] Ignoring soft_mode=false while drives are not connected.",
         ch->ns.c_str());
       return;
+    }
+
+    if (!msg->data && stack_ready_ && soft_off_grace_ms_ > 0) {
+      const auto since_ready_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+        SteadyClock::now() - stack_ready_since_).count();
+      if (since_ready_ms < soft_off_grace_ms_) {
+        RCLCPP_WARN_THROTTLE(
+          get_logger(), *get_clock(), 2000,
+          "[%s] Ignoring soft_mode=false during post-ready grace (%ld ms left).",
+          ch->ns.c_str(), static_cast<long>(soft_off_grace_ms_ - since_ready_ms));
+        return;
+      }
     }
 
     ch->soft_mode = msg->data;
@@ -1216,11 +1307,13 @@ private:
       ch->has_pending_command = false;
       ch->origin_reset_state = SoftOriginResetState::Idle;
       ch->origin_set_origin_sent = false;
+      ch->suppress_state_publish = false;
       send_mit(*ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
     } else {
       ch->has_pending_command = false;
-      ch->origin_reset_state = SoftOriginResetState::Active;
+      ch->origin_reset_state = SoftOriginResetState::Pending;
       ch->origin_set_origin_sent = false;
+      set_stack_ready(false);
       send_mit(*ch, 0.0f, 0.0f, 0.0f, ch->profile.mit_kd, 0.0f, true);
     }
 
@@ -1238,6 +1331,7 @@ private:
   int startup_origin_poll_ms_{kDefaultStartupOriginPollMs};
   int bus_warmup_ms_{kDefaultBusWarmupMs};
   int standby_retry_ms_{kDefaultStandbyRetryMs};
+  int soft_off_grace_ms_{kDefaultSoftOffGraceMs};
   bool start_in_soft_mode_{true};
 
   std::vector<DriveChannel> drives_;
@@ -1251,6 +1345,7 @@ private:
   bool bus_warmup_done_{false};
   bool republished_soft_mode_on_connect_{false};
   bool stack_ready_{false};
+  SteadyTime stack_ready_since_{};
 };
 
 int main(int argc, char ** argv)

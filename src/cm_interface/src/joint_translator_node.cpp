@@ -361,7 +361,7 @@ private:
     std::lock_guard<std::mutex> lock(state_mutex_);
     const bool was_ready = stack_ready_;
     stack_ready_ = msg->data;
-    if (stack_ready_ && !was_ready && has_total_position_) {
+    if (stack_ready_ && !was_ready && has_total_position_ && !soft_mode_) {
       const float joint_curpos = static_cast<float>(total_position_ / gear_ratio_);
       joint_despos_ = clamp_joint_despos(joint_curpos);
       has_joint_despos_ = true;
