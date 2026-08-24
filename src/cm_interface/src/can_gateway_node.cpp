@@ -12,10 +12,15 @@
 //   ak80_enable_settle_ms  — post-enable wait for AK80-64 knee
 //   startup_origin_poll_ms — RX wait after set-origin (0xFE)
 //   bus_warmup_ms          — delay after bind before first enable
+//   alive_check_period_ms  — how often to test that every drive has fresh MIT feedback
+//   reconnect_cooldown_ms  — min time between reconnect attempts (failed init / power off)
 //
 // Startup: enables drives sorted by can_id (AK80/knee last). Retries enable if
 // no feedback. Soft-mode off triggers set-origin + Kd hold on that drive.
-// loop_timer_callback: drain RX, poll for feedback, then service_drive_tx (MIT TX).
+// loop_timer_callback: drain RX, poll for feedback, maybe reconnect, then MIT TX.
+// Periodic alive check: if any drive is stale, reconnect all. Dead drives get the
+// full enable + set-origin sequence; still-alive drives get enable-only (no origin).
+// Service loop blocks during reconnect (same as constructor startup).
 // Comm-fault uses last_feedback_time from the pre-service poll, not from TX this tick.
 // refresh_all_drive_feedback() pings each drive sequentially (with retries) so
 // early-enabled drives are not starved by batch MIT TX on a shared bus.
@@ -52,6 +57,8 @@
 namespace
 {
 
+// Light damping while a drive is in soft_mode (Kp=0, Tff=0) so the joint can
+// be moved by hand without going fully limp.
 constexpr float kSoftModeKd = 0.25f;
 constexpr double kDefaultLoopRateHz = 200.0;
 constexpr int kDefaultFeedbackTimeoutMs = 250;
@@ -62,6 +69,9 @@ constexpr int kDefaultAk80EnableSettleMs = 250;
 constexpr int kDefaultStartupOriginPollMs = 100;
 constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kDefaultStartupStaggerMs = 200;
+constexpr int kDefaultAliveCheckPeriodMs = 500;
+constexpr int kDefaultReconnectCooldownMs = 2000;
+// Kernel default SO_RCVBUF is too small for a shared bus at 200 Hz × N drives.
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 // Wrapped motor position must be within this after set-origin before motor_state is published.
 constexpr float kPostOriginPositionTolRad = 0.15f;
@@ -69,6 +79,7 @@ constexpr float kPostOriginPositionTolRad = 0.15f;
 using SteadyClock = std::chrono::steady_clock;
 using SteadyTime = SteadyClock::time_point;
 
+/** Split a comma-separated parameter, trimming whitespace and skipping empty tokens. */
 std::vector<std::string> split_csv(const std::string & value)
 {
   std::vector<std::string> parts;
@@ -85,7 +96,10 @@ std::vector<std::string> split_csv(const std::string & value)
   return parts;
 }
 
-// Launch may pass can_ids:=1 as integer; node expects a CSV string.
+/**
+ * Read a CSV launch parameter that may arrive as a string or a single integer.
+ * Launch `can_ids:=1` is INTEGER; the node always consumes a CSV string.
+ */
 std::string csv_param_as_string(
   rclcpp::Node & node,
   const std::string & name,
@@ -108,9 +122,19 @@ std::string csv_param_as_string(
 
 }  // namespace
 
+/**
+ * Shared SocketCAN gateway for multiple MIT drives.
+ *
+ * One raw socket, no per-drive hardware filters. ROS topics are namespaced
+ * per drive (`/<ns>/motor_command`, `/<ns>/motor_state`, `/<ns>/soft_mode`,
+ * `/<ns>/origin_reset`).
+ * Command callbacks only latch the latest message; TX happens on the wall timer
+ * so MIT frames stay paced and origin-reset stays off the subscription thread.
+ */
 class CanGatewayNode : public rclcpp::Node
 {
 public:
+  /** Per-drive ROS I/O and MIT runtime state on the shared CAN socket. */
   struct DriveChannel
   {
     std::string ns;
@@ -118,6 +142,7 @@ public:
     cm_interface::MotorMitProfile profile{cm_interface::kAk70_10};
 
     rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr origin_reset_pub;
     rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr cmd_sub;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_sub;
 
@@ -127,18 +152,26 @@ public:
 
     SteadyTime last_feedback_time{};
     bool has_feedback{false};
+    // Sticky until a MIT reply arrives; TX becomes a zero hold.
     bool comm_fault{false};
     float last_position_rad{0.0f};
     bool has_last_position{false};
+    // Snapshot at soft_mode entry; not consumed by TX (origin is set on falling edge).
     float soft_mode_on_position_rad{0.0f};
     bool has_soft_mode_on_position{false};
+    // Falling edge of soft_mode is handled on the timer: set-origin is blocking.
     bool pending_soft_origin_reset{false};
     bool startup_enable_done{false};
+    // Hide pre-origin wrap from motor_state so unwrapper/translator do not jump.
     bool suppress_state_publish{false};
     bool has_last_feedback{false};
     cm_interface::MitFeedback last_feedback{};
   };
 
+  /**
+   * Load drive lists, bind SocketCAN, run the enable/origin sequence, then
+   * start the TX/RX wall timer. Throws if parameters are invalid or bind fails.
+   */
   CanGatewayNode()
   : Node("can_gateway_node")
   {
@@ -155,6 +188,10 @@ public:
     startup_origin_poll_ms_ = declare_parameter<int>(
       "startup_origin_poll_ms", kDefaultStartupOriginPollMs);
     bus_warmup_ms_ = declare_parameter<int>("bus_warmup_ms", kDefaultBusWarmupMs);
+    alive_check_period_ms_ = declare_parameter<int>(
+      "alive_check_period_ms", kDefaultAliveCheckPeriodMs);
+    reconnect_cooldown_ms_ = declare_parameter<int>(
+      "reconnect_cooldown_ms", kDefaultReconnectCooldownMs);
 
     const auto namespaces = split_csv(csv_param_as_string(
       *this, "namespaces", "knee_motor,hip_motor,wheel_motor1,wheel_motor2"));
@@ -172,6 +209,12 @@ public:
     if (loop_rate_hz_ <= 0.0) {
       throw std::invalid_argument("loop_rate_hz must be > 0");
     }
+    if (alive_check_period_ms_ < 0) {
+      throw std::invalid_argument("alive_check_period_ms must be >= 0");
+    }
+    if (reconnect_cooldown_ms_ < 0) {
+      throw std::invalid_argument("reconnect_cooldown_ms must be >= 0");
+    }
 
     drives_.reserve(namespaces.size());
     std::vector<int> seen_can_ids;
@@ -186,7 +229,7 @@ public:
           "can_ids[" + std::to_string(i) + "] for namespace '" + ch.ns +
           "': invalid integer '" + can_ids_str[i] + "'");
       }
-      if (ch.can_id < 0 || ch.can_id > 0x7FF) {
+      if (ch.can_id < 0 || ch.can_id > 0x7FF) {  // 11-bit standard CAN ID
         throw std::invalid_argument(
           "can_ids[" + std::to_string(i) + "] for namespace '" + ch.ns +
           "': must be in [0, 2047]");
@@ -208,11 +251,15 @@ public:
         "Failed to open CAN interface '" + can_interface_ + "'; gateway cannot start");
     }
 
+    // Depth 1: only the latest motor_command matters; MIT TX is timer-paced.
+    // Lambdas capture can_id by value, not &ch — DriveChannel entries can move.
     const auto cmd_qos = rclcpp::QoS(rclcpp::KeepLast(1)).reliable();
     for (auto & ch : drives_) {
       const std::string prefix = "/" + ch.ns;
       ch.state_pub = create_publisher<motor_interfaces::msg::MotorState>(
         prefix + "/motor_state", 10);
+      ch.origin_reset_pub = create_publisher<std_msgs::msg::Bool>(
+        prefix + "/origin_reset", 10);
 
       ch.cmd_sub = create_subscription<motor_interfaces::msg::MotorCommand>(
         prefix + "/motor_command",
@@ -234,9 +281,10 @@ public:
 
     RCLCPP_INFO(
       get_logger(),
-      "%s | %zu drives | loop %.0f Hz | feedback_timeout %d ms | feedback_poll %d ms",
+      "%s | %zu drives | loop %.0f Hz | feedback_timeout %d ms | feedback_poll %d ms | "
+      "alive_check %d ms | reconnect_cooldown %d ms",
       can_interface_.c_str(), drives_.size(), loop_rate_hz_, feedback_timeout_ms_,
-      feedback_poll_ms_);
+      feedback_poll_ms_, alive_check_period_ms_, reconnect_cooldown_ms_);
 
     startup_all_drives();
 
@@ -246,6 +294,7 @@ public:
       std::bind(&CanGatewayNode::loop_timer_callback, this));
   }
 
+  /** Best-effort disable all drives and close the socket. */
   ~CanGatewayNode() override
   {
     for (const auto & ch : drives_) {
@@ -258,6 +307,7 @@ public:
   }
 
 private:
+  /** Linear lookup is enough: typical stacks have 2–4 drives. */
   DriveChannel * find_drive_by_can_id(int can_id)
   {
     for (auto & ch : drives_) {
@@ -268,6 +318,10 @@ private:
     return nullptr;
   }
 
+  /**
+   * Bind one unfiltered RAW socket to can_interface_.
+   * Frames are demuxed in software by unpack_reply (can_id + MIT payload).
+   */
   bool open_can_socket()
   {
     can_socket_ = socket(PF_CAN, SOCK_RAW, CAN_RAW);
@@ -303,6 +357,7 @@ private:
     return true;
   }
 
+  /** Write one CAN frame; false if the socket is closed or write is short. */
   bool write_frame(const struct can_frame & frame)
   {
     if (can_socket_ < 0) {
@@ -311,6 +366,7 @@ private:
     return write(can_socket_, &frame, sizeof(frame)) == static_cast<ssize_t>(sizeof(frame));
   }
 
+  /** Non-blocking drain of frames already in the kernel RX queue. */
   void process_pending_rx()
   {
     if (can_socket_ < 0) {
@@ -331,6 +387,10 @@ private:
     }
   }
 
+  /**
+   * Block up to poll_timeout_ms waiting for MIT replies.
+   * Used after TX so freshness is based on this poll, not on TX this tick.
+   */
   void poll_bus_feedback(int poll_timeout_ms)
   {
     if (can_socket_ < 0) {
@@ -351,7 +411,7 @@ private:
       const int poll_result = poll(&pfd, 1, static_cast<int>(remaining_ms));
       if (poll_result < 0) {
         if (errno == EINTR) {
-          continue;
+          continue;  // signal during poll; remaining deadline still applies
         }
         return;
       }
@@ -368,6 +428,10 @@ private:
     }
   }
 
+  /**
+   * Demux one RX frame onto the first drive whose MIT reply unpacks.
+   * Clears comm_fault and optionally publishes motor_state.
+   */
   bool route_feedback_frame(const struct can_frame & frame)
   {
     for (auto & ch : drives_) {
@@ -406,6 +470,7 @@ private:
     return false;
   }
 
+  /** Publish MIT feedback as motor_state on /<ns>/motor_state. */
   void publish_state(const DriveChannel & ch, const cm_interface::MitFeedback & fb)
   {
     motor_interfaces::msg::MotorState msg;
@@ -418,6 +483,21 @@ private:
     ch.state_pub->publish(msg);
   }
 
+  /** Arm unwrapper/translator to re-latch after a set-origin (dead-drive reconnect). */
+  void publish_origin_reset(const DriveChannel & ch)
+  {
+    if (ch.origin_reset_pub == nullptr) {
+      return;
+    }
+    std_msgs::msg::Bool msg;
+    msg.data = true;
+    ch.origin_reset_pub->publish(msg);
+  }
+
+  /**
+   * Pack and TX one MIT command.
+   * force_apply sets the position-apply bit even for a zero delta (hold / origin).
+   */
   bool send_mit(
     const DriveChannel & ch,
     float p_delta, float v_des, float kp, float kd, float t_ff, bool force_apply)
@@ -434,6 +514,7 @@ private:
     return true;
   }
 
+  /** MIT enable (0xFC). Optional phase string is logged for startup diagnostics. */
   bool send_enable(const DriveChannel & ch, const char * phase = nullptr)
   {
     struct can_frame frame{};
@@ -454,6 +535,7 @@ private:
     return false;
   }
 
+  /** MIT disable (0xFD). Best-effort; used from the destructor. */
   void send_disable(const DriveChannel & ch)
   {
     struct can_frame frame{};
@@ -461,6 +543,11 @@ private:
     write_frame(frame);
   }
 
+  /**
+   * Handle soft_mode falling edges on the timer thread.
+   * Suppress motor_state until post-origin position is near zero so downstream
+   * nodes do not integrate the wrap as motion.
+   */
   void process_pending_soft_origin_resets()
   {
     for (auto & ch : drives_) {
@@ -480,6 +567,7 @@ private:
     }
   }
 
+  /** MIT set-origin (0xFE) then wait for a reply so last_position is current. */
   bool send_set_origin(DriveChannel & ch, int feedback_poll_ms = kOriginFeedbackPollMs)
   {
     struct can_frame frame{};
@@ -493,16 +581,19 @@ private:
     return true;
   }
 
+  /** AK80-64 (knee) needs a longer post-enable settle than AK70/AK10. */
   bool is_ak80_drive(const DriveChannel & ch) const
   {
     return std::strcmp(ch.profile.name, "AK80-64") == 0;
   }
 
+  /** Post-enable wait: AK80-64 uses ak80_enable_settle_ms_, others enable_settle_ms_. */
   int enable_settle_ms_for(const DriveChannel & ch) const
   {
     return is_ak80_drive(ch) ? ak80_enable_settle_ms_ : enable_settle_ms_;
   }
 
+  /** Publish last MIT sample, or ping the drive once if none is cached yet. */
   void publish_cached_state(DriveChannel & ch)
   {
     if (ch.has_last_feedback) {
@@ -513,6 +604,10 @@ private:
     poll_bus_feedback(feedback_poll_ms_);
   }
 
+  /**
+   * After 0xFE the encoder wrap is not instant. Hold with profile Kd until
+   * |position| is within kPostOriginPositionTolRad, or warn and continue.
+   */
   bool wait_for_post_origin_position(DriveChannel & ch)
   {
     const int max_wait_ms = std::max(
@@ -543,6 +638,7 @@ private:
     return false;
   }
 
+  /** Enable → settle → set-origin → Kd hold. motor_state stays suppressed until origin. */
   void startup_one_drive(DriveChannel & ch)
   {
     const int settle_ms = enable_settle_ms_for(ch);
@@ -551,6 +647,7 @@ private:
     std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
     process_pending_rx();
     send_set_origin(ch, startup_origin_poll_ms_);
+    publish_origin_reset(ch);
     send_startup_mit_hold(ch);
     wait_for_post_origin_position(ch);
     ch.suppress_state_publish = false;
@@ -558,15 +655,66 @@ private:
     ch.startup_enable_done = true;
   }
 
-  void startup_all_drives()
+  /** Re-enable a drive that still has fresh feedback. No set-origin. */
+  void reconnect_live_drive(DriveChannel & ch)
   {
-    if (bus_warmup_ms_ > 0) {
-      RCLCPP_INFO(
-        get_logger(), "[STARTUP] Waiting %d ms for %s to settle before enable.",
-        bus_warmup_ms_, can_interface_.c_str());
-      std::this_thread::sleep_for(std::chrono::milliseconds(bus_warmup_ms_));
-    }
+    const int settle_ms = enable_settle_ms_for(ch);
+    send_enable(ch, "still alive");
+    std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+    process_pending_rx();
+    send_startup_mit_hold(ch);
+    poll_bus_feedback(feedback_poll_ms_);
+    ch.startup_enable_done = true;
+  }
 
+  /** Invalidate stale state so a dead drive is re-enabled from scratch. */
+  void reset_dead_drive_for_reconnect(DriveChannel & ch)
+  {
+    ch.startup_enable_done = false;
+    ch.has_feedback = false;
+    ch.comm_fault = false;
+    ch.has_last_feedback = false;
+    ch.has_pending_command = false;
+  }
+
+  /** Comma-separated namespace list for reconnect logs. */
+  std::string join_drive_names(const std::vector<size_t> & indices) const
+  {
+    if (indices.empty()) {
+      return "-";
+    }
+    std::string out;
+    for (size_t i = 0; i < indices.size(); ++i) {
+      if (i > 0) {
+        out += ", ";
+      }
+      out += drives_[indices[i]].ns;
+    }
+    return out;
+  }
+
+  /** Snapshot freshness before mutating drive state for reconnect. */
+  std::vector<char> snapshot_drive_liveness(
+    std::vector<size_t> & dead_indices,
+    std::vector<size_t> & alive_indices) const
+  {
+    std::vector<char> was_alive(drives_.size(), 0);
+    dead_indices.clear();
+    alive_indices.clear();
+    for (size_t i = 0; i < drives_.size(); ++i) {
+      if (feedback_is_fresh(drives_[i])) {
+        was_alive[i] = 1;
+        alive_indices.push_back(i);
+      } else {
+        dead_indices.push_back(i);
+      }
+    }
+    return was_alive;
+  }
+
+  /** Enable in can_id order. Alive drives skip set-origin. */
+  void enable_drives_in_can_id_order(const std::vector<char> & was_alive, const char * tag)
+  {
     std::vector<size_t> order(drives_.size());
     std::iota(order.begin(), order.end(), 0);
     std::sort(order.begin(), order.end(), [this](size_t a, size_t b) {
@@ -583,41 +731,100 @@ private:
     }
     RCLCPP_INFO(
       get_logger(),
-      "[STARTUP] Enable order by can_id (knee/AK80-64 last): %s", order_log.c_str());
+      "%s Enable order by can_id (knee/AK80-64 last): %s", tag, order_log.c_str());
 
     for (size_t i = 0; i < order.size(); ++i) {
       if (i > 0 && startup_stagger_ms_ > 0) {
         maintain_startup_drives(startup_stagger_ms_);
       }
-      startup_one_drive(drives_[order[i]]);
+      DriveChannel & ch = drives_[order[i]];
+      if (was_alive[order[i]]) {
+        reconnect_live_drive(ch);
+      } else {
+        startup_one_drive(ch);
+      }
     }
+  }
 
+  /** Full enable + set-origin retry for any drive that never replied. */
+  void retry_drives_without_feedback(const char * tag)
+  {
     for (auto & ch : drives_) {
       if (!ch.has_feedback) {
         RCLCPP_WARN(
           get_logger(),
-          "[STARTUP] [%s] can_id=%d no MIT feedback yet; retrying enable sequence.",
-          ch.ns.c_str(), ch.can_id);
+          "%s [%s] can_id=%d no MIT feedback yet; retrying enable sequence.",
+          tag, ch.ns.c_str(), ch.can_id);
         startup_one_drive(ch);
       }
       RCLCPP_INFO(
-        get_logger(), "[STARTUP] %s can_id=%d feedback=%s",
-        ch.ns.c_str(), ch.can_id, ch.has_feedback ? "active" : "missing");
+        get_logger(), "%s %s can_id=%d feedback=%s",
+        tag, ch.ns.c_str(), ch.can_id, ch.has_feedback ? "active" : "missing");
     }
-
-    refresh_all_drive_feedback();
   }
 
+  /**
+   * Enable drives in can_id order (AK80/knee last), staggering with MIT holds
+   * so already-enabled drives stay engaged. Dead drives get set-origin; still-alive
+   * drives get enable-only. Retry any drive that never replied, then refresh.
+   */
+  void startup_all_drives()
+  {
+    if (reconnect_in_progress_) {
+      return;
+    }
+    reconnect_in_progress_ = true;
+    comm_fault_checks_armed_ = false;
+
+    std::vector<size_t> dead_indices;
+    std::vector<size_t> alive_indices;
+    const std::vector<char> was_alive = snapshot_drive_liveness(dead_indices, alive_indices);
+    const bool is_reconnect = !alive_indices.empty();
+    const char * tag = is_reconnect ? "[RECONNECT]" : "[STARTUP]";
+
+    if (is_reconnect) {
+      RCLCPP_WARN(
+        get_logger(),
+        "[RECONNECT] Not all motors alive; restarting startup. dead=[%s] alive=[%s]",
+        join_drive_names(dead_indices).c_str(),
+        join_drive_names(alive_indices).c_str());
+    }
+
+    for (size_t i = 0; i < drives_.size(); ++i) {
+      if (!was_alive[i]) {
+        reset_dead_drive_for_reconnect(drives_[i]);
+      }
+    }
+
+    if (bus_warmup_ms_ > 0) {
+      RCLCPP_INFO(
+        get_logger(), "%s Waiting %d ms for %s to settle before enable.",
+        tag, bus_warmup_ms_, can_interface_.c_str());
+      std::this_thread::sleep_for(std::chrono::milliseconds(bus_warmup_ms_));
+    }
+
+    enable_drives_in_can_id_order(was_alive, tag);
+    retry_drives_without_feedback(tag);
+    refresh_all_drive_feedback();
+
+    last_reconnect_time_ = SteadyClock::now();
+    last_alive_check_time_ = last_reconnect_time_;
+    reconnect_in_progress_ = false;
+  }
+
+  /** Wall-timer period in ms; used as the inner poll quantum during startup holds. */
   int service_period_ms() const
   {
     return std::max(1, static_cast<int>(std::ceil(1000.0 / loop_rate_hz_)));
   }
 
+  /** Upper bound used to size the post-startup refresh window. */
   int startup_feedback_poll_ms() const
   {
     return std::max({feedback_timeout_ms_, startup_origin_poll_ms_, feedback_poll_ms_});
   }
 
+  /** Zero-delta MIT with profile Kd; keeps the drive engaged without a ROS command. */
   void send_startup_mit_hold(DriveChannel & ch)
   {
     send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
@@ -644,6 +851,7 @@ private:
     process_pending_rx();
   }
 
+  /** True if a MIT reply arrived within feedback_timeout_ms_. */
   bool feedback_is_fresh(const DriveChannel & ch) const
   {
     if (!ch.has_feedback) {
@@ -654,6 +862,7 @@ private:
     return age_ms <= feedback_timeout_ms_;
   }
 
+  /** Every drive has completed enable and has fresh MIT feedback. */
   bool all_drives_startup_ready() const
   {
     for (const auto & ch : drives_) {
@@ -662,6 +871,48 @@ private:
       }
     }
     return !drives_.empty();
+  }
+
+  /** Every drive has a MIT reply within feedback_timeout_ms_. */
+  bool all_drives_alive() const
+  {
+    for (const auto & ch : drives_) {
+      if (!feedback_is_fresh(ch)) {
+        return false;
+      }
+    }
+    return !drives_.empty();
+  }
+
+  /**
+   * Periodic liveness check. If any drive is stale and cooldown has elapsed,
+   * run the hybrid reconnect sequence (blocks the service timer).
+   */
+  void maybe_reconnect_lost_drives()
+  {
+    if (reconnect_in_progress_ || can_socket_ < 0) {
+      return;
+    }
+
+    const auto now = SteadyClock::now();
+    const auto since_check_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now - last_alive_check_time_).count();
+    if (since_check_ms < alive_check_period_ms_) {
+      return;
+    }
+    last_alive_check_time_ = now;
+
+    if (all_drives_alive()) {
+      return;
+    }
+
+    const auto since_reconnect_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      now - last_reconnect_time_).count();
+    if (since_reconnect_ms < reconnect_cooldown_ms_) {
+      return;
+    }
+
+    startup_all_drives();
   }
 
   void refresh_all_drive_feedback()
@@ -747,6 +998,10 @@ private:
     comm_fault_checks_armed_ = all_initiated;
   }
 
+  /**
+   * Latch a comm fault on first stale timeout. Cleared when a MIT reply arrives.
+   * No-op if the drive never had feedback (startup still in progress).
+   */
   void mark_comm_fault(DriveChannel & ch)
   {
     if (!ch.has_feedback || ch.comm_fault) {
@@ -759,6 +1014,10 @@ private:
       ch.ns.c_str(), ch.can_id, feedback_timeout_ms_);
   }
 
+  /**
+   * One MIT TX for this drive. Priority: soft_mode damping, comm-fault zero-hold,
+   * Kd hold until first feedback, then the latched motor_command (or Kd hold).
+   */
   void service_drive_tx(DriveChannel & ch)
   {
     if (ch.soft_mode) {
@@ -791,6 +1050,10 @@ private:
     send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
   }
 
+  /**
+   * Drain RX, run deferred origin resets, poll for replies, maybe reconnect, then TX.
+   * Comm-fault freshness uses last_feedback_time from this poll, not from TX.
+   */
   void loop_timer_callback()
   {
     if (can_socket_ < 0) {
@@ -802,6 +1065,8 @@ private:
     // Poll before service_drive_tx so freshness reflects replies to recent MIT TX.
     poll_bus_feedback(feedback_poll_ms_);
 
+    maybe_reconnect_lost_drives();
+
     if (!comm_fault_checks_armed_ && all_drives_startup_ready()) {
       comm_fault_checks_armed_ = true;
       RCLCPP_INFO(get_logger(), "[STARTUP] All drives recovered; comm fault checks armed.");
@@ -812,6 +1077,7 @@ private:
     }
   }
 
+  /** Latch the latest command. Ignored in soft_mode (joint is hand-moved). */
   void on_motor_command(
     int can_id, const motor_interfaces::msg::MotorCommand::SharedPtr msg)
   {
@@ -823,6 +1089,10 @@ private:
     ch->has_pending_command = true;
   }
 
+  /**
+   * Rising edge: damp with kSoftModeKd and drop pending commands.
+   * Falling edge: Kd hold now; set-origin is deferred to the timer thread.
+   */
   void on_soft_mode(int can_id, const std_msgs::msg::Bool::SharedPtr msg)
   {
     DriveChannel * ch = find_drive_by_can_id(can_id);
@@ -855,13 +1125,21 @@ private:
   int ak80_enable_settle_ms_{kDefaultAk80EnableSettleMs};
   int startup_origin_poll_ms_{kDefaultStartupOriginPollMs};
   int bus_warmup_ms_{kDefaultBusWarmupMs};
+  int alive_check_period_ms_{kDefaultAliveCheckPeriodMs};
+  int reconnect_cooldown_ms_{kDefaultReconnectCooldownMs};
 
   std::vector<DriveChannel> drives_;
   int can_socket_{-1};
   rclcpp::TimerBase::SharedPtr loop_timer_;
+  // Stay false until every drive has fresh feedback so startup stagger is not
+  // treated as a comm fault.
   bool comm_fault_checks_armed_{false};
+  bool reconnect_in_progress_{false};
+  SteadyTime last_alive_check_time_{};
+  SteadyTime last_reconnect_time_{};
 };
 
+/** Spin the gateway. Constructor failures (params, CAN bind) are fatal. */
 int main(int argc, char ** argv)
 {
   rclcpp::init(argc, argv);

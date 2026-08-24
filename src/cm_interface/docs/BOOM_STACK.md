@@ -100,7 +100,7 @@ Gateway startup logs should show each drive’s `can_id`, enable order, and `MIT
 
 | Node | Role |
 |------|------|
-| `can_gateway_node` | Single CAN socket; MIT TX/RX for all drives; publishes `/<ns>/motor_state` |
+| `can_gateway_node` | Single CAN socket; MIT TX/RX for all drives; publishes `/<ns>/motor_state`; reconnects all drives if any go stale |
 | `motor_unwrapper_node` | Integrates wrapped position → `motor_total_position` |
 | `joint_translator_node` | 200 Hz joint PD → `motor_command` deltas |
 | `boom_joystick_control_node` | Joystick → `joint_despos`, `hold_joint`, `soft_mode` |
@@ -164,8 +164,12 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
 | `gateway_ak80_enable_settle_ms` | 250 | Post-enable wait for AK80-64 knee |
 | `gateway_startup_origin_poll_ms` | 100 | RX poll after set-origin at startup |
 | `gateway_bus_warmup_ms` | 100 | Delay after CAN bind before first enable |
+| `gateway_alive_check_period_ms` | 500 | How often the gateway checks that every drive has fresh MIT feedback |
+| `gateway_reconnect_cooldown_ms` | 2000 | Minimum time between reconnect attempts (avoids spinning while power is off) |
 | `motor_feedback_timeout_ms` | 250 | Stale feedback → comm fault zero-hold |
 | `motor_feedback_poll_ms` | 5 | Blocking RX poll each gateway loop |
+
+If any drive is stale at an alive-check, the gateway **reconnects all motors** (service loop pauses for a few seconds). Dead drives get enable + set-origin; still-alive drives get enable-only. Unwrapper/translator re-latch via `/<ns>/origin_reset` on set-origin.
 
 ### Translator (per namespace)
 
@@ -251,6 +255,7 @@ ros2 launch cm_interface boom_stack.launch.py enable_logging:=true bag_output_di
 | `joint_despos` | `std_msgs/Float32` | Desired joint position (rad) |
 | `hold_joint` | `std_msgs/Bool` | `true` → translator holds |
 | `soft_mode` | `std_msgs/Bool` | `true` → damping-only at motor; off triggers set-origin + despos latch |
+| `origin_reset` | `std_msgs/Bool` | Gateway publishes `true` after set-origin; unwrapper resets total, translator re-latches despos |
 
 Global: `/joy`.
 
@@ -322,9 +327,10 @@ Live error frames: `candump -ta -e can0` (second terminal while running).
 |---------|--------------|------------|
 | `can state BUS-OFF`, all motors comm fault | Host adapter left bus; `restart-ms 0` | `restart-ms 100` on `can0`; check wiring/power; `candump -e can0` |
 | Gateway exits immediately | CAN interface down or wrong name | Check `ip link`; set `can_interface:=...` |
-| `Motor initilization failed, check power and CAN wiring` | No MIT feedback from any drive after startup | Power, CAN bitrate, termination, `can_interface`, drive IDs |
+| `Motor initilization failed, check power and CAN wiring` | No MIT feedback from any drive after startup | Power, CAN bitrate, termination, `can_interface`, drive IDs; gateway will retry after `gateway_reconnect_cooldown_ms` |
 | `Duplicate can_id` fatal | Config error | Fix `BOOM_MOTOR_STACKS` |
-| `comm fault` on one drive | No feedback, wrong ID, cable | Check `can_id`, power, termination |
+| `comm fault` on one drive | No feedback, wrong ID, cable, or motor power loss | Check `can_id`, power, termination; gateway reconnects all drives if the drive stays stale |
+| `[RECONNECT] Not all motors alive` | One or more drives lost MIT feedback | Expected after power/CAN dropout; dead drives get set-origin, live drives enable-only; wait for `All motors successfully initiated` |
 | `comm fault` immediately after `All motors successfully initiated` | Service loop was checking feedback before polling; refresh timestamps aged during a long poll | Rebuild `cm_interface` (gateway polls RX before each service tick; startup ends with a final MIT ping + short poll) |
 | Motor moves but wrong joint | CAN ID collision or mismatch | Verify unique IDs and wiring |
 | No joystick motion on new motor | Namespace lacks `knee`/`wheel`/`hip` | Rename or extend teleop script |

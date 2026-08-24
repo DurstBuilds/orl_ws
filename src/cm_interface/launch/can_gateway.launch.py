@@ -15,6 +15,8 @@ from boom_motor_config import (  # noqa: E402
     DEFAULT_GATEWAY_LOOP_RATE_HZ,
     DEFAULT_GATEWAY_STARTUP_ORIGIN_POLL_MS,
     DEFAULT_GATEWAY_STARTUP_STAGGER_MS,
+    DEFAULT_GATEWAY_ALIVE_CHECK_PERIOD_MS,
+    DEFAULT_GATEWAY_RECONNECT_COOLDOWN_MS,
     DEFAULT_MOTOR_FEEDBACK_POLL_MS,
     DEFAULT_MOTOR_FEEDBACK_TIMEOUT_MS,
     DEFAULT_MOTOR_MODELS,
@@ -66,6 +68,12 @@ def _launch_setup(context, *args, **kwargs):
                 'bus_warmup_ms': int(
                     LaunchConfiguration('bus_warmup_ms').perform(context)
                 ),
+                'alive_check_period_ms': int(
+                    LaunchConfiguration('alive_check_period_ms').perform(context)
+                ),
+                'reconnect_cooldown_ms': int(
+                    LaunchConfiguration('reconnect_cooldown_ms').perform(context)
+                ),
             }],
         ),
     ]
@@ -90,6 +98,12 @@ def generate_launch_description():
             'startup_origin_poll_ms', default_value=DEFAULT_GATEWAY_STARTUP_ORIGIN_POLL_MS
         ),
         DeclareLaunchArgument('bus_warmup_ms', default_value=DEFAULT_GATEWAY_BUS_WARMUP_MS),
+        DeclareLaunchArgument(
+            'alive_check_period_ms', default_value=DEFAULT_GATEWAY_ALIVE_CHECK_PERIOD_MS
+        ),
+        DeclareLaunchArgument(
+            'reconnect_cooldown_ms', default_value=DEFAULT_GATEWAY_RECONNECT_COOLDOWN_MS
+        ),
         DeclareLaunchArgument('namespaces', default_value=DEFAULT_NAMESPACES),
         DeclareLaunchArgument('motor_models', default_value=DEFAULT_MOTOR_MODELS),
         DeclareLaunchArgument('can_ids', default_value=DEFAULT_CAN_IDS),

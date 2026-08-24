@@ -1,9 +1,9 @@
 // motor_unwrapper_node: accumulates unwrapped position from motor_state feedback.
 // Wrapped feedback is in [-pi, pi]; deltas are unwrapped and summed across rotations.
 //
-// No ROS parameters. Subscribes motor_state, soft_mode; publishes motor_total_position.
-// On soft_mode false→true: no change. On true→false: next motor_state resets total to
-// wrapped position (coordinates with gateway set-origin on soft_mode off).
+// Subscribes motor_state, soft_mode, origin_reset; publishes motor_total_position.
+// On soft_mode false→true: no change. On true→false or origin_reset: next motor_state
+// resets total to wrapped position (coordinates with gateway set-origin).
 // kOriginJumpThreshold: large single-step delta resets total (set-origin / glitch).
 // Configurable via origin_jump_threshold (AK80 knee uses a higher default in launch).
 
@@ -51,13 +51,18 @@ public:
       10,
       std::bind(&MotorUnwrapperNode::soft_mode_callback, this, std::placeholders::_1));
 
+    origin_reset_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "origin_reset",
+      10,
+      std::bind(&MotorUnwrapperNode::origin_reset_callback, this, std::placeholders::_1));
+
     publisher_ = create_publisher<motor_interfaces::msg::MotorTotalPosition>(
       "motor_total_position", 10);
 
     RCLCPP_INFO(
       get_logger(),
-      "Subscribed to motor_state and soft_mode; publishing motor_total_position "
-      "(unwrap range [-pi, pi]).");
+      "Subscribed to motor_state, soft_mode, and origin_reset; publishing "
+      "motor_total_position (unwrap range [-pi, pi]).");
   }
 
 private:
@@ -67,6 +72,14 @@ private:
       reset_total_on_next_feedback_ = true;
     }
     soft_mode_ = msg->data;
+  }
+
+  void origin_reset_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data) {
+      return;
+    }
+    reset_total_on_next_feedback_ = true;
   }
 
   void motor_state_callback(const motor_interfaces::msg::MotorState::SharedPtr msg)
@@ -80,7 +93,7 @@ private:
       has_last_ = true;
       RCLCPP_INFO(
         get_logger(),
-        "soft_mode off: reset total position to wrapped %.4f rad",
+        "origin reset: total position set to wrapped %.4f rad",
         new_wrapped);
       publish_total(new_wrapped);
       return;
@@ -124,6 +137,7 @@ private:
 
   rclcpp::Subscription<motor_interfaces::msg::MotorState>::SharedPtr subscription_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr origin_reset_sub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorTotalPosition>::SharedPtr publisher_;
 
   bool has_last_{false};
