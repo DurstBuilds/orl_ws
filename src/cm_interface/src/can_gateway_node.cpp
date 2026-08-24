@@ -15,16 +15,14 @@
 //   alive_check_period_ms  — how often to test that every drive has fresh MIT feedback
 //   reconnect_cooldown_ms  — min time between reconnect attempts (failed init / power off)
 //
-// Startup / reconnect (uniform): enable (0xFC) all drives by can_id (AK80/knee last),
-// wait until every drive has fresh MIT feedback, set-origin all, re-enable all again
-// (feedback != MIT run mode), settle, and publish origin_reset so translators latch
-// despos to curpos.
-// Soft-mode off triggers per-drive set-origin + Kd hold on that drive.
-// loop_timer_callback: drain RX, poll for feedback, maybe reconnect, then MIT TX.
-// Periodic alive check: if any drive is stale, re-init all (service loop blocks).
+// Startup / reconnect: enable (0xFC) all drives by can_id, wait until connected,
+// then run the same structure as the controller set-origin button (soft_mode
+// true → wait → soft_mode false → set-origin+enable → despos=0 + hold_joint).
+// motors_were_down_ stays true until that full sequence succeeds; feedback alone
+// does not clear it or skip reconnect.
+// Soft-mode off (manual or reconnect) triggers per-drive set-origin + enable.
+// loop_timer_callback: drain RX, poll, maybe reconnect while motors_were_down_, MIT TX.
 // Comm-fault uses last_feedback_time from the pre-service poll, not from TX this tick.
-// refresh_all_drive_feedback() pings each drive with MIT holds (enable-only retries)
-// so early-enabled drives are not starved by batch MIT TX on a shared bus.
 
 #include <algorithm>
 #include <cmath>
@@ -54,6 +52,7 @@
 #include "motor_interfaces/msg/motor_command.hpp"
 #include "motor_interfaces/msg/motor_state.hpp"
 #include "std_msgs/msg/bool.hpp"
+#include "std_msgs/msg/float32.hpp"
 
 namespace
 {
@@ -72,6 +71,8 @@ constexpr int kDefaultBusWarmupMs = 100;
 constexpr int kDefaultStartupStaggerMs = 200;
 constexpr int kDefaultAliveCheckPeriodMs = 500;
 constexpr int kDefaultReconnectCooldownMs = 2000;
+// Matches joint_position_sequence set-origin button sleeps.
+constexpr int kSetOriginButtonPhaseMs = 100;
 // Kernel default SO_RCVBUF is too small for a shared bus at 200 Hz × N drives.
 constexpr int kDefaultCanRxBufferBytes = 1 << 20;
 // Wrapped motor position must be within this after set-origin before motor_state is published.
@@ -128,7 +129,7 @@ std::string csv_param_as_string(
  *
  * One raw socket, no per-drive hardware filters. ROS topics are namespaced
  * per drive (`/<ns>/motor_command`, `/<ns>/motor_state`, `/<ns>/soft_mode`,
- * `/<ns>/origin_reset`).
+ * `/<ns>/hold_joint`, `/<ns>/joint_despos`, `/<ns>/origin_reset`).
  * Command callbacks only latch the latest message; TX happens on the wall timer
  * so MIT frames stay paced and origin-reset stays off the subscription thread.
  */
@@ -144,6 +145,9 @@ public:
 
     rclcpp::Publisher<motor_interfaces::msg::MotorState>::SharedPtr state_pub;
     rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr origin_reset_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr soft_mode_pub;
+    rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr hold_joint_pub;
+    rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_despos_pub;
     rclcpp::Subscription<motor_interfaces::msg::MotorCommand>::SharedPtr cmd_sub;
     rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_sub;
 
@@ -261,6 +265,12 @@ public:
         prefix + "/motor_state", 10);
       ch.origin_reset_pub = create_publisher<std_msgs::msg::Bool>(
         prefix + "/origin_reset", 10);
+      ch.soft_mode_pub = create_publisher<std_msgs::msg::Bool>(
+        prefix + "/soft_mode", 10);
+      ch.hold_joint_pub = create_publisher<std_msgs::msg::Bool>(
+        prefix + "/hold_joint", 10);
+      ch.joint_despos_pub = create_publisher<std_msgs::msg::Float32>(
+        prefix + "/joint_despos", 10);
 
       ch.cmd_sub = create_subscription<motor_interfaces::msg::MotorCommand>(
         prefix + "/motor_command",
@@ -756,53 +766,84 @@ private:
     poll_bus_feedback(feedback_poll_ms_);
   }
 
-  /**
-   * After all drives are connected: set-origin each drive, re-enable (0xFC),
-   * settle near zero, then publish origin_reset. Feedback alone is not enough —
-   * set-origin can leave a drive out of MIT run mode.
-   */
-  void set_origin_all_drives(const char * tag)
+  /** Publish Bool on a per-drive topic (soft_mode / hold_joint / origin_reset). */
+  void publish_bool(
+    const rclcpp::Publisher<std_msgs::msg::Bool>::SharedPtr & pub, bool value)
   {
-    RCLCPP_INFO(
-      get_logger(),
-      "%s All motors connected; setting origin on every drive.", tag);
-
-    const std::vector<size_t> order = drive_order_by_can_id();
-    for (size_t i = 0; i < order.size(); ++i) {
-      if (i > 0 && startup_stagger_ms_ > 0) {
-        maintain_startup_drives(startup_stagger_ms_);
-      }
-
-      DriveChannel & ch = drives_[order[i]];
-      ch.suppress_state_publish = true;
-      process_pending_rx();
-      send_set_origin(ch, startup_origin_poll_ms_);
-      send_enable(ch, "post-origin");
-      send_startup_mit_hold(ch);
-      wait_for_post_origin_position(ch);
-      ch.suppress_state_publish = false;
-      publish_cached_state(ch);
-      publish_origin_reset(ch);
+    if (pub == nullptr) {
+      return;
     }
+    std_msgs::msg::Bool msg;
+    msg.data = value;
+    pub->publish(msg);
   }
 
   /**
-   * Always send MIT enable (0xFC) to every drive. Feedback does not imply the
-   * drive is in run/MIT mode after power cycle or set-origin.
+   * Same structure as joint_position_sequence Back button: soft_mode true → wait →
+   * soft_mode false (set-origin+enable) → wait → joint_despos=0 + hold_joint.
+   * Updates gateway soft_mode state directly; publishes for unwrapper/translator/teleop.
    */
-  void reenable_all_drives(const char * tag)
+  void run_set_origin_button_sequence(const char * tag)
   {
     RCLCPP_INFO(
       get_logger(),
-      "%s Sending enable (0xFC) to all drives (feedback != enabled).", tag);
+      "%s Running controller set-origin sequence (soft_mode pulse + despos/hold).",
+      tag);
 
-    const std::vector<size_t> order = drive_order_by_can_id();
-    for (size_t i = 0; i < order.size(); ++i) {
-      if (i > 0 && startup_stagger_ms_ > 0) {
-        maintain_startup_drives(startup_stagger_ms_);
-      }
-      enable_one_drive(drives_[order[i]], "re-enable all");
+    for (auto & ch : drives_) {
+      ch.soft_mode = true;
+      ch.soft_mode_on_position_rad = ch.last_position_rad;
+      ch.has_soft_mode_on_position = ch.has_last_position;
+      ch.has_pending_command = false;
+      send_mit(ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
+      publish_bool(ch.soft_mode_pub, true);
     }
+    maintain_soft_drives(kSetOriginButtonPhaseMs);
+
+    for (auto & ch : drives_) {
+      ch.soft_mode = false;
+      ch.has_pending_command = false;
+      ch.pending_soft_origin_reset = true;
+      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+      publish_bool(ch.soft_mode_pub, false);
+    }
+    process_pending_soft_origin_resets();
+    maintain_startup_drives(kSetOriginButtonPhaseMs);
+
+    for (auto & ch : drives_) {
+      // Post-origin wrap ≈ 0; unwrapper resets total → joint curpos ≈ 0.
+      if (ch.joint_despos_pub != nullptr) {
+        std_msgs::msg::Float32 despos;
+        despos.data = 0.0f;
+        ch.joint_despos_pub->publish(despos);
+      }
+      publish_bool(ch.hold_joint_pub, true);
+    }
+
+    RCLCPP_INFO(
+      get_logger(),
+      "%s Set-origin button sequence complete (despos=0, hold_joint=true).", tag);
+  }
+
+  /** Soft Kd MIT on every enabled drive for duration_ms (set-origin button phase 1). */
+  void maintain_soft_drives(int duration_ms)
+  {
+    if (duration_ms <= 0) {
+      return;
+    }
+
+    const auto deadline = SteadyClock::now() + std::chrono::milliseconds(duration_ms);
+    const int period_ms = service_period_ms();
+    while (rclcpp::ok() && SteadyClock::now() < deadline) {
+      process_pending_rx();
+      for (auto & ch : drives_) {
+        if (ch.startup_enable_done) {
+          send_mit(ch, 0.0f, 0.0f, 0.0f, kSoftModeKd, 0.0f, true);
+        }
+      }
+      poll_bus_feedback(period_ms);
+    }
+    process_pending_rx();
   }
 
   /** Keep MIT holds going until every drive has fresh feedback or timeout. */
@@ -832,8 +873,8 @@ private:
   }
 
   /**
-   * Enable all → wait for fresh feedback → set-origin all → re-enable all →
-   * origin_reset. Skips set-origin if not every drive connects (cooldown then retry).
+   * Enable all → wait for fresh feedback → controller set-origin button sequence.
+   * motors_were_down_ clears only on full success. Feedback alone is not enough.
    */
   void startup_all_drives()
   {
@@ -842,22 +883,16 @@ private:
     }
     reconnect_in_progress_ = true;
     comm_fault_checks_armed_ = false;
+    motors_were_down_ = true;
 
     const std::vector<size_t> missing_before = missing_drive_indices();
-    bool had_any_feedback = false;
-    for (const auto & ch : drives_) {
-      if (ch.has_feedback || ch.startup_enable_done) {
-        had_any_feedback = true;
-        break;
-      }
-    }
-    const bool is_reconnect = had_any_feedback;
+    const bool is_reconnect = startup_succeeded_once_;
     const char * tag = is_reconnect ? "[RECONNECT]" : "[STARTUP]";
 
     if (is_reconnect) {
       RCLCPP_WARN(
         get_logger(),
-        "[RECONNECT] Not all motors alive; re-initializing all drives. missing=[%s]",
+        "[RECONNECT] Motors were down; running full reconnect. missing=[%s]",
         join_drive_names(missing_before).c_str());
     }
 
@@ -879,7 +914,7 @@ private:
     if (!all_connected) {
       RCLCPP_ERROR(
         get_logger(),
-        "%s Not all motors connected; skipping set-origin. Will retry after cooldown.",
+        "%s Not all motors connected; skipping set-origin. motors_were_down stays true.",
         tag);
       last_reconnect_time_ = SteadyClock::now();
       last_alive_check_time_ = last_reconnect_time_;
@@ -887,21 +922,23 @@ private:
       return;
     }
 
-    set_origin_all_drives(tag);
-    // Always re-enable every drive after set-origin; do not skip motors that
-    // still report feedback — they may not be in MIT run mode.
-    reenable_all_drives(tag);
+    run_set_origin_button_sequence(tag);
     const bool all_ready = maintain_until_all_fresh(tag);
 
     if (all_ready) {
-      RCLCPP_INFO(get_logger(), "%s All motors successfully initiated.", tag);
+      motors_were_down_ = false;
+      startup_succeeded_once_ = true;
+      comm_fault_checks_armed_ = true;
+      RCLCPP_INFO(
+        get_logger(),
+        "%s All motors successfully initiated; motors_were_down=false.", tag);
     } else {
       RCLCPP_WARN(
         get_logger(),
-        "%s Post-origin feedback not fresh on all drives; comm fault checks deferred.",
+        "%s Post-origin feedback not fresh; motors_were_down stays true.",
         tag);
+      comm_fault_checks_armed_ = false;
     }
-    comm_fault_checks_armed_ = all_ready;
 
     last_reconnect_time_ = SteadyClock::now();
     last_alive_check_time_ = last_reconnect_time_;
@@ -981,8 +1018,9 @@ private:
   }
 
   /**
-   * Periodic liveness check. If any drive is stale and cooldown has elapsed,
-   * re-initialize all drives (blocks the service timer).
+   * Periodic liveness check. Stale feedback sets motors_were_down_. While that
+   * flag is true, always run full reconnect on cooldown — feedback alone is not
+   * enough to call motors alive again.
    */
   void maybe_reconnect_lost_drives()
   {
@@ -998,7 +1036,16 @@ private:
     }
     last_alive_check_time_ = now;
 
-    if (all_drives_alive()) {
+    if (!all_drives_alive()) {
+      if (!motors_were_down_) {
+        RCLCPP_WARN(
+          get_logger(),
+          "[RECONNECT] Drive feedback lost; motors_were_down=true until full reconnect.");
+      }
+      motors_were_down_ = true;
+    }
+
+    if (!motors_were_down_) {
       return;
     }
 
@@ -1229,6 +1276,10 @@ private:
   // treated as a comm fault.
   bool comm_fault_checks_armed_{false};
   bool reconnect_in_progress_{false};
+  // True until a full enable + set-origin-button sequence succeeds. Feedback
+  // returning alone does not clear this or skip reconnect.
+  bool motors_were_down_{true};
+  bool startup_succeeded_once_{false};
   SteadyTime last_alive_check_time_{};
   SteadyTime last_reconnect_time_{};
 };

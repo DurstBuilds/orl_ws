@@ -100,7 +100,7 @@ Gateway startup logs should show each drive’s `can_id`, enable order, and `MIT
 
 | Node | Role |
 |------|------|
-| `can_gateway_node` | Single CAN socket; MIT TX/RX for all drives; publishes `/<ns>/motor_state`; if any drive goes stale, re-enables all then set-origin all |
+| `can_gateway_node` | Single CAN socket; MIT TX/RX for all drives; if motors go down, full reconnect (enable + set-origin button sequence) until success |
 | `motor_unwrapper_node` | Integrates wrapped position → `motor_total_position` |
 | `joint_translator_node` | 200 Hz joint PD → `motor_command` deltas |
 | `boom_joystick_control_node` | Joystick → `joint_despos`, `hold_joint`, `soft_mode` |
@@ -169,7 +169,7 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
 | `motor_feedback_timeout_ms` | 250 | Stale feedback → comm fault Kd hold (until MIT replies resume) |
 | `motor_feedback_poll_ms` | 5 | Blocking RX poll each gateway loop |
 
-If any drive is stale at an alive-check, the gateway **re-initializes all motors** (service loop pauses for a few seconds): enable all → wait until every drive has fresh feedback → set-origin all → settle → publish `/<ns>/origin_reset` so unwrapper/translator latch despos to curpos. If not all motors connect, set-origin is skipped and the gateway retries after `gateway_reconnect_cooldown_ms`.
+If any drive is stale at an alive-check, the gateway sets `motors_were_down` and **keeps running a full reconnect** on cooldown until that sequence succeeds (feedback alone does not clear the flag). Sequence: enable all → wait until connected → same as controller set-origin button (`soft_mode` true → wait → `soft_mode` false / set-origin+enable → `joint_despos=0` + `hold_joint=true`). If not all motors connect, set-origin is skipped and `motors_were_down` stays true.
 
 ### Translator (per namespace)
 
@@ -331,7 +331,7 @@ Live error frames: `candump -ta -e can0` (second terminal while running).
 | `Duplicate can_id` fatal | Config error | Fix `BOOM_MOTOR_STACKS` |
 | `comm fault` on one drive | No feedback, wrong ID, cable, or motor power loss | Check `can_id`, power, termination; gateway reconnects all drives if the drive stays stale |
 | `motor_command` deltas publish but no motion after reconnect | Drive stuck in comm fault (gateway ignored commands); often after MIT starvation during reinit | Check for `comm fault` logs; soft-mode / set-origin pulse recovers by sending Kd MIT. Rebuild if still sticky after this fix |
-| `[RECONNECT] Not all motors alive` | One or more drives lost MIT feedback | Expected after power/CAN dropout; gateway re-enables all, then set-origin all and latches despos; wait for `All motors successfully initiated` |
+| `[RECONNECT] Motors were down` / `motors_were_down=true` | Feedback lost or init incomplete | Full reconnect keeps running on cooldown until set-origin button sequence succeeds; pressing Back manually does the same soft_mode pulse |
 | `comm fault` immediately after `All motors successfully initiated` | Service loop was checking feedback before polling; refresh timestamps aged during a long poll | Rebuild `cm_interface` (gateway polls RX before each service tick; startup ends with a final MIT ping + short poll) |
 | Motor moves but wrong joint | CAN ID collision or mismatch | Verify unique IDs and wiring |
 | No joystick motion on new motor | Namespace lacks `knee`/`wheel`/`hip` | Rename or extend teleop script |
