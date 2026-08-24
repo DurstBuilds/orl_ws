@@ -166,7 +166,7 @@ After editing, rebuild is **not** required for launch-only changes; re-run the l
 | `gateway_bus_warmup_ms` | 100 | Delay after CAN bind before first enable |
 | `gateway_alive_check_period_ms` | 500 | How often the gateway checks that every drive has fresh MIT feedback |
 | `gateway_reconnect_cooldown_ms` | 2000 | Minimum time between reconnect attempts (avoids spinning while power is off) |
-| `motor_feedback_timeout_ms` | 250 | Stale feedback → comm fault zero-hold |
+| `motor_feedback_timeout_ms` | 250 | Stale feedback → comm fault Kd hold (until MIT replies resume) |
 | `motor_feedback_poll_ms` | 5 | Blocking RX poll each gateway loop |
 
 If any drive is stale at an alive-check, the gateway **re-initializes all motors** (service loop pauses for a few seconds): enable all → wait until every drive has fresh feedback → set-origin all → settle → publish `/<ns>/origin_reset` so unwrapper/translator latch despos to curpos. If not all motors connect, set-origin is skipped and the gateway retries after `gateway_reconnect_cooldown_ms`.
@@ -330,6 +330,7 @@ Live error frames: `candump -ta -e can0` (second terminal while running).
 | `Motor initilization failed, check power and CAN wiring` | No MIT feedback from any drive after startup | Power, CAN bitrate, termination, `can_interface`, drive IDs; gateway will retry after `gateway_reconnect_cooldown_ms` |
 | `Duplicate can_id` fatal | Config error | Fix `BOOM_MOTOR_STACKS` |
 | `comm fault` on one drive | No feedback, wrong ID, cable, or motor power loss | Check `can_id`, power, termination; gateway reconnects all drives if the drive stays stale |
+| `motor_command` deltas publish but no motion after reconnect | Drive stuck in comm fault (gateway ignored commands); often after MIT starvation during reinit | Check for `comm fault` logs; soft-mode / set-origin pulse recovers by sending Kd MIT. Rebuild if still sticky after this fix |
 | `[RECONNECT] Not all motors alive` | One or more drives lost MIT feedback | Expected after power/CAN dropout; gateway re-enables all, then set-origin all and latches despos; wait for `All motors successfully initiated` |
 | `comm fault` immediately after `All motors successfully initiated` | Service loop was checking feedback before polling; refresh timestamps aged during a long poll | Rebuild `cm_interface` (gateway polls RX before each service tick; startup ends with a final MIT ping + short poll) |
 | Motor moves but wrong joint | CAN ID collision or mismatch | Verify unique IDs and wiring |

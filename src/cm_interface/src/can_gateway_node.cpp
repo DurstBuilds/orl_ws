@@ -5,7 +5,7 @@
 //   can_interface          — SocketCAN device (e.g. can0)
 //   namespaces,motor_models,can_ids — comma-separated lists, same length
 //   loop_rate_hz           — TX/RX service rate (default 200)
-//   feedback_timeout_ms    — stale feedback → comm fault zero-hold
+//   feedback_timeout_ms    — stale feedback → comm fault Kd hold until recovery
 //   feedback_poll_ms       — blocking RX poll each loop iteration
 //   startup_stagger_ms     — delay between per-drive enable sequences
 //   enable_settle_ms       — post-enable wait (non-AK80 drives)
@@ -152,7 +152,7 @@ public:
 
     SteadyTime last_feedback_time{};
     bool has_feedback{false};
-    // Sticky until a MIT reply arrives; TX becomes a zero hold.
+    // Sticky until a MIT reply arrives; TX becomes a Kd hold (not user commands).
     bool comm_fault{false};
     float last_position_rad{0.0f};
     bool has_last_position{false};
@@ -605,8 +605,8 @@ private:
   }
 
   /**
-   * After 0xFE the encoder wrap is not instant. Hold with profile Kd until
-   * |position| is within kPostOriginPositionTolRad, or warn and continue.
+   * After 0xFE the encoder wrap is not instant. Hold every enabled drive with
+   * profile Kd (siblings must not starve) until |position| is within tolerance.
    */
   bool wait_for_post_origin_position(DriveChannel & ch)
   {
@@ -617,7 +617,11 @@ private:
     const int period_ms = service_period_ms();
 
     while (rclcpp::ok() && SteadyClock::now() < deadline) {
-      send_startup_mit_hold(ch);
+      for (auto & other : drives_) {
+        if (other.startup_enable_done) {
+          send_startup_mit_hold(other);
+        }
+      }
       poll_bus_feedback(period_ms);
       if (ch.has_last_position &&
         std::fabs(ch.last_position_rad) <= kPostOriginPositionTolRad)
@@ -638,16 +642,19 @@ private:
     return false;
   }
 
-  /** Enable → settle → MIT hold. No set-origin (origin is a separate phase). */
+  /** Enable → settle with MIT holds on all enabled drives. No set-origin. */
   void enable_one_drive(DriveChannel & ch, const char * phase = nullptr)
   {
     const int settle_ms = enable_settle_ms_for(ch);
     send_enable(ch, phase);
-    std::this_thread::sleep_for(std::chrono::milliseconds(settle_ms));
+    // Mark done before settle so maintain_startup_drives includes this drive.
+    ch.startup_enable_done = true;
+    if (settle_ms > 0) {
+      maintain_startup_drives(settle_ms);
+    }
     process_pending_rx();
     send_startup_mit_hold(ch);
     poll_bus_feedback(feedback_poll_ms_);
-    ch.startup_enable_done = true;
   }
 
   /** Clear runtime state so a drive is re-enabled from scratch. */
@@ -743,7 +750,7 @@ private:
 
   /**
    * After all drives are connected: set-origin each drive, settle near zero,
-   * publish origin_reset so unwrapper/translator latch despos to curpos.
+   * then publish origin_reset so unwrapper/translator latch on the near-zero sample.
    */
   void set_origin_all_drives(const char * tag)
   {
@@ -761,12 +768,38 @@ private:
       ch.suppress_state_publish = true;
       process_pending_rx();
       send_set_origin(ch, startup_origin_poll_ms_);
-      publish_origin_reset(ch);
       send_startup_mit_hold(ch);
       wait_for_post_origin_position(ch);
       ch.suppress_state_publish = false;
       publish_cached_state(ch);
+      publish_origin_reset(ch);
     }
+  }
+
+  /** Keep MIT holds going until every drive has fresh feedback or timeout. */
+  bool maintain_until_all_fresh(const char * tag)
+  {
+    const int max_ms = std::max(
+      feedback_timeout_ms_ * 2,
+      startup_feedback_poll_ms() * static_cast<int>(drives_.size()));
+    const auto deadline = SteadyClock::now() + std::chrono::milliseconds(max_ms);
+    const int period_ms = service_period_ms();
+
+    while (rclcpp::ok() && SteadyClock::now() < deadline) {
+      if (all_drives_startup_ready()) {
+        return true;
+      }
+      maintain_startup_drives(period_ms);
+    }
+
+    if (!all_drives_startup_ready()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%s Timed out waiting for fresh feedback on all drives after set-origin.",
+        tag);
+      return false;
+    }
+    return true;
   }
 
   /**
@@ -826,9 +859,8 @@ private:
     }
 
     set_origin_all_drives(tag);
-    maintain_startup_drives(feedback_timeout_ms_);
+    const bool all_ready = maintain_until_all_fresh(tag);
 
-    const bool all_ready = all_drives_startup_ready();
     if (all_ready) {
       RCLCPP_INFO(get_logger(), "%s All motors successfully initiated.", tag);
     } else {
@@ -1043,13 +1075,14 @@ private:
     ch.comm_fault = true;
     RCLCPP_ERROR(
       get_logger(),
-      "[%s] can_id=%d comm fault: no fresh MIT feedback for %d ms; zero hold",
+      "[%s] can_id=%d comm fault: no fresh MIT feedback for %d ms; Kd hold until recovery",
       ch.ns.c_str(), ch.can_id, feedback_timeout_ms_);
   }
 
   /**
-   * One MIT TX for this drive. Priority: soft_mode damping, comm-fault zero-hold,
-   * Kd hold until first feedback, then the latched motor_command (or Kd hold).
+   * One MIT TX for this drive. Priority: soft_mode damping, comm-fault Kd hold
+   * (recoverable; kp=kd=0 does not elicit replies), Kd hold until first feedback,
+   * then the latched motor_command (or Kd hold).
    */
   void service_drive_tx(DriveChannel & ch)
   {
@@ -1059,18 +1092,18 @@ private:
     }
 
     if (ch.comm_fault) {
-      send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
+      send_startup_mit_hold(ch);
       return;
     }
 
     if (comm_fault_checks_armed_ && ch.has_feedback && !feedback_is_fresh(ch)) {
       mark_comm_fault(ch);
-      send_mit(ch, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, true);
+      send_startup_mit_hold(ch);
       return;
     }
 
     if (!ch.has_feedback) {
-      send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+      send_startup_mit_hold(ch);
       return;
     }
 
@@ -1080,7 +1113,7 @@ private:
       return;
     }
 
-    send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
+    send_startup_mit_hold(ch);
   }
 
   /**
