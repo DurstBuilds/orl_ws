@@ -15,9 +15,10 @@
 //   alive_check_period_ms  — how often to test that every drive has fresh MIT feedback
 //   reconnect_cooldown_ms  — min time between reconnect attempts (failed init / power off)
 //
-// Startup / reconnect (uniform): enable all drives by can_id (AK80/knee last),
-// wait until every drive has fresh MIT feedback, then set-origin all, settle,
-// and publish origin_reset so translators latch despos to curpos.
+// Startup / reconnect (uniform): enable (0xFC) all drives by can_id (AK80/knee last),
+// wait until every drive has fresh MIT feedback, set-origin all, re-enable all again
+// (feedback != MIT run mode), settle, and publish origin_reset so translators latch
+// despos to curpos.
 // Soft-mode off triggers per-drive set-origin + Kd hold on that drive.
 // loop_timer_callback: drain RX, poll for feedback, maybe reconnect, then MIT TX.
 // Periodic alive check: if any drive is stale, re-init all (service loop blocks).
@@ -558,6 +559,8 @@ private:
       ch.suppress_state_publish = true;
       process_pending_rx();
       send_set_origin(ch, startup_origin_poll_ms_);
+      // 0xFE does not guarantee MIT run mode; re-enable even if feedback continues.
+      send_enable(ch, "soft_mode off");
       send_mit(ch, 0.0f, 0.0f, 0.0f, ch.profile.mit_kd, 0.0f, true);
       wait_for_post_origin_position(ch);
       ch.suppress_state_publish = false;
@@ -731,7 +734,7 @@ private:
     }
   }
 
-  /** Enable-only retry for any drive that never replied. */
+  /** Enable-only retry: always re-send 0xFC; feedback does not imply run mode. */
   void retry_drives_without_feedback(const char * tag)
   {
     for (auto & ch : drives_) {
@@ -741,16 +744,22 @@ private:
           "%s [%s] can_id=%d no MIT feedback yet; retrying enable.",
           tag, ch.ns.c_str(), ch.can_id);
         enable_one_drive(ch, "retry");
+      } else {
+        // Still re-enable: a drive can reply while not accepting MIT position cmds.
+        send_enable(ch, "feedback present; force enable");
+        send_startup_mit_hold(ch);
       }
       RCLCPP_INFO(
         get_logger(), "%s %s can_id=%d feedback=%s",
         tag, ch.ns.c_str(), ch.can_id, ch.has_feedback ? "active" : "missing");
     }
+    poll_bus_feedback(feedback_poll_ms_);
   }
 
   /**
-   * After all drives are connected: set-origin each drive, settle near zero,
-   * then publish origin_reset so unwrapper/translator latch on the near-zero sample.
+   * After all drives are connected: set-origin each drive, re-enable (0xFC),
+   * settle near zero, then publish origin_reset. Feedback alone is not enough —
+   * set-origin can leave a drive out of MIT run mode.
    */
   void set_origin_all_drives(const char * tag)
   {
@@ -768,11 +777,31 @@ private:
       ch.suppress_state_publish = true;
       process_pending_rx();
       send_set_origin(ch, startup_origin_poll_ms_);
+      send_enable(ch, "post-origin");
       send_startup_mit_hold(ch);
       wait_for_post_origin_position(ch);
       ch.suppress_state_publish = false;
       publish_cached_state(ch);
       publish_origin_reset(ch);
+    }
+  }
+
+  /**
+   * Always send MIT enable (0xFC) to every drive. Feedback does not imply the
+   * drive is in run/MIT mode after power cycle or set-origin.
+   */
+  void reenable_all_drives(const char * tag)
+  {
+    RCLCPP_INFO(
+      get_logger(),
+      "%s Sending enable (0xFC) to all drives (feedback != enabled).", tag);
+
+    const std::vector<size_t> order = drive_order_by_can_id();
+    for (size_t i = 0; i < order.size(); ++i) {
+      if (i > 0 && startup_stagger_ms_ > 0) {
+        maintain_startup_drives(startup_stagger_ms_);
+      }
+      enable_one_drive(drives_[order[i]], "re-enable all");
     }
   }
 
@@ -803,8 +832,8 @@ private:
   }
 
   /**
-   * Enable all → wait for fresh feedback → set-origin all → origin_reset.
-   * Skips set-origin if not every drive connects (cooldown then retry).
+   * Enable all → wait for fresh feedback → set-origin all → re-enable all →
+   * origin_reset. Skips set-origin if not every drive connects (cooldown then retry).
    */
   void startup_all_drives()
   {
@@ -859,6 +888,9 @@ private:
     }
 
     set_origin_all_drives(tag);
+    // Always re-enable every drive after set-origin; do not skip motors that
+    // still report feedback — they may not be in MIT run mode.
+    reenable_all_drives(tag);
     const bool all_ready = maintain_until_all_fresh(tag);
 
     if (all_ready) {
@@ -1010,15 +1042,11 @@ private:
     process_pending_rx();
 
     if (!all_drives_startup_ready()) {
+      RCLCPP_WARN(
+        get_logger(),
+        "%s Not all drives fresh after refresh; re-enabling every drive.", tag);
       for (auto & ch : drives_) {
-        if (!ch.has_feedback || !feedback_is_fresh(ch)) {
-          RCLCPP_WARN(
-            get_logger(),
-            "%s [%s] can_id=%d %s after refresh; retrying enable.",
-            tag, ch.ns.c_str(), ch.can_id,
-            ch.has_feedback ? "feedback still stale" : "no MIT feedback");
-          enable_one_drive(ch, "refresh retry");
-        }
+        enable_one_drive(ch, "refresh re-enable all");
       }
       maintain_startup_drives(feedback_timeout_ms_ * 2);
     }
