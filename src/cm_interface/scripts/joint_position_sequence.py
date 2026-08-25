@@ -2,7 +2,8 @@
 """Run preset joint_despos waypoints on joystick button press (default: Start / button 7).
 
 Loads waypoints from YAML (positions in degrees). For each waypoint: command poses,
-wait until joint_curpos settles within tolerance, then optional delay_sec.
+wait until joint_curpos settles within tolerance (skipped for motors with kp=0),
+then optional delay_sec.
 Publishes /joint_sequence/active while running so boom_joystick_control pauses teleop.
 
 D-pad axis scrolls through presets; back button sets origin on all origin_namespaces.
@@ -394,6 +395,7 @@ class JointPositionSequence(Node):
         self._prev_dpad_direction = 0
         self._sequence_lock = threading.Lock()
         self._sequence_thread: Optional[threading.Thread] = None
+        self._active_kp: dict[str, float] = {}
 
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_timer(1.0 / active_publish_hz, self._active_timer_callback)
@@ -566,6 +568,7 @@ class JointPositionSequence(Node):
             )
         if command.kp is not None:
             handle.publish_sequence_mit_kp(command.kp)
+            self._active_kp[namespace] = command.kp
             published = True
             self.get_logger().info(f'Waypoint kp for {namespace}: {command.kp:.3f}')
         if command.kd is not None:
@@ -597,6 +600,19 @@ class JointPositionSequence(Node):
             handle.publish_hold_joint(False)
             handle.publish_despos_rad(target_rad)
         return targets_rad, overridden
+
+    def _settle_targets(self, targets_rad: dict[str, float]) -> dict[str, float]:
+        """Keep motors expected to track position. Effective kp of 0 is excluded."""
+        settle: dict[str, float] = {}
+        skipped: list[str] = []
+        for namespace, target_rad in targets_rad.items():
+            if self._active_kp.get(namespace) == 0.0:
+                skipped.append(namespace)
+                continue
+            settle[namespace] = target_rad
+        if skipped:
+            self.get_logger().info(f'Skipping settle for kp=0: {", ".join(skipped)}')
+        return settle
 
     def _all_settled(self, targets_rad: dict[str, float]) -> bool:
         for namespace, target_rad in targets_rad.items():
@@ -674,6 +690,7 @@ class JointPositionSequence(Node):
         self._set_active(True)
         self.get_logger().info(f"Joint sequence started: {self._config.name}")
         applied_overrides: set[str] = set()
+        self._active_kp = {}
 
         try:
             if self._any_soft_mode():
@@ -695,10 +712,16 @@ class JointPositionSequence(Node):
                     if not targets_rad:
                         continue
 
-                    if not self._wait_for_settle(targets_rad, index + 1):
-                        if self._abort_requested:
-                            self.get_logger().info('Sequence aborted.')
-                        return
+                    settle_targets = self._settle_targets(targets_rad)
+                    if settle_targets:
+                        if not self._wait_for_settle(settle_targets, index + 1):
+                            if self._abort_requested:
+                                self.get_logger().info('Sequence aborted.')
+                            return
+                    else:
+                        self.get_logger().info(
+                            f'Waypoint {index + 1}: no settle required (kp=0)'
+                        )
 
                     if waypoint.delay_sec > 0.0:
                         delay_end = time.monotonic() + waypoint.delay_sec
