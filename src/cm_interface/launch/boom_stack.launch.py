@@ -23,6 +23,8 @@ if str(_launch_dir) not in sys.path:
 from boom_motor_config import (  # noqa: E402
     BOOM_MOTOR_STACKS,
     DEFAULT_CAN_IDS,
+    DEFAULT_GATEWAY_ALIVE_CHECK_PERIOD_MS,
+    DEFAULT_GATEWAY_RECONNECT_COOLDOWN_MS,
     DEFAULT_MOTOR_MODELS,
     DEFAULT_NAMESPACES,
     DEFAULT_NAMESPACE_GEAR_RATIOS,
@@ -270,6 +272,12 @@ def _launch_setup(context, *args, **kwargs):
                     'bus_warmup_ms': ParameterValue(
                         LaunchConfiguration('gateway_bus_warmup_ms'), value_type=int
                     ),
+                    'alive_check_period_ms': ParameterValue(
+                        LaunchConfiguration('gateway_alive_check_period_ms'), value_type=int
+                    ),
+                    'reconnect_cooldown_ms': ParameterValue(
+                        LaunchConfiguration('gateway_reconnect_cooldown_ms'), value_type=int
+                    ),
                 }],
             )
         )
@@ -465,6 +473,16 @@ def generate_launch_description():
             'gateway_bus_warmup_ms',
             default_value='100',
             description='Delay after CAN bind before first enable (ms).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_alive_check_period_ms',
+            default_value=DEFAULT_GATEWAY_ALIVE_CHECK_PERIOD_MS,
+            description='How often can_gateway_node checks that every drive has fresh MIT feedback (ms).',
+        ),
+        DeclareLaunchArgument(
+            'gateway_reconnect_cooldown_ms',
+            default_value=DEFAULT_GATEWAY_RECONNECT_COOLDOWN_MS,
+            description='Minimum time between motor reconnect attempts (ms).',
         ),
         DeclareLaunchArgument(
             'motor_tx_rate_hz',

@@ -15,11 +15,12 @@
 //   mit_kp, mit_kd         — override profile MIT gains on motor_command
 //
 // Subscribes (relative to namespace): motor_total_position, joint_despos,
-// soft_mode, hold_joint, sequence_omega_max. Publishes joint_curpos, motor_command.
+// soft_mode, origin_reset, hold_joint, sequence_omega_max. Publishes joint_curpos,
+// motor_command.
 // sequence_omega_max (motor rad/s): > 0 overrides omega_max during joint sequences;
 // <= 0 restores the launch-time baseline.
-// Soft mode: stops publishing motor_command. Post-soft latch waits for unwrapper
-// reset before tracking joint_despos again.
+// Soft mode: stops publishing motor_command. Post-soft / origin_reset latch waits
+// for unwrapper reset before tracking joint_despos again.
 
 #include <cmath>
 #include <mutex>
@@ -126,6 +127,11 @@ public:
       "soft_mode",
       10,
       std::bind(&JointTranslatorNode::soft_mode_callback, this, std::placeholders::_1));
+
+    origin_reset_sub_ = create_subscription<std_msgs::msg::Bool>(
+      "origin_reset",
+      10,
+      std::bind(&JointTranslatorNode::origin_reset_callback, this, std::placeholders::_1));
 
     hold_joint_sub_ = create_subscription<std_msgs::msg::Bool>(
       "hold_joint",
@@ -242,6 +248,7 @@ private:
           joint_despos_ = clamp_joint_despos(joint_curpos);
           has_joint_despos_ = true;
           has_latched_startup_despos_ = true;
+          awaiting_post_soft_latch_ = false;
           RCLCPP_INFO(
             get_logger(),
             "startup: latched joint_despos=%.4f at current position",
@@ -331,6 +338,16 @@ private:
       }
       RCLCPP_INFO(get_logger(), "soft_mode=%s", soft_mode_ ? "true" : "false");
     }
+  }
+
+  void origin_reset_callback(const std_msgs::msg::Bool::SharedPtr msg)
+  {
+    if (!msg->data) {
+      return;
+    }
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    awaiting_post_soft_latch_ = true;
+    RCLCPP_INFO(get_logger(), "origin_reset: awaiting despos latch at current position");
   }
 
   void hold_joint_callback(const std_msgs::msg::Bool::SharedPtr msg)
@@ -571,6 +588,7 @@ private:
   rclcpp::Subscription<motor_interfaces::msg::MotorTotalPosition>::SharedPtr motor_total_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr joint_despos_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr soft_mode_sub_;
+  rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr origin_reset_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sequence_omega_max_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
