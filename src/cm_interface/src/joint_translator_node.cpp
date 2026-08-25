@@ -12,7 +12,7 @@
 //   motor_error_tolerance  — motor-space goal/hold tolerance (rad)
 //   joint_angle_limit_deg  — 0 disables; else clamp ±limit in joint space
 //   omega_max              — "auto" or max motor speed (rad/s) for delta cap
-//   mit_kp, mit_kd         — override profile MIT gains on motor_command
+//   mit_kp, mit_kd         — MIT gains on motor_command (runtime-settable; baseline)
 //
 // Subscribes (relative to namespace): motor_total_position, joint_despos,
 // soft_mode, origin_reset, hold_joint, sequence_omega_max, sequence_mit_kp,
@@ -20,7 +20,8 @@
 // sequence_omega_max (motor rad/s): > 0 overrides omega_max during joint sequences;
 // <= 0 restores the launch-time baseline.
 // sequence_mit_kp / sequence_mit_kd: >= 0 overrides MIT gains on motor_command;
-// < 0 restores launch-time baselines (0 is a valid gain, so restore is negative).
+// < 0 restores mit_kp/mit_kd parameter baselines (0 is a valid gain, so restore is
+// negative). ros2 param set mit_kp/mit_kd updates live gains and those baselines.
 // Soft mode: stops publishing motor_command. Post-soft / origin_reset latch waits
 // for unwrapper reset before tracking joint_despos again.
 
@@ -236,6 +237,27 @@ private:
           result.reason = "omega_max must be a positive number";
           return result;
         }
+      } else if (param.get_name() == "mit_kp") {
+        const double value = param.as_double();
+        if (value < 0.0) {
+          result.successful = false;
+          result.reason = "mit_kp must be >= 0";
+          return result;
+        }
+        mit_kp_ = value;
+        baseline_mit_kp_ = value;
+        RCLCPP_INFO(get_logger(), "mit_kp=%.3f (baseline updated)", mit_kp_);
+      } else if (param.get_name() == "mit_kd") {
+        const double value = param.as_double();
+        if (value < 0.0) {
+          result.successful = false;
+          result.reason = "mit_kd must be >= 0";
+          return result;
+        }
+        mit_kd_ = static_cast<double>(
+          clamp(static_cast<float>(value), 0.0f, kMitKdMax));
+        baseline_mit_kd_ = mit_kd_;
+        RCLCPP_INFO(get_logger(), "mit_kd=%.3f (baseline updated)", mit_kd_);
       }
     }
     return result;
