@@ -6,7 +6,7 @@ wait until joint_curpos settles within tolerance, then optional delay_sec.
 Publishes /joint_sequence/active while running so boom_joystick_control pauses teleop.
 
 D-pad axis scrolls through presets; back button sets origin on all origin_namespaces.
-Per-preset omega_max overrides joint_translator speed caps during sequence execution.
+Per-waypoint omega_max / kp / kd override joint_translator speed caps and MIT gains.
 
 TWEAK controller mapping in module constants below (not launch parameters).
 """
@@ -31,6 +31,9 @@ BACK_BUTTON_INDEX = 6
 DPAD_VERTICAL_AXIS = 7
 DPAD_AXIS_THRESHOLD = 0.5
 ORIGIN_NAMESPACES = ''  # comma-separated; empty = all namespaces from presets
+WAYPOINT_RESERVED_KEYS = frozenset({'delay_sec'})
+MOTOR_WAYPOINT_KEYS = frozenset({'position', 'omega_max', 'kp', 'kd'})
+SEQUENCE_GAIN_RESTORE = -1.0
 
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
@@ -49,9 +52,19 @@ def parse_namespace_list(param: str) -> list[str]:
 
 
 @dataclass
+class MotorWaypoint:
+    """Per-motor command at one waypoint. Optional fields persist until changed."""
+
+    position_deg: float
+    omega_max: Optional[float] = None
+    kp: Optional[float] = None
+    kd: Optional[float] = None
+
+
+@dataclass
 class Waypoint:
     delay_sec: float
-    positions_deg: dict[str, float] = field(default_factory=dict)
+    motors: dict[str, MotorWaypoint] = field(default_factory=dict)
 
 
 @dataclass
@@ -60,12 +73,56 @@ class SequenceConfig:
     position_tolerance_deg: float
     settle_timeout_sec: float
     waypoints: list[Waypoint]
-    omega_max: dict[str, float] = field(default_factory=dict)
+
+
+def _optional_non_negative(raw: dict, key: str, *, source: str) -> Optional[float]:
+    """Parse an optional numeric field that must be >= 0 when present."""
+    if key not in raw or raw[key] is None:
+        return None
+    value = float(raw[key])
+    if value < 0.0:
+        raise ValueError(f'{source}.{key} must be >= 0')
+    return value
+
+
+def _parse_motor_waypoint(raw: object, *, source: str) -> MotorWaypoint:
+    """Parse a named motor block: required position, optional omega_max/kp/kd."""
+    if not isinstance(raw, dict):
+        raise ValueError(
+            f'{source} must be a mapping with position and optional omega_max, kp, kd')
+
+    unknown = set(raw) - MOTOR_WAYPOINT_KEYS
+    if unknown:
+        keys = ', '.join(sorted(str(key) for key in unknown))
+        raise ValueError(f'{source} has unknown keys: {keys}')
+
+    if 'position' not in raw or raw['position'] is None:
+        raise ValueError(f'{source} must contain position')
+
+    omega_max: Optional[float] = None
+    if 'omega_max' in raw and raw['omega_max'] is not None:
+        omega_max = float(raw['omega_max'])
+        if omega_max <= 0.0:
+            raise ValueError(f'{source}.omega_max must be > 0')
+
+    return MotorWaypoint(
+        position_deg=float(raw['position']),
+        omega_max=omega_max,
+        kp=_optional_non_negative(raw, 'kp', source=source),
+        kd=_optional_non_negative(raw, 'kd', source=source),
+    )
 
 
 def _parse_sequence_config(raw: dict, *, source: str, name: str) -> SequenceConfig:
+    """Parse one preset: waypoints are delay_sec plus named motor blocks."""
     if not isinstance(raw, dict):
         raise ValueError(f'{source} must be a mapping')
+
+    if 'omega_max' in raw:
+        raise ValueError(
+            f'{source}.omega_max is no longer a preset-level field. '
+            'Set omega_max on each waypoint motor block '
+            '(position, optional omega_max, kp, kd).')
 
     tolerance_deg = float(raw.get('position_tolerance_deg', 2.0))
     settle_timeout_sec = float(raw.get('settle_timeout_sec', 30.0))
@@ -73,17 +130,6 @@ def _parse_sequence_config(raw: dict, *, source: str, name: str) -> SequenceConf
         raise ValueError(f'{source}.position_tolerance_deg must be > 0')
     if settle_timeout_sec <= 0.0:
         raise ValueError(f'{source}.settle_timeout_sec must be > 0')
-
-    omega_max: dict[str, float] = {}
-    omega_raw = raw.get('omega_max')
-    if omega_raw is not None:
-        if not isinstance(omega_raw, dict):
-            raise ValueError(f'{source}.omega_max must be a mapping')
-        for ns, value in omega_raw.items():
-            omega = float(value)
-            if omega <= 0.0:
-                raise ValueError(f'{source}.omega_max[{ns}] must be > 0')
-            omega_max[str(ns).strip()] = omega
 
     waypoints_raw = raw.get('waypoints')
     if not isinstance(waypoints_raw, list) or not waypoints_raw:
@@ -93,22 +139,35 @@ def _parse_sequence_config(raw: dict, *, source: str, name: str) -> SequenceConf
     for index, entry in enumerate(waypoints_raw):
         if not isinstance(entry, dict):
             raise ValueError(f'{source}.waypoints[{index}] must be a mapping')
+        if 'positions' in entry:
+            raise ValueError(
+                f'{source}.waypoints[{index}].positions is no longer supported. '
+                'Use named motor blocks with position and optional omega_max, kp, kd.')
         delay_sec = float(entry.get('delay_sec', 0.0))
         if delay_sec < 0.0:
             raise ValueError(f'{source}.waypoints[{index}].delay_sec must be >= 0')
-        positions_raw = entry.get('positions')
-        if not isinstance(positions_raw, dict) or not positions_raw:
+
+        motors: dict[str, MotorWaypoint] = {}
+        for key, value in entry.items():
+            if key in WAYPOINT_RESERVED_KEYS:
+                continue
+            namespace = str(key).strip()
+            if not namespace:
+                raise ValueError(
+                    f'{source}.waypoints[{index}] motor namespace must be non-empty')
+            motors[namespace] = _parse_motor_waypoint(
+                value, source=f'{source}.waypoints[{index}].{namespace}')
+
+        if not motors:
             raise ValueError(
-                f'{source}.waypoints[{index}].positions must be a non-empty mapping')
-        positions_deg = {str(ns).strip(): float(deg) for ns, deg in positions_raw.items()}
-        waypoints.append(Waypoint(delay_sec=delay_sec, positions_deg=positions_deg))
+                f'{source}.waypoints[{index}] must contain at least one motor block')
+        waypoints.append(Waypoint(delay_sec=delay_sec, motors=motors))
 
     return SequenceConfig(
         name=name,
         position_tolerance_deg=tolerance_deg,
         settle_timeout_sec=settle_timeout_sec,
         waypoints=waypoints,
-        omega_max=omega_max,
     )
 
 
@@ -175,7 +234,7 @@ def collect_namespaces_from_configs(configs: dict[str, SequenceConfig]) -> list[
     seen: set[str] = set()
     for config in configs.values():
         for waypoint in config.waypoints:
-            for ns in waypoint.positions_deg:
+            for ns in waypoint.motors:
                 if ns not in seen:
                     seen.add(ns)
                     namespaces.append(ns)
@@ -194,6 +253,12 @@ class NamespaceHandle:
         self.soft_mode_publisher = node.create_publisher(Bool, f'{prefix}/soft_mode', 10)
         self.sequence_omega_max_publisher = node.create_publisher(
             Float32, f'{prefix}/sequence_omega_max', 10
+        )
+        self.sequence_mit_kp_publisher = node.create_publisher(
+            Float32, f'{prefix}/sequence_mit_kp', 10
+        )
+        self.sequence_mit_kd_publisher = node.create_publisher(
+            Float32, f'{prefix}/sequence_mit_kd', 10
         )
         self._lock = threading.Lock()
         self.curpos_rad = 0.0
@@ -240,6 +305,16 @@ class NamespaceHandle:
         msg = Float32()
         msg.data = float(omega_max)
         self.sequence_omega_max_publisher.publish(msg)
+
+    def publish_sequence_mit_kp(self, kp: float) -> None:
+        msg = Float32()
+        msg.data = float(kp)
+        self.sequence_mit_kp_publisher.publish(msg)
+
+    def publish_sequence_mit_kd(self, kd: float) -> None:
+        msg = Float32()
+        msg.data = float(kd)
+        self.sequence_mit_kd_publisher.publish(msg)
 
 
 class JointPositionSequence(Node):
@@ -452,27 +527,16 @@ class JointPositionSequence(Node):
             f'Set origin at current position for: {", ".join(self._origin_namespaces)}'
         )
 
-    def _apply_preset_omega_max(self) -> set[str]:
-        applied: set[str] = set()
-        for namespace, omega in self._config.omega_max.items():
-            handle = self._handles.get(namespace)
-            if handle is None:
-                self.get_logger().warn(f'No handle for omega_max namespace: {namespace}')
-                continue
-            handle.publish_sequence_omega_max(omega)
-            applied.add(namespace)
-            self.get_logger().info(
-                f'Sequence omega_max for {namespace}: {omega:.3f} motor rad/s'
-            )
-        return applied
-
-    def _restore_omega_max(self, namespaces: set[str]) -> None:
+    def _restore_sequence_overrides(self, namespaces: set[str]) -> None:
+        """Restore translator baselines for any namespace that received an override."""
         for namespace in namespaces:
             handle = self._handles.get(namespace)
             if handle is None:
                 continue
             handle.publish_sequence_omega_max(0.0)
-            self.get_logger().info(f'Restored omega_max for {namespace}')
+            handle.publish_sequence_mit_kp(SEQUENCE_GAIN_RESTORE)
+            handle.publish_sequence_mit_kd(SEQUENCE_GAIN_RESTORE)
+            self.get_logger().info(f'Restored omega_max/kp/kd for {namespace}')
 
     def _any_soft_mode(self) -> bool:
         for handle in self._handles.values():
@@ -489,18 +553,50 @@ class JointPositionSequence(Node):
             target_rad = clamp_hip_despos(target_rad, self._hip_angle_limit_rad)
         return target_rad
 
-    def _publish_waypoint(self, waypoint: Waypoint) -> dict[str, float]:
+    def _publish_motor_overrides(
+        self, namespace: str, handle: NamespaceHandle, command: MotorWaypoint
+    ) -> bool:
+        """Publish optional omega_max/kp/kd for one motor. Returns True if any were sent."""
+        published = False
+        if command.omega_max is not None:
+            handle.publish_sequence_omega_max(command.omega_max)
+            published = True
+            self.get_logger().info(
+                f'Waypoint omega_max for {namespace}: {command.omega_max:.3f} motor rad/s'
+            )
+        if command.kp is not None:
+            handle.publish_sequence_mit_kp(command.kp)
+            published = True
+            self.get_logger().info(f'Waypoint kp for {namespace}: {command.kp:.3f}')
+        if command.kd is not None:
+            handle.publish_sequence_mit_kd(command.kd)
+            published = True
+            self.get_logger().info(f'Waypoint kd for {namespace}: {command.kd:.3f}')
+        return published
+
+    def _publish_waypoint(self, waypoint: Waypoint) -> tuple[dict[str, float], set[str]]:
+        """Command waypoint motors; return (targets_rad, namespaces with overrides)."""
         targets_rad: dict[str, float] = {}
-        for namespace, target_deg in waypoint.positions_deg.items():
+        overridden: set[str] = set()
+        pending: list[tuple[str, NamespaceHandle, MotorWaypoint]] = []
+        for namespace, command in waypoint.motors.items():
             handle = self._handles.get(namespace)
             if handle is None:
                 self.get_logger().warn(f'Unknown namespace in waypoint: {namespace}')
                 continue
-            target_rad = self._target_rad_for_namespace(namespace, target_deg)
+            if self._publish_motor_overrides(namespace, handle, command):
+                overridden.add(namespace)
+            pending.append((namespace, handle, command))
+
+        if overridden:
+            time.sleep(0.05)
+
+        for namespace, handle, command in pending:
+            target_rad = self._target_rad_for_namespace(namespace, command.position_deg)
             targets_rad[namespace] = target_rad
             handle.publish_hold_joint(False)
             handle.publish_despos_rad(target_rad)
-        return targets_rad
+        return targets_rad, overridden
 
     def _all_settled(self, targets_rad: dict[str, float]) -> bool:
         for namespace, target_rad in targets_rad.items():
@@ -577,15 +673,12 @@ class JointPositionSequence(Node):
     def _run_sequence(self) -> None:
         self._set_active(True)
         self.get_logger().info(f"Joint sequence started: {self._config.name}")
-        applied_omega_max: set[str] = set()
+        applied_overrides: set[str] = set()
 
         try:
             if self._any_soft_mode():
                 self.get_logger().warn('Sequence refused: soft_mode is active on one or more joints.')
                 return
-
-            applied_omega_max = self._apply_preset_omega_max()
-            time.sleep(0.05)
 
             while rclpy.ok():
                 for index, waypoint in enumerate(self._config.waypoints):
@@ -597,7 +690,8 @@ class JointPositionSequence(Node):
                         return
 
                     self.get_logger().info(f'Waypoint {index + 1}/{len(self._config.waypoints)}')
-                    targets_rad = self._publish_waypoint(waypoint)
+                    targets_rad, overridden = self._publish_waypoint(waypoint)
+                    applied_overrides.update(overridden)
                     if not targets_rad:
                         continue
 
@@ -620,7 +714,7 @@ class JointPositionSequence(Node):
 
             self.get_logger().info('Joint sequence completed.')
         finally:
-            self._restore_omega_max(applied_omega_max)
+            self._restore_sequence_overrides(applied_overrides)
             self._hold_all_at_curpos()
             self._set_active(False)
             with self._sequence_lock:
