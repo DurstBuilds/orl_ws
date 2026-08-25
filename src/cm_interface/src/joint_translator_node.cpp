@@ -15,10 +15,12 @@
 //   mit_kp, mit_kd         — override profile MIT gains on motor_command
 //
 // Subscribes (relative to namespace): motor_total_position, joint_despos,
-// soft_mode, origin_reset, hold_joint, sequence_omega_max. Publishes joint_curpos,
-// motor_command.
+// soft_mode, origin_reset, hold_joint, sequence_omega_max, sequence_mit_kp,
+// sequence_mit_kd. Publishes joint_curpos, motor_command.
 // sequence_omega_max (motor rad/s): > 0 overrides omega_max during joint sequences;
 // <= 0 restores the launch-time baseline.
+// sequence_mit_kp / sequence_mit_kd: >= 0 overrides MIT gains on motor_command;
+// < 0 restores launch-time baselines (0 is a valid gain, so restore is negative).
 // Soft mode: stops publishing motor_command. Post-soft / origin_reset latch waits
 // for unwrapper reset before tracking joint_despos again.
 
@@ -91,6 +93,8 @@ public:
 
     mit_kp_ = declare_parameter<double>("mit_kp", static_cast<double>(profile_.mit_kp));
     mit_kd_ = declare_parameter<double>("mit_kd", static_cast<double>(profile_.mit_kd));
+    baseline_mit_kp_ = mit_kp_;
+    baseline_mit_kd_ = mit_kd_;
     const std::string omega_max_param = declare_parameter<std::string>("omega_max", "auto");
     pd_kp_ = profile_.pd_kp;
     omega_max_ = profile_.omega_max;
@@ -142,6 +146,16 @@ public:
       "sequence_omega_max",
       10,
       std::bind(&JointTranslatorNode::sequence_omega_max_callback, this, std::placeholders::_1));
+
+    sequence_mit_kp_sub_ = create_subscription<std_msgs::msg::Float32>(
+      "sequence_mit_kp",
+      10,
+      std::bind(&JointTranslatorNode::sequence_mit_kp_callback, this, std::placeholders::_1));
+
+    sequence_mit_kd_sub_ = create_subscription<std_msgs::msg::Float32>(
+      "sequence_mit_kd",
+      10,
+      std::bind(&JointTranslatorNode::sequence_mit_kd_callback, this, std::placeholders::_1));
 
     joint_curpos_pub_ = create_publisher<std_msgs::msg::Float32>("joint_curpos", 10);
     motor_command_pub_ = create_publisher<motor_interfaces::msg::MotorCommand>("motor_command", 10);
@@ -377,6 +391,32 @@ private:
       omega_max_, baseline_omega_max_, pdelta_max_);
   }
 
+  void sequence_mit_kp_callback(const std_msgs::msg::Float32::SharedPtr msg)
+  {
+    if (msg->data >= 0.0f) {
+      mit_kp_ = static_cast<double>(msg->data);
+    } else {
+      mit_kp_ = baseline_mit_kp_;
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "sequence_mit_kp=%.3f (baseline=%.3f)",
+      mit_kp_, baseline_mit_kp_);
+  }
+
+  void sequence_mit_kd_callback(const std_msgs::msg::Float32::SharedPtr msg)
+  {
+    if (msg->data >= 0.0f) {
+      mit_kd_ = static_cast<double>(clamp(msg->data, 0.0f, kMitKdMax));
+    } else {
+      mit_kd_ = baseline_mit_kd_;
+    }
+    RCLCPP_INFO(
+      get_logger(),
+      "sequence_mit_kd=%.3f (baseline=%.3f)",
+      mit_kd_, baseline_mit_kd_);
+  }
+
   float clamp_joint_despos(float joint_despos) const
   {
     if (joint_angle_limit_rad_ <= 0.0f) {
@@ -591,6 +631,8 @@ private:
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr origin_reset_sub_;
   rclcpp::Subscription<std_msgs::msg::Bool>::SharedPtr hold_joint_sub_;
   rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sequence_omega_max_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sequence_mit_kp_sub_;
+  rclcpp::Subscription<std_msgs::msg::Float32>::SharedPtr sequence_mit_kd_sub_;
   rclcpp::Publisher<std_msgs::msg::Float32>::SharedPtr joint_curpos_pub_;
   rclcpp::Publisher<motor_interfaces::msg::MotorCommand>::SharedPtr motor_command_pub_;
   rclcpp::TimerBase::SharedPtr loop_timer_;
@@ -619,6 +661,8 @@ private:
   float joint_angle_limit_rad_{0.0f};
   double mit_kp_{0.0};
   double mit_kd_{0.0};
+  double baseline_mit_kp_{0.0};
+  double baseline_mit_kd_{0.0};
 
   bool warned_no_total_{false};
   rclcpp::Time last_warn_time_{0, 0, RCL_ROS_TIME};
