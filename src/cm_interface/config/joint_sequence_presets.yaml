@@ -279,16 +279,16 @@ presets:
           position: 0.0
       - delay_sec: 2.0
         knee_motor:
-          position: 45.0
+          position: 0.0
           kp: 0.0
-          kd: 0.0
+          kd: 0.25
         hip_motor:
           position: 0.0
         wheel_motor1:
           position: 0.0
         wheel_motor2:
           position: 0.0
-      - delay_sec: 1.0
+      - delay_sec: 10.0
         knee_motor:
           position: 0.0
           kp: 50.0
