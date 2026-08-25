@@ -335,9 +335,11 @@ presets:
         hip_motor:
           position: 0.0
         wheel_motor1:
-          position: 360.0
+          position: -360.0
+          omega_max: 2.0
         wheel_motor2:
-          position: 360.0
+          position: -360.0
+          omega_max: 2.0
       - delay_sec: 2.0
         knee_motor:
           position: -45.0
@@ -347,6 +349,8 @@ presets:
         hip_motor:
           position: 0.0
         wheel_motor1:
-          position: 540.0
+          position: -540.0
+          omega_max: 2.0
         wheel_motor2:
-          position: 540.0
+          position: -540.0
+          omega_max: 2.0
