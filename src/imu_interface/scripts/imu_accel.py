@@ -23,7 +23,7 @@ except ImportError as exc:
 
 _G_TO_MS2 = 9.80665
 _MAX_STREAM_HZ = 2000.0
-_DEFAULT_ACCEL_RANGE_G = 64
+_DEFAULT_ACCEL_RANGE_G = 16
 
 
 def _accel_components(value) -> tuple[float, float, float] | None:

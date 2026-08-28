@@ -48,10 +48,10 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument(
             'accel_range_g',
-            default_value='64',
+            default_value='16',
             description=(
                 'Accelerometer full-scale in g. TSS-DL3 Accel1 is ±2/4/8/16 g; Accel2 is '
-                '±32/64/128/256/320 g. Default 64 uses the high-g chip.'
+                '±32/64/128/256/320 g. Default 16 uses Accel1.'
             ),
         ),
         OpaqueFunction(function=_launch_setup),
