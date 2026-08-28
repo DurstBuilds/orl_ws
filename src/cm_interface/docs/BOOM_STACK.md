@@ -221,8 +221,7 @@ ros2 param set /boom_joystick_control_node stick_deadzone 0.2
 | Argument | Default | Description |
 |----------|---------|-------------|
 | `enable_IMU` | `false` | Launch `imu_accel` (`IMU_Accel`). Serial port auto-detects a Yost TSS USB sensor. |
-| `enable_logging` | `false` | Launch `psu_telemetry` and record all stack `motor_state`, `motor_command`, `joint_curpos`, and `power_supply/*` topics. Also records `/IMU_Acceleration` when `enable_IMU` is true. |
-| `psu_serial_port` | `/dev/ttyACM0` | PSU USB serial device (only when logging is on) |
+| `enable_logging` | `false` | Record all stack `motor_state`, `motor_command`, and `joint_curpos` topics. Also records `/IMU_Acceleration` when `enable_IMU` is true. |
 | `bag_output_uri` | `boom_stack_bag` | Base name; auto-increments `_0`, `_1`, … |
 | `bag_output_dir` | `.` | Directory for bag output |
 | `bag_storage_id` | `mcap` | Rosbag storage plugin |

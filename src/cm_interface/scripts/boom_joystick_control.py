@@ -26,8 +26,8 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter
-from rclpy.parameter_client import SyncParametersClient
+from rclpy.parameter import Parameter, parameter_value_to_python
+from rclpy.parameter_client import AsyncParameterClient
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
 
@@ -336,8 +336,8 @@ class BoomJoystickControl(Node):
         self._sequence_active = False
         self._using_test_kp = False
         self._standard_kp: Optional[float] = None
-        self._knee_param_client = SyncParametersClient(self, knee_translator_node)
         self._knee_translator_node = knee_translator_node
+        self._knee_param_client = AsyncParameterClient(self, knee_translator_node)
         self._load_standard_kp()
 
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
@@ -370,9 +370,19 @@ class BoomJoystickControl(Node):
             f'(standard={standard_kp_text}, test={self._test_kp:.3f})'
         )
 
+    def _await_param_future(self, future, *, timeout_sec: Optional[float] = None):
+        """Block until an AsyncParameterClient future completes."""
+        rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)
+        if not future.done():
+            return None
+        exc = future.exception()
+        if exc is not None:
+            raise exc
+        return future.result()
+
     def _load_standard_kp(self) -> bool:
         """Read baseline mit_kp from knee joint_translator. Returns True on success."""
-        if not self._knee_param_client.wait_for_service(
+        if not self._knee_param_client.wait_for_services(
             timeout_sec=KNEE_TRANSLATOR_PARAM_TIMEOUT_SEC
         ):
             self.get_logger().warn(
@@ -382,16 +392,18 @@ class BoomJoystickControl(Node):
             return False
 
         try:
-            params = self._knee_param_client.get_parameters(['mit_kp'])
+            response = self._await_param_future(
+                self._knee_param_client.get_parameters(['mit_kp'])
+            )
         except Exception as exc:
             self.get_logger().warn(f'Failed to read knee mit_kp: {exc}')
             return False
 
-        if not params or params[0].type_ == Parameter.Type.NOT_SET:
+        if response is None or not response.values:
             self.get_logger().warn('knee mit_kp parameter not set')
             return False
 
-        self._standard_kp = float(params[0].value)
+        self._standard_kp = float(parameter_value_to_python(response.values[0]))
         self.get_logger().info(
             f'Knee standard mit_kp={self._standard_kp:.3f} from {self._knee_translator_node}'
         )
@@ -399,17 +411,27 @@ class BoomJoystickControl(Node):
 
     def _set_knee_mit_kp(self, kp: float) -> bool:
         """Set knee joint_translator mit_kp live."""
-        if not self._knee_param_client.service_is_ready():
-            if not self._knee_param_client.wait_for_service(timeout_sec=1.0):
-                self.get_logger().warn('Knee translator param service unavailable')
-                return False
+        if not self._knee_param_client.wait_for_services(timeout_sec=1.0):
+            self.get_logger().warn('Knee translator param service unavailable')
+            return False
 
-        results = self._knee_param_client.set_parameters([
-            Parameter('mit_kp', Parameter.Type.DOUBLE, float(kp)),
-        ])
-        if not results or not results[0].successful:
-            reason = results[0].reason if results else 'no response'
-            self.get_logger().warn(f'Failed to set knee mit_kp: {reason}')
+        try:
+            response = self._await_param_future(
+                self._knee_param_client.set_parameters([
+                    Parameter('mit_kp', Parameter.Type.DOUBLE, float(kp)),
+                ])
+            )
+        except Exception as exc:
+            self.get_logger().warn(f'Failed to set knee mit_kp: {exc}')
+            return False
+
+        if response is None or not response.results:
+            self.get_logger().warn('Failed to set knee mit_kp: no response')
+            return False
+        if not response.results[0].successful:
+            self.get_logger().warn(
+                f'Failed to set knee mit_kp: {response.results[0].reason}'
+            )
             return False
         return True
 
