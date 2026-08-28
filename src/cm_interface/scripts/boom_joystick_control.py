@@ -26,7 +26,7 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
-from rclpy.parameter import Parameter, parameter_value_to_python
+from rclpy.parameter import parameter_value_to_python
 from rclpy.parameter_client import AsyncParameterClient
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
@@ -337,6 +337,10 @@ class BoomJoystickControl(Node):
         self._using_test_kp = False
         self._standard_kp: Optional[float] = None
         self._knee_translator_node = knee_translator_node
+        knee_namespace = '/' + knee_translator_node.strip('/').split('/')[0]
+        self._knee_mit_kp_publisher = self.create_publisher(
+            Float32, f'{knee_namespace}/sequence_mit_kp', 10
+        )
         self._knee_param_client = AsyncParameterClient(self, knee_translator_node)
         self._load_standard_kp()
 
@@ -371,7 +375,7 @@ class BoomJoystickControl(Node):
         )
 
     def _await_param_future(self, future, *, timeout_sec: Optional[float] = None):
-        """Block until an AsyncParameterClient future completes."""
+        """Block until an AsyncParameterClient future completes (init only, before spin)."""
         rclpy.spin_until_future_complete(self, future, timeout_sec=timeout_sec)
         if not future.done():
             return None
@@ -381,7 +385,7 @@ class BoomJoystickControl(Node):
         return future.result()
 
     def _load_standard_kp(self) -> bool:
-        """Read baseline mit_kp from knee joint_translator. Returns True on success."""
+        """Read baseline mit_kp from knee joint_translator (blocking; call before spin)."""
         if not self._knee_param_client.wait_for_services(
             timeout_sec=KNEE_TRANSLATOR_PARAM_TIMEOUT_SEC
         ):
@@ -409,41 +413,51 @@ class BoomJoystickControl(Node):
         )
         return True
 
-    def _set_knee_mit_kp(self, kp: float) -> bool:
-        """Set knee joint_translator mit_kp live."""
+    def _load_standard_kp_async(self, on_ready) -> None:
+        """Read baseline mit_kp without blocking the executor (for joy callback retry)."""
         if not self._knee_param_client.wait_for_services(timeout_sec=1.0):
             self.get_logger().warn('Knee translator param service unavailable')
-            return False
-
-        try:
-            response = self._await_param_future(
-                self._knee_param_client.set_parameters([
-                    Parameter('mit_kp', Parameter.Type.DOUBLE, float(kp)),
-                ])
-            )
-        except Exception as exc:
-            self.get_logger().warn(f'Failed to set knee mit_kp: {exc}')
-            return False
-
-        if response is None or not response.results:
-            self.get_logger().warn('Failed to set knee mit_kp: no response')
-            return False
-        if not response.results[0].successful:
-            self.get_logger().warn(
-                f'Failed to set knee mit_kp: {response.results[0].reason}'
-            )
-            return False
-        return True
-
-    def _toggle_test_kp(self) -> None:
-        if self._standard_kp is None and not self._load_standard_kp():
             return
 
+        future = self._knee_param_client.get_parameters(['mit_kp'])
+
+        def _on_done(done_future) -> None:
+            try:
+                response = done_future.result()
+            except Exception as exc:
+                self.get_logger().warn(f'Failed to read knee mit_kp: {exc}')
+                return
+            if response is None or not response.values:
+                self.get_logger().warn('knee mit_kp parameter not set')
+                return
+            self._standard_kp = float(parameter_value_to_python(response.values[0]))
+            self.get_logger().info(
+                f'Knee standard mit_kp={self._standard_kp:.3f} from {self._knee_translator_node}'
+            )
+            on_ready()
+
+        future.add_done_callback(_on_done)
+
+    def _set_knee_mit_kp(self, kp: float, *, mode: str) -> None:
+        """Publish knee MIT Kp override (non-blocking; safe from joy callbacks)."""
+        msg = Float32()
+        msg.data = float(kp)
+        self._knee_mit_kp_publisher.publish(msg)
+        self.get_logger().info(f'Knee mit_kp={kp:.3f} ({mode})')
+
+    def _apply_test_kp_toggle(self) -> None:
+        if self._standard_kp is None:
+            return
         self._using_test_kp = not self._using_test_kp
         target_kp = self._test_kp if self._using_test_kp else self._standard_kp
         mode = 'test' if self._using_test_kp else 'standard'
-        if self._set_knee_mit_kp(target_kp):
-            self.get_logger().info(f'Knee mit_kp={target_kp:.3f} ({mode})')
+        self._set_knee_mit_kp(target_kp, mode=mode)
+
+    def _toggle_test_kp(self) -> None:
+        if self._standard_kp is None:
+            self._load_standard_kp_async(self._apply_test_kp_toggle)
+            return
+        self._apply_test_kp_toggle()
 
     def _publish_despos(self, target: NamespaceTarget, despos: float) -> None:
         if 'hip' in target.namespace_lower:
