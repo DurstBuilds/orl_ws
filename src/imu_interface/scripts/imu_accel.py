@@ -99,13 +99,13 @@ class ImuAccelNode(Node):
         self.declare_parameter('topic', 'IMU_Acceleration')
         self.declare_parameter('frame_id', 'imu_link')
         self.declare_parameter('serial_port', '')
-        self.declare_parameter('accel_range_g', float(_DEFAULT_ACCEL_RANGE_G))
+        self.declare_parameter('accel_range_g', _DEFAULT_ACCEL_RANGE_G)
 
         rate_hz = float(self.get_parameter('rate_hz').value)
         topic = str(self.get_parameter('topic').value)
         self._frame_id = str(self.get_parameter('frame_id').value)
         serial_port = str(self.get_parameter('serial_port').value).strip()
-        accel_range_g = int(round(float(self.get_parameter('accel_range_g').value)))
+        accel_range_g = int(self.get_parameter('accel_range_g').value)
 
         if rate_hz <= 0.0 or rate_hz > _MAX_STREAM_HZ:
             self.get_logger().error(
