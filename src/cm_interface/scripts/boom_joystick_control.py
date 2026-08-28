@@ -6,8 +6,8 @@ Namespace substring rules (case-insensitive):
   'wheel' — left stick X (both wheel motors share the same stick)
   'hip'   — buttons 4/5 (neg/pos); joint_despos clamped to hip_angle_limit_deg
 
-Button 1 toggles soft_mode on all namespaces. Button 2 / X toggles soft_mode on knee
-namespace(s) only (same damping + set-origin re-latch path as global soft stop).
+Button 1 toggles soft_mode on all namespaces. Button 2 / X toggles knee MIT Kp between
+the joint_translator baseline (read at startup) and test_kp.
 hold_joint is published once at startup (true), on rising edge when stick control
 begins (false), and on falling edge when control returns to neutral (true, with despos
 snapped to joint_curpos).
@@ -15,8 +15,9 @@ snapped to joint_curpos).
 TWEAK at runtime via ros2 param (see BoomJoystickControl.__init__):
   knee_velocity_constant, wheel_velocity_constant, hip_velocity_constant
   right_stick_x_axis, left_stick_x_axis, stick_deadzone
-  soft_mode_button_index, knee_soft_mode_button_index, hip_neg_button_index, hip_pos_button_index
-  namespaces, namespace_gear_ratios, publish_hz, hip_angle_limit_deg
+  soft_mode_button_index, test_kp_button_index, hip_neg_button_index, hip_pos_button_index
+  test_kp, knee_translator_node, namespaces, namespace_gear_ratios, publish_hz,
+  hip_angle_limit_deg
 """
 
 import math
@@ -25,8 +26,12 @@ from typing import Optional
 
 import rclpy
 from rclpy.node import Node
+from rclpy.parameter import Parameter
+from rclpy.parameter_client import SyncParametersClient
 from sensor_msgs.msg import Joy
 from std_msgs.msg import Bool, Float32
+
+KNEE_TRANSLATOR_PARAM_TIMEOUT_SEC = 5.0
 
 
 def clamp_hip_despos(despos: float, limit_rad: float) -> float:
@@ -36,14 +41,15 @@ def clamp_hip_despos(despos: float, limit_rad: float) -> float:
 
 class JoyState:
     """Thread-safe cache of latest joystick axes and button edges."""
+
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._right_x = 0.0
         self._left_x = 0.0
         self._global_soft_mode = False
         self._prev_soft_mode_button_pressed = False
-        self._knee_soft_mode = False
-        self._prev_knee_soft_mode_button_pressed = False
+        self._prev_test_kp_button_pressed = False
+        self._test_kp_rising = False
         self._hip_neg_pressed = False
         self._hip_pos_pressed = False
 
@@ -53,7 +59,7 @@ class JoyState:
         right_x_axis: int,
         left_x_axis: int,
         soft_mode_button_index: int,
-        knee_soft_mode_button_index: int,
+        test_kp_button_index: int,
         hip_neg_button_index: int,
         hip_pos_button_index: int,
     ) -> None:
@@ -63,9 +69,9 @@ class JoyState:
             soft_mode_button_index < len(msg.buttons) and
             msg.buttons[soft_mode_button_index] == 1
         )
-        knee_soft_mode_button_pressed = (
-            knee_soft_mode_button_index < len(msg.buttons) and
-            msg.buttons[knee_soft_mode_button_index] == 1
+        test_kp_button_pressed = (
+            test_kp_button_index < len(msg.buttons) and
+            msg.buttons[test_kp_button_index] == 1
         )
         hip_neg_pressed = (
             hip_neg_button_index < len(msg.buttons) and
@@ -84,12 +90,10 @@ class JoyState:
             if soft_mode_button_pressed and not self._prev_soft_mode_button_pressed:
                 self._global_soft_mode = not self._global_soft_mode
             self._prev_soft_mode_button_pressed = soft_mode_button_pressed
-            if (
-                knee_soft_mode_button_pressed and
-                not self._prev_knee_soft_mode_button_pressed
-            ):
-                self._knee_soft_mode = not self._knee_soft_mode
-            self._prev_knee_soft_mode_button_pressed = knee_soft_mode_button_pressed
+            self._test_kp_rising = (
+                test_kp_button_pressed and not self._prev_test_kp_button_pressed
+            )
+            self._prev_test_kp_button_pressed = test_kp_button_pressed
 
     @staticmethod
     def _read_axis(msg: Joy, axis_index: int) -> Optional[float]:
@@ -97,16 +101,21 @@ class JoyState:
             return float(msg.axes[axis_index])
         return None
 
-    def get_state(self) -> tuple[float, float, bool, bool, bool, bool]:
+    def get_state(self) -> tuple[float, float, bool, bool, bool]:
         with self._lock:
             return (
                 self._right_x,
                 self._left_x,
                 self._global_soft_mode,
-                self._knee_soft_mode,
                 self._hip_neg_pressed,
                 self._hip_pos_pressed,
             )
+
+    def consume_test_kp_rising(self) -> bool:
+        with self._lock:
+            rising = self._test_kp_rising
+            self._test_kp_rising = False
+            return rising
 
 
 def parse_namespace_gear_ratios(
@@ -215,7 +224,7 @@ class BoomJoystickControl(Node):
         self.declare_parameter('right_stick_x_axis', 3)  # TWEAK: knee axis index
         self.declare_parameter('left_stick_x_axis', 0)  # TWEAK: wheel axis index
         self.declare_parameter('soft_mode_button_index', 1)  # TWEAK: toggle on rising edge
-        self.declare_parameter('knee_soft_mode_button_index', 2)  # TWEAK: Xbox X; knee soft_mode
+        self.declare_parameter('test_kp_button_index', 2)  # TWEAK: Xbox X; knee MIT Kp toggle
         self.declare_parameter('hip_neg_button_index', 5)  # TWEAK
         self.declare_parameter('hip_pos_button_index', 4)  # TWEAK
         self.declare_parameter('knee_velocity_constant', 0.2)  # TWEAK: rad per tick before /gear_ratio
@@ -225,7 +234,10 @@ class BoomJoystickControl(Node):
         self.declare_parameter('stick_deadzone', 0.05)  # TWEAK
         self.declare_parameter('namespaces', '')
         self.declare_parameter('namespace_gear_ratios', '')
-        # Back-compat alias for earlier knee_enable_button_index launches.
+        self.declare_parameter('test_kp', 5.0)
+        self.declare_parameter('knee_translator_node', 'knee_motor/joint_translator_node')
+        # Back-compat aliases for earlier knee_soft_mode / knee_enable button launches.
+        self.declare_parameter('knee_soft_mode_button_index', 2)
         self.declare_parameter('knee_enable_button_index', 2)
 
         joy_topic = self.get_parameter('joy_topic').get_parameter_value().string_value
@@ -252,15 +264,20 @@ class BoomJoystickControl(Node):
         self._soft_mode_button_index = (
             self.get_parameter('soft_mode_button_index').get_parameter_value().integer_value
         )
+        test_kp_button_index = (
+            self.get_parameter('test_kp_button_index').get_parameter_value().integer_value
+        )
         knee_soft_mode_button_index = (
             self.get_parameter('knee_soft_mode_button_index').get_parameter_value().integer_value
         )
         knee_enable_button_index = (
             self.get_parameter('knee_enable_button_index').get_parameter_value().integer_value
         )
-        self._knee_soft_mode_button_index = knee_soft_mode_button_index
+        self._test_kp_button_index = test_kp_button_index
+        if knee_soft_mode_button_index != 2:
+            self._test_kp_button_index = knee_soft_mode_button_index
         if knee_enable_button_index != 2:
-            self._knee_soft_mode_button_index = knee_enable_button_index
+            self._test_kp_button_index = knee_enable_button_index
         self._hip_neg_button_index = (
             self.get_parameter('hip_neg_button_index').get_parameter_value().integer_value
         )
@@ -288,6 +305,16 @@ class BoomJoystickControl(Node):
         self._stick_deadzone = (
             self.get_parameter('stick_deadzone').get_parameter_value().double_value
         )
+        self._test_kp = self.get_parameter('test_kp').get_parameter_value().double_value
+        if self._test_kp < 0.0:
+            raise ValueError('test_kp must be >= 0')
+        knee_translator_node = (
+            self.get_parameter('knee_translator_node').get_parameter_value().string_value.strip()
+        )
+        if not knee_translator_node:
+            raise ValueError('knee_translator_node must be non-empty')
+        if not knee_translator_node.startswith('/'):
+            knee_translator_node = f'/{knee_translator_node}'
 
         ns_param = self.get_parameter('namespaces').get_parameter_value().string_value
         ns_list = [s.strip() for s in ns_param.split(',') if s.strip()] if ns_param.strip() else ['']
@@ -307,6 +334,12 @@ class BoomJoystickControl(Node):
         self._warned_waiting_curpos: set[str] = set()
 
         self._sequence_active = False
+        self._using_test_kp = False
+        self._standard_kp: Optional[float] = None
+        self._knee_param_client = SyncParametersClient(self, knee_translator_node)
+        self._knee_translator_node = knee_translator_node
+        self._load_standard_kp()
+
         self.create_subscription(Joy, joy_topic, self._joy_callback, 10)
         self.create_subscription(
             Bool, '/joint_sequence/active', self._sequence_active_callback, 10
@@ -319,6 +352,9 @@ class BoomJoystickControl(Node):
         despos_topics = ', '.join(t.despos_publisher.topic_name for t in self._targets)
         soft_mode_topics = ', '.join(t.soft_mode_publisher.topic_name for t in self._targets)
         hold_joint_topics = ', '.join(t.hold_joint_publisher.topic_name for t in self._targets)
+        standard_kp_text = (
+            f'{self._standard_kp:.3f}' if self._standard_kp is not None else 'unavailable'
+        )
         self.get_logger().info(
             f'Subscribed to {joy_topic}; publishing to [{despos_topics}] at {publish_hz:.0f} Hz.\n'
             f'  default gear_ratio={default_gear_ratio:.4f}; '
@@ -330,17 +366,62 @@ class BoomJoystickControl(Node):
             f'  Hip buttons -> delta/tick (base {self._hip_velocity_base:.4f} / gear_ratio)\n'
             f'  Hip joint_despos clamped to +/-{hip_angle_limit_deg:.1f} deg\n'
             f'  Button[{self._soft_mode_button_index}] toggles soft_mode (all)\n'
-            f'  Button[{self._knee_soft_mode_button_index}] toggles knee soft_mode')
+            f'  Button[{self._test_kp_button_index}] toggles knee MIT Kp '
+            f'(standard={standard_kp_text}, test={self._test_kp:.3f})'
+        )
 
-    @staticmethod
-    def _effective_soft_mode(
-        target: NamespaceTarget,
-        global_soft_mode: bool,
-        knee_soft_mode: bool,
-    ) -> bool:
-        if 'knee' in target.namespace_lower:
-            return global_soft_mode or knee_soft_mode
-        return global_soft_mode
+    def _load_standard_kp(self) -> bool:
+        """Read baseline mit_kp from knee joint_translator. Returns True on success."""
+        if not self._knee_param_client.wait_for_service(
+            timeout_sec=KNEE_TRANSLATOR_PARAM_TIMEOUT_SEC
+        ):
+            self.get_logger().warn(
+                f'Knee translator param service not ready ({self._knee_translator_node}); '
+                'will retry on first X press.'
+            )
+            return False
+
+        try:
+            params = self._knee_param_client.get_parameters(['mit_kp'])
+        except Exception as exc:
+            self.get_logger().warn(f'Failed to read knee mit_kp: {exc}')
+            return False
+
+        if not params or params[0].type_ == Parameter.Type.NOT_SET:
+            self.get_logger().warn('knee mit_kp parameter not set')
+            return False
+
+        self._standard_kp = float(params[0].value)
+        self.get_logger().info(
+            f'Knee standard mit_kp={self._standard_kp:.3f} from {self._knee_translator_node}'
+        )
+        return True
+
+    def _set_knee_mit_kp(self, kp: float) -> bool:
+        """Set knee joint_translator mit_kp live."""
+        if not self._knee_param_client.service_is_ready():
+            if not self._knee_param_client.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn('Knee translator param service unavailable')
+                return False
+
+        results = self._knee_param_client.set_parameters([
+            Parameter('mit_kp', Parameter.Type.DOUBLE, float(kp)),
+        ])
+        if not results or not results[0].successful:
+            reason = results[0].reason if results else 'no response'
+            self.get_logger().warn(f'Failed to set knee mit_kp: {reason}')
+            return False
+        return True
+
+    def _toggle_test_kp(self) -> None:
+        if self._standard_kp is None and not self._load_standard_kp():
+            return
+
+        self._using_test_kp = not self._using_test_kp
+        target_kp = self._test_kp if self._using_test_kp else self._standard_kp
+        mode = 'test' if self._using_test_kp else 'standard'
+        if self._set_knee_mit_kp(target_kp):
+            self.get_logger().info(f'Knee mit_kp={target_kp:.3f} ({mode})')
 
     def _publish_despos(self, target: NamespaceTarget, despos: float) -> None:
         if 'hip' in target.namespace_lower:
@@ -356,29 +437,28 @@ class BoomJoystickControl(Node):
             self._right_x_axis,
             self._left_x_axis,
             self._soft_mode_button_index,
-            self._knee_soft_mode_button_index,
+            self._test_kp_button_index,
             self._hip_neg_button_index,
             self._hip_pos_button_index,
         )
+        if self._sequence_active:
+            return
+        if self._state.consume_test_kp_rising():
+            self._toggle_test_kp()
 
     def _publish_timer_callback(self) -> None:
         """Map cached joy state to despos deltas; hold_joint on control edges only."""
-        right_x, left_x, global_soft_mode, knee_soft_mode, hip_neg, hip_pos = (
-            self._state.get_state()
-        )
+        right_x, left_x, global_soft_mode, hip_neg, hip_pos = self._state.get_state()
 
         for target in self._targets:
-            effective_soft_mode = self._effective_soft_mode(
-                target, global_soft_mode, knee_soft_mode
-            )
-            if effective_soft_mode == target.last_soft_mode:
+            if global_soft_mode == target.last_soft_mode:
                 continue
 
-            target.publish_soft_mode(effective_soft_mode)
+            target.publish_soft_mode(global_soft_mode)
             ns_label = target.namespace or '(root)'
-            self.get_logger().info(f'{ns_label} soft_mode={effective_soft_mode}')
+            self.get_logger().info(f'{ns_label} soft_mode={global_soft_mode}')
 
-            if target.last_soft_mode and not effective_soft_mode:
+            if target.last_soft_mode and not global_soft_mode:
                 has_curpos, curpos = target.get_curpos()
                 if has_curpos:
                     with target.lock:
@@ -387,7 +467,7 @@ class BoomJoystickControl(Node):
                     target.publish_hold_joint(True)
                     target.control_was_active = False
 
-            target.last_soft_mode = effective_soft_mode
+            target.last_soft_mode = global_soft_mode
 
         if self._sequence_active:
             return
@@ -402,7 +482,7 @@ class BoomJoystickControl(Node):
                     self._warned_waiting_curpos.add(target.namespace)
                 continue
 
-            if self._effective_soft_mode(target, global_soft_mode, knee_soft_mode):
+            if global_soft_mode:
                 if target.control_was_active:
                     target.publish_hold_joint(True)
                     with target.lock:

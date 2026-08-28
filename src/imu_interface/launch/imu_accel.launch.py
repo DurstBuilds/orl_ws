@@ -27,7 +27,7 @@ def generate_launch_description():
     return LaunchDescription([
         DeclareLaunchArgument(
             'rate_hz',
-            default_value='100.0',
+            default_value='200.0',
             description='IMU recording / stream frequency in Hz (max 2000).',
         ),
         DeclareLaunchArgument(

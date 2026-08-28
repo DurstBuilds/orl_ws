@@ -43,6 +43,8 @@ PSU_TELEMETRY_TOPICS = (
     '/power_supply/power',
 )
 
+IMU_ACCEL_TOPIC = '/IMU_Acceleration'
+
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, GroupAction, OpaqueFunction
 from launch.substitutions import LaunchConfiguration
@@ -53,6 +55,12 @@ from launch_ros.parameter_descriptions import ParameterValue
 def _logging_enabled(context) -> bool:
     """True when enable_logging launch arg is true/1/yes."""
     value = LaunchConfiguration('enable_logging').perform(context).strip().lower()
+    return value in ('true', '1', 'yes')
+
+
+def _imu_enabled(context) -> bool:
+    """True when enable_IMU launch arg is true/1/yes."""
+    value = LaunchConfiguration('enable_IMU').perform(context).strip().lower()
     return value in ('true', '1', 'yes')
 
 
@@ -316,6 +324,8 @@ def _launch_setup(context, *args, **kwargs):
             'namespace_gear_ratios': LaunchConfiguration('namespace_gear_ratios'),
             'publish_hz': ParameterValue(LaunchConfiguration('publish_hz'), value_type=float),
             'hip_angle_limit_deg': hip_angle_limit_deg,
+            'test_kp': ParameterValue(LaunchConfiguration('test_kp'), value_type=float),
+            'knee_translator_node': 'knee_motor/joint_translator_node',
         }],
     )
 
@@ -334,6 +344,22 @@ def _launch_setup(context, *args, **kwargs):
                     'loop': ParameterValue(
                         LaunchConfiguration('joint_sequence_loop'), value_type=bool
                     ),
+                }],
+            )
+        )
+
+    if _imu_enabled(context):
+        actions.append(
+            Node(
+                package='imu_interface',
+                executable='imu_accel',
+                name='IMU_Accel',
+                output='screen',
+                parameters=[{
+                    'rate_hz': 100.0,
+                    'topic': 'IMU_Acceleration',
+                    'frame_id': 'imu_link',
+                    'serial_port': '',
                 }],
             )
         )
@@ -375,6 +401,8 @@ def _launch_setup(context, *args, **kwargs):
         bag_topics.extend(MOTOR_COMMAND_TOPICS)
         bag_topics.extend(JOINT_CURPOS_TOPICS)
         bag_topics.extend(PSU_TELEMETRY_TOPICS)
+        if _imu_enabled(context):
+            bag_topics.append(IMU_ACCEL_TOPIC)
         print(
             f'[boom_stack] enable_logging: psu_telemetry + recording to {bag_root}/{bag_uri} '
             f'({bag_uri}_0.mcap inside bag directory when using mcap)'
@@ -433,6 +461,14 @@ def generate_launch_description():
             'publish_hz',
             default_value='50.0',
             description='boom_joystick_control publish rate (Hz).',
+        ),
+        DeclareLaunchArgument(
+            'test_kp',
+            default_value='5.0',
+            description=(
+                'Knee MIT Kp when Xbox X toggles test mode '
+                '(standard is joint_translator mit_kp at startup).'
+            ),
         ),
         DeclareLaunchArgument(
             'hip_angle_limit_deg',
@@ -537,11 +573,20 @@ def generate_launch_description():
             description='Repeat joint sequence waypoints after the last step.',
         ),
         DeclareLaunchArgument(
+            'enable_IMU',
+            default_value='false',
+            description=(
+                'If true, launch imu_accel (IMU_Accel). When enable_logging is also true, '
+                'record /IMU_Acceleration in the bag.'
+            ),
+        ),
+        DeclareLaunchArgument(
             'enable_logging',
             default_value='false',
             description=(
                 'If true, launch psu_telemetry and ros2 bag record on all stack motor_state, '
-                'motor_command, joint_curpos, and power_supply telemetry topics.'
+                'motor_command, joint_curpos, and power_supply telemetry topics. '
+                'Also records /IMU_Acceleration when enable_IMU is true.'
             ),
         ),
         DeclareLaunchArgument(

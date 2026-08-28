@@ -220,7 +220,8 @@ ros2 param set /boom_joystick_control_node stick_deadzone 0.2
 
 | Argument | Default | Description |
 |----------|---------|-------------|
-| `enable_logging` | `false` | Launch `psu_telemetry` and record all stack `motor_state`, `motor_command`, `joint_curpos`, and `power_supply/*` topics |
+| `enable_IMU` | `false` | Launch `imu_accel` (`IMU_Accel`). Serial port auto-detects a Yost TSS USB sensor. |
+| `enable_logging` | `false` | Launch `psu_telemetry` and record all stack `motor_state`, `motor_command`, `joint_curpos`, and `power_supply/*` topics. Also records `/IMU_Acceleration` when `enable_IMU` is true. |
 | `psu_serial_port` | `/dev/ttyACM0` | PSU USB serial device (only when logging is on) |
 | `bag_output_uri` | `boom_stack_bag` | Base name; auto-increments `_0`, `_1`, … |
 | `bag_output_dir` | `.` | Directory for bag output |
@@ -230,6 +231,12 @@ Example:
 
 ```bash
 ros2 launch cm_interface boom_stack.launch.py enable_logging:=true bag_output_dir:=./bags
+```
+
+With IMU streaming and bag recording:
+
+```bash
+ros2 launch cm_interface boom_stack.launch.py enable_IMU:=true enable_logging:=true bag_output_dir:=./bags
 ```
 
 ## Teleop controls
@@ -257,7 +264,7 @@ ros2 launch cm_interface boom_stack.launch.py enable_logging:=true bag_output_di
 | `soft_mode` | `std_msgs/Bool` | `true` → damping-only at motor; off triggers set-origin + despos latch |
 | `origin_reset` | `std_msgs/Bool` | Gateway publishes `true` after set-origin; unwrapper resets total, translator re-latches despos |
 
-Global: `/joy`.
+Global: `/joy`. With `enable_IMU:=true`: `/IMU_Acceleration` (`imu_interface/ImuAcceleration`).
 
 ## Modes
 

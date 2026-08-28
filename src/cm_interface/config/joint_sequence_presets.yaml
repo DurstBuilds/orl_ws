@@ -354,3 +354,31 @@ presets:
         wheel_motor2:
           position: -540.0
           omega_max: 2.0
+
+  Knee30:
+    position_tolerance_deg: 1.0
+    settle_timeout_sec: 10.0
+    waypoints:
+      - delay_sec: 1.0
+        knee_motor:
+          position: 0.0
+          omega_max: 1.0
+        hip_motor:
+          position: 0.0
+          omega_max: 1.0
+        wheel_motor1:
+          position: 0.0
+          omega_max: 1.0
+        wheel_motor2:
+          position: 0.0
+          omega_max: 1.0
+      - delay_sec: 1.0
+        knee_motor:
+          position: -30.0
+          omega_max: 1.0
+        hip_motor:
+          position: 0.0
+        wheel_motor1:
+          position: 0.0
+        wheel_motor2:
+          position: 0.0

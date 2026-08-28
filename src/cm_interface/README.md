@@ -51,7 +51,7 @@ Requires: `rclcpp`, `rclpy`, `std_msgs`, `sensor_msgs`, `motor_interfaces`, `joy
 
 | Launch file | Purpose |
 |-------------|---------|
-| **boom_stack.launch.py** | Full boom: knee, hip, two wheels, one `joy_node`, one `boom_joystick_control_node`. Optional rosbag logging and joint position test sequence. |
+| **boom_stack.launch.py** | Full boom: knee, hip, two wheels, one `joy_node`, one `boom_joystick_control_node`. Optional IMU, rosbag logging, and joint position test sequence. |
 | **boom_teleop.launch.py** | Single namespaced stack + joy + boom teleop (for one motor at a time). |
 | **motor_stack.launch.py** | Single stack + original `joystick_control` (deadman, right-stick absolute position). |
 | **motor_node_continuous.launch.py** | Motor node only. |
@@ -172,7 +172,7 @@ Toggle from boom teleop (button 1 for all joints, button X for knee only). On so
 
 ## Logging (boom_stack)
 
-See [docs/BOOM_STACK.md](docs/BOOM_STACK.md#logging) for `enable_logging`, bag paths, and recorded topics.
+See [docs/BOOM_STACK.md](docs/BOOM_STACK.md#logging) for `enable_logging`, `enable_IMU`, bag paths, and recorded topics.
 
 ## Other executables
 
