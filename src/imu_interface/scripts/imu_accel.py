@@ -23,6 +23,7 @@ except ImportError as exc:
 
 _G_TO_MS2 = 9.80665
 _MAX_STREAM_HZ = 2000.0
+_DEFAULT_ACCEL_RANGE_G = 64
 
 
 def _accel_components(value) -> tuple[float, float, float] | None:
@@ -38,6 +39,56 @@ def _accel_components(value) -> tuple[float, float, float] | None:
         return None
 
 
+def _parse_int_csv(raw: str) -> list[int]:
+    """Parse a comma-separated integer list from a Yost settings string."""
+    values: list[int] = []
+    for token in raw.split(','):
+        token = token.strip()
+        if not token:
+            continue
+        values.append(int(token))
+    return values
+
+
+def _select_accel_id_for_range(sensor: ThreespaceSensor, range_g: int) -> int:
+    """Return the accel ID whose valid ranges include range_g (smallest max range wins)."""
+    candidates: list[tuple[int, int]] = []
+    for accel_id in sensor.valid_accels:
+        ranges = _parse_int_csv(sensor.readValidRangesAccel(accel_id))
+        if range_g in ranges:
+            candidates.append((max(ranges), accel_id))
+    if not candidates:
+        available = {
+            accel_id: sensor.readValidRangesAccel(accel_id)
+            for accel_id in sensor.valid_accels
+        }
+        raise ValueError(
+            f'No accelerometer supports ±{range_g:g} g. Valid ranges by ID: {available}'
+        )
+    candidates.sort()
+    return candidates[0][1]
+
+
+def _configure_accel_range(sensor: ThreespaceSensor, range_g: int) -> tuple[int, str]:
+    """Set range_accel and primary_accel so GetPrimaryCorrectedAccelVec uses ±range_g.
+
+    Returns the selected chip ID and the primary_accel string after configuration.
+    """
+    accel_id = _select_accel_id_for_range(sensor, range_g)
+    err = sensor.writeRangeAccel(accel_id, range_g)
+    if err:
+        raise RuntimeError(f'writeRangeAccel({accel_id}, {range_g}) failed with error {err}')
+
+    primary = str(accel_id)
+    current_primary = str(sensor.readPrimaryAccel()).strip()
+    current_ids = _parse_int_csv(current_primary) if current_primary else []
+    if current_ids != [accel_id]:
+        err = sensor.writePrimaryAccel(primary)
+        if err:
+            raise RuntimeError(f'writePrimaryAccel({primary!r}) failed with error {err}')
+    return accel_id, str(sensor.readPrimaryAccel()).strip()
+
+
 class ImuAccelNode(Node):
     """ROS node: TSS-DL3 corrected accel in, ImuAcceleration out."""
 
@@ -48,16 +99,21 @@ class ImuAccelNode(Node):
         self.declare_parameter('topic', 'IMU_Acceleration')
         self.declare_parameter('frame_id', 'imu_link')
         self.declare_parameter('serial_port', '')
+        self.declare_parameter('accel_range_g', float(_DEFAULT_ACCEL_RANGE_G))
 
         rate_hz = float(self.get_parameter('rate_hz').value)
         topic = str(self.get_parameter('topic').value)
         self._frame_id = str(self.get_parameter('frame_id').value)
         serial_port = str(self.get_parameter('serial_port').value).strip()
+        accel_range_g = int(round(float(self.get_parameter('accel_range_g').value)))
 
         if rate_hz <= 0.0 or rate_hz > _MAX_STREAM_HZ:
             self.get_logger().error(
                 f'Parameter "rate_hz" must be in (0, {_MAX_STREAM_HZ:.0f}].'
             )
+            raise SystemExit(1)
+        if accel_range_g <= 0:
+            self.get_logger().error('Parameter "accel_range_g" must be > 0.')
             raise SystemExit(1)
 
         stream_hz = max(1, int(round(rate_hz)))
@@ -72,8 +128,17 @@ class ImuAccelNode(Node):
             else:
                 self._sensor = ThreespaceSensor(ThreespaceSerialComClass)
                 port_desc = getattr(self._sensor.com, 'name', 'auto-detect')
-        except (DiscoveryError, SensorConnectionError, ThreespaceError, OSError, ValueError) as exc:
-            self.get_logger().error(f'Failed to open TSS-DL3: {exc}')
+            accel_id, primary = _configure_accel_range(self._sensor, accel_range_g)
+        except (
+            DiscoveryError,
+            SensorConnectionError,
+            ThreespaceError,
+            OSError,
+            ValueError,
+            RuntimeError,
+        ) as exc:
+            self.get_logger().error(f'Failed to open or configure TSS-DL3: {exc}')
+            self._cleanup_sensor()
             raise SystemExit(1) from exc
 
         self._publisher = self.create_publisher(ImuAcceleration, topic, 10)
@@ -95,7 +160,8 @@ class ImuAccelNode(Node):
 
         self.get_logger().info(
             f'Publishing corrected accel at {stream_hz} Hz on {topic} '
-            f'(frame_id={self._frame_id}, port={port_desc})'
+            f'(frame_id={self._frame_id}, port={port_desc}, '
+            f'accel_id={accel_id}, range=±{accel_range_g} g, primary_accel={primary})'
         )
 
     def _on_stream(self, status: ThreespaceStreamingStatus) -> None:

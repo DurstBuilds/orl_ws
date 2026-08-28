@@ -354,6 +354,7 @@ def _launch_setup(context, *args, **kwargs):
                     'topic': 'IMU_Acceleration',
                     'frame_id': 'imu_link',
                     'serial_port': '',
+                    'accel_range_g': 64,
                 }],
             )
         )
