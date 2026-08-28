@@ -355,7 +355,7 @@ presets:
           position: -540.0
           omega_max: 2.0
 
-  Knee30:
+  Knee15:
     position_tolerance_deg: 1.0
     settle_timeout_sec: 10.0
     waypoints:
@@ -374,7 +374,7 @@ presets:
           omega_max: 1.0
       - delay_sec: 1.0
         knee_motor:
-          position: -30.0
+          position: -15.0
           omega_max: 1.0
         hip_motor:
           position: 0.0

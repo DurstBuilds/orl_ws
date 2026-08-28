@@ -350,7 +350,7 @@ def _launch_setup(context, *args, **kwargs):
                 name='IMU_Accel',
                 output='screen',
                 parameters=[{
-                    'rate_hz': 100.0,
+                    'rate_hz': 500.0,
                     'topic': 'IMU_Acceleration',
                     'frame_id': 'imu_link',
                     'serial_port': '',
